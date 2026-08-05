@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default desktop capability for SpecFlowLab",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

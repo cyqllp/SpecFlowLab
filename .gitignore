@@ -1,0 +1,43 @@
+# JavaScript / Vite
+node_modules/
+dist/
+.vite/
+*.log
+
+# Tauri / Rust build output
+src-tauri/target/
+
+# Local operating-system and editor files
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+.idea/
+.vscode/
+
+# Local project data and generated exports
+*.sflproj
+*.sfl.json
+*.sflorigin
+*.opju
+*.csv
+!examples/*.csv
+*.ufs
+!examples/*.ufs
+*.origin-status.json
+*.origin-startup.log
+*.md.bak
+
+# Release binaries and unpacked staging folders belong in GitHub Releases, not
+# the source repository.
+releases/
+!releases/README.md
+releases/*.zip
+releases/**/*.zip
+releases/*.app
+releases/**/*.app
+releases/*.exe
+releases/**/*.exe
+
+# Duplicate local bridge copy
+integrations/origin/*_副本.py

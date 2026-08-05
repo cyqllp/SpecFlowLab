@@ -1,0 +1,333 @@
+export const SUPPORTED_LOCALES = Object.freeze([
+  { code: "en", label: "English" },
+  { code: "zh-CN", label: "简体中文" },
+]);
+
+const STORAGE_KEY = "specflowlab.locale";
+
+const ZH_CN = Object.freeze({
+  Language: "语言",
+  Manual: "使用手册",
+  About: "关于",
+  Close: "关闭",
+  "SpecFlowLab Manual": "SpecFlowLab 使用手册",
+  "How to use the version 1.0 spectroscopy workspace.": "如何使用 1.0 版光谱工作区。",
+  "Recommended workflow": "推荐工作流程",
+  "Import → organize → set analysis range → baseline/chirp treatment → merge or compare → global fitting → save/export.": "导入 → 整理 → 设置分析范围 → 基线/啁啾处理 → 合并或比较 → 全局拟合 → 保存/导出。",
+  "Start a project": "开始项目",
+  "Open an existing .sflproj project, or import CSV, TXT, TSV, ASC, or UFS files. Files imported together enter one dataset folder.": "打开现有 .sflproj 项目，或导入 CSV、TXT、TSV、ASC 或 UFS 文件。同一次导入的文件会进入同一个数据集文件夹。",
+  "Organize datasets": "整理数据集",
+  "Rename datasets, add sample notes, and move datasets between VIS, NIR, IR, or other folders without changing the source files.": "可重命名数据集、添加样品备注，并在 VIS、NIR、IR 或其他文件夹之间移动数据集，而不改变源文件。",
+  "Treat the data": "处理数据",
+  "Set the wavelength and time range for the active folder, then apply Baseline and Chirp as needed. Merge selection becomes available only after treatment.": "为当前文件夹设置波长和时间范围，然后按需应用基线和啁啾校正。完成处理后才可选择数据集进行合并。",
+  "Merge treated spectral ranges": "合并已处理的光谱范围",
+  "Select exactly two treated datasets, click Merge between Chirp and Reset, choose clean retained wavelength ranges, review the spectral preview, and create the derived dataset.": "选择两个已处理数据集，点击啁啾校正与重置之间的“合并”，选择洁净的保留波长范围，检查光谱预览，然后创建派生数据集。",
+  "Compare datasets": "比较数据集",
+  "Use Compare to inspect coordinated kinetics, spectra, EAS, and DAS views with reusable sample styles.": "使用“比较”查看联动的动力学、光谱、EAS 和 DAS，并复用样品样式。",
+  "Run global fitting": "运行全局拟合",
+  "Open Global Fitting, set component starts and IRF options, and review lifetimes, residuals, DAS, EAS, and fit diagnostics.": "打开“全局拟合”，设置组分初值和 IRF 选项，并检查寿命、残差、DAS、EAS 与拟合诊断。",
+  "Save and export": "保存与导出",
+  "Save the complete .sflproj archive, export an AI-ready Markdown summary, or create OriginPro sheets and plots on Windows.": "保存完整的 .sflproj 归档，导出适合 AI 使用的 Markdown 摘要，或在 Windows 上创建 OriginPro 工作表和图表。",
+  "Data integrity": "数据完整性",
+  "Original CSV text and UFS bytes remain unchanged. Treatments, fits, merges, warnings, and provenance are stored separately and reproducibly.": "原始 CSV 文本和 UFS 字节保持不变。处理、拟合、合并、警告与溯源信息将独立、可复现地保存。",
+  "For feedback, open About.": "如需反馈，请打开“关于”。",
+  "About SpecFlowLab": "关于 SpecFlowLab",
+  "Transient-absorption spectroscopy workspace": "瞬态吸收光谱工作区",
+  "SpecFlowLab organizes, treats, compares, merges, fits, and exports time-resolved spectroscopy datasets while preserving source data and analysis provenance.": "SpecFlowLab 用于整理、处理、比较、合并、拟合和导出时间分辨光谱数据，同时保留源数据与分析溯源信息。",
+  Version: "版本",
+  Feedback: "反馈",
+  Copyright: "版权",
+  "© 2026 SpecFlowLab. All rights reserved.": "© 2026 SpecFlowLab。保留所有权利。",
+  "OriginPro is a product of OriginLab Corporation. SpecFlowLab is independent software and is not affiliated with OriginLab.": "OriginPro 是 OriginLab Corporation 的产品。SpecFlowLab 为独立软件，与 OriginLab 无隶属关系。",
+  "Thank you for testing SpecFlowLab.": "感谢您测试 SpecFlowLab。",
+  Project: "项目",
+  "Open Project": "打开项目",
+  "Save Project": "保存项目",
+  Datasets: "数据集",
+  Treated: "已处理",
+  Fitted: "已拟合",
+  "Dataset Folders": "数据集文件夹",
+  "Create dataset folder": "新建数据集文件夹",
+  "Choose File": "选择文件",
+  "Import Data": "导入数据",
+  "Compare...": "比较…",
+  Merge: "合并",
+  "Merge...": "合并…",
+  "Select for merge": "选择用于合并",
+  "Treat the dataset before merging": "请先处理数据集，再进行合并",
+  "Select exactly two treated datasets": "请选择两个已处理数据集",
+  "Merge Spectral Ranges": "合并光谱范围",
+  "Merge spectral ranges": "合并光谱范围",
+  "Align two measurements in time, retain explicit clean wavelength subranges, and create one derived dataset.": "对齐两次测量的时间，明确保留洁净波长子范围，并创建一个派生数据集。",
+  "Lower-wavelength probe": "短波探测数据",
+  "Higher-wavelength probe": "长波探测数据",
+  "Retain min": "保留最小值",
+  "Retain max": "保留最大值",
+  "Time alignment": "时间对齐",
+  "Auto align": "自动对齐",
+  "Reference time grid": "参考时间网格",
+  "Search bound (ps)": "搜索边界 (ps)",
+  "Moving time shift (ps)": "移动数据时间偏移 (ps)",
+  "Convention: moving signal is sampled at reference time + shift. Linear interpolation is restricted to the common time support; no extrapolation is used.": "约定：在参考时间 + 偏移处采样移动数据。线性插值仅限共同时间范围，不进行外推。",
+  "Join and output": "拼接与输出",
+  "Join clean wavelength ranges from two treated datasets on their common measured time support.": "在共同实测时间范围内，拼接两个已处理数据集的洁净波长区间。",
+  "The treated time axes are used directly; no additional time-zero shift is applied.": "直接使用已处理的时间轴，不再额外移动时间零点。",
+  "Lower-wavelength range": "短波范围",
+  "Higher-wavelength range": "长波范围",
+  "Seam wavelength (nm)": "接缝波长 (nm)",
+  "Match one positive amplitude scale": "匹配单一正振幅比例",
+  "Destination folder": "目标文件夹",
+  "New folder: Merged VIS-NIR": "新文件夹：Merged VIS-NIR",
+  "Merged dataset name": "合并数据集名称",
+  "Wavelength overlap": "波长重叠",
+  "Time shift": "时间偏移",
+  "Alignment correlation": "对齐相关性",
+  "Higher-probe scale": "长波探测比例",
+  "Common time points": "共同时间点",
+  "Suggested seam": "建议接缝",
+  "Review before merging": "合并前请检查",
+  "Aligned spectral preview": "已对齐光谱预览",
+  "Spectral preview": "光谱预览",
+  "Linear resampling uses only the measured common time support. The saved matrix uses unsmoothed retained values.": "线性重采样仅使用共同实测时间范围；保存的矩阵使用未平滑的保留数值。",
+  "Smoothing is diagnostic only; the saved matrix uses unsmoothed retained values.": "平滑仅用于诊断；保存的矩阵使用未平滑的保留数值。",
+  "Aligned VIS and NIR spectral preview": "已对齐的 VIS 与 NIR 光谱预览",
+  "Create Merged Dataset": "创建合并数据集",
+  "Both parent datasets and their original CSV/UFS sources remain unchanged.": "两个父数据集及其原始 CSV/UFS 数据均保持不变。",
+  "No wavelength overlap": "无波长重叠",
+  Unavailable: "不可用",
+  "The wavelength ranges do not overlap; automatic time alignment could not use a shared spectral region.": "波长范围没有重叠；自动时间对齐无法使用共享光谱区间。",
+  "The wavelength ranges do not overlap; amplitude matching and seam diagnostics are unavailable.": "波长范围没有重叠；振幅匹配与接缝诊断不可用。",
+  "Automatic time alignment is unavailable; verify the time shift manually.": "自动时间对齐不可用；请手动核对时间偏移。",
+  "The automatic time alignment has low overlap-trace correlation; verify it manually.": "自动时间对齐的重叠轨迹相关性较低；请手动核对。",
+  "The best automatic time shift lies at the search boundary; increase the search range or enter a manual shift.": "最佳自动时间偏移位于搜索边界；请扩大搜索范围或输入手动偏移。",
+  "A positive overlap amplitude scale could not be estimated; scaling is disabled.": "无法估计正值重叠振幅比例；已禁用振幅缩放。",
+  "The overlap amplitude match is weak; consider disabling amplitude scaling.": "重叠区振幅匹配较弱；建议禁用振幅缩放。",
+  "The wavelength overlap is narrower than 5 nm, so seam diagnostics are weak.": "波长重叠小于 5 nm，接缝诊断的可靠性较弱。",
+  "The merged seam has a large normalized discontinuity; refine the wavelength ranges or scaling choice.": "合并接缝存在较大的归一化不连续；请调整波长范围或缩放设置。",
+  "The selected wavelength subranges contain a gap; plots will mark a broken wavelength axis.": "所选波长子范围之间存在间隔；图中将标记断开的波长轴。",
+  "AI Handoff": "AI 交接",
+  "Export MD...": "导出 MD…",
+  Output: "输出",
+  "Sheets and plots": "工作表和图表",
+  "Only sheets": "仅工作表",
+  "Create in OriginPro...": "在 OriginPro 中创建…",
+  "Import files or create a folder such as VIS or IR.": "导入文件，或创建 VIS、NIR、IR 等文件夹。",
+  "Drop datasets here": "将数据集移到此处",
+  "Wavelength min": "最小波长",
+  "Wavelength max": "最大波长",
+  "Time min": "最小时间",
+  "Time max": "最大时间",
+  "Apply Range to Folder": "将范围应用到文件夹",
+  "Imported analysis range. No treatment applied.": "已导入分析范围，尚未应用处理。",
+  "SpecFlowLab workspace": "SpecFlowLab 工作区",
+  "Open a project or import spectroscopy CSV or UFS files. Original source data remains unchanged while analysis versions are treated separately.": "打开项目，或导入光谱 CSV/UFS 文件。原始数据保持不变，处理结果单独保存。",
+  Source: "源数据",
+  Analysis: "分析数据",
+  Time: "时间",
+  "Folder treatment": "文件夹处理",
+  Baseline: "基线",
+  Crop: "裁剪",
+  Chirp: "啁啾校正",
+  Reset: "重置",
+  "Analysis Heatmap": "分析热图",
+  "Rows: time · Columns: wavelength": "行：时间 · 列：波长",
+  "Transient spectroscopy heatmap": "瞬态光谱热图",
+  "Global Fit Summary": "全局拟合摘要",
+  "Set component count, IRF, and nonlinear global-fitting options.": "设置组分数、IRF 和非线性全局拟合选项。",
+  "Global Fitting...": "全局拟合…",
+  "No global fit for this dataset": "此数据集尚无全局拟合",
+  "A successful fit will add time constants and diagnostics here.": "拟合成功后，将在此显示时间常数和诊断信息。",
+  Spectrum: "光谱",
+  "Selected spectrum": "所选光谱",
+  Kinetics: "动力学",
+  "Selected kinetics": "所选动力学",
+  Wavelength: "波长",
+  "Component Spectra": "组分光谱",
+  "Component spectra mode": "组分光谱模式",
+  "EAS and DAS appear after global fitting.": "全局拟合后将显示 EAS 和 DAS。",
+  Component: "组分",
+  "Time constant": "时间常数",
+  Explained: "解释度",
+  Iterations: "迭代次数",
+  Normalize: "归一化",
+  Off: "关闭",
+  "Each max/min": "各自按极值",
+  "Hide IRF-limited": "隐藏 IRF 受限组分",
+  "Hide IRF-limited spectra": "隐藏 IRF 受限光谱",
+  "No IRF-limited components": "无 IRF 受限组分",
+  "Select a plot region to magnify": "框选图中区域进行放大",
+  "Reset plot region": "重置图形范围",
+  "Enlarge plot": "放大图形",
+  "Close enlarged plot": "关闭放大图形",
+  "Rename and sample note...": "重命名和样品备注…",
+  "Move to...": "移动到…",
+  Copy: "复制",
+  Cut: "剪切",
+  "Remove from project...": "从项目中移除…",
+  "Import data into folder...": "导入数据到文件夹…",
+  "Paste dataset": "粘贴数据集",
+  "Rename...": "重命名…",
+  Expand: "展开",
+  Collapse: "折叠",
+  "Delete empty folder": "删除空文件夹",
+  "Plot actions": "图形操作",
+  "PNG image...": "PNG 图像…",
+  "TXT data...": "TXT 数据…",
+  "Select Datasets": "选择数据集",
+  "Choose at least two treated datasets for coordinated comparison.": "请选择至少两个已处理的数据集进行联动比较。",
+  "Select all": "全选",
+  "Include every project dataset": "包含项目中的全部数据集",
+  "Open Comparison": "打开比较",
+  "Dataset Comparison": "数据集比较",
+  "Change Datasets": "更改数据集",
+  Components: "组分",
+  "Kinetics Comparison": "动力学比较",
+  "Spectra Comparison": "光谱比较",
+  "Dataset Lines": "数据集曲线",
+  "One style and one legend entry per sample": "每个样品使用一种样式和一个图例条目",
+  Solid: "实线",
+  Dashed: "虚线",
+  Dotted: "点线",
+  "Global Fitting": "全局拟合",
+  "Fit Active Dataset": "拟合当前数据集",
+  "All Datasets Fitted": "所有数据集均已拟合",
+  "No fit yet": "尚无拟合",
+  "Run a fit to create lifetime, DAS, EAS-preview, overlay, and residual results.": "运行拟合以生成寿命、DAS、EAS 预览、叠加和残差结果。",
+  "Lifetime starts": "寿命初值",
+  Fix: "固定",
+  "Fit Residual Map": "拟合残差图",
+  "Measured minus fitted": "实测值减拟合值",
+  "EAS Preview": "EAS 预览",
+  "New Dataset Folder": "新建数据集文件夹",
+  "Use a test condition such as VIS, NIR, or IR.": "可使用 VIS、NIR、IR 等测试条件作为名称。",
+  "Folder name": "文件夹名称",
+  "Folders live inside this project and do not alter source files.": "文件夹仅存在于当前项目中，不会修改源文件。",
+  "Create Folder": "创建文件夹",
+  "Remove Dataset": "移除数据集",
+  "This removes the dataset and its derived results from the project. The original source file remains untouched.": "这会从项目中移除数据集及其派生结果，原始源文件不会改变。",
+  Cancel: "取消",
+  "Remove from Project": "从项目中移除",
+  "Dataset Details": "数据集详情",
+  "Project metadata for AI handoff and comparison labels.": "用于 AI 交接和比较标签的项目元数据。",
+  "Display name": "显示名称",
+  "Sample note": "样品备注",
+  "Sample identity, environment, excitation conditions, or interpretation context": "样品信息、环境、激发条件或解释背景",
+  "Source file:": "源文件：",
+  "The source filename and original CSV or UFS data remain unchanged.": "源文件名以及原始 CSV/UFS 数据保持不变。",
+  "Save Details": "保存详情",
+  "Move Dataset": "移动数据集",
+  "Destination folder": "目标文件夹",
+  "The treated dataset and fit are preserved.": "已处理数据和拟合结果将被保留。",
+  "No project": "无项目",
+  Completed: "已完成",
+  Saving: "正在保存",
+  Modified: "已修改",
+  Unsaved: "未保存",
+  Saved: "已保存",
+  "Fit available, unresolved": "已有拟合，含未分辨组分",
+  "Fit available": "已有拟合",
+  "Fit available, unresolved analysis dataset": "已有拟合、含未分辨组分的分析数据集",
+  "Fit available analysis dataset": "已有拟合的分析数据集",
+  "Treated analysis dataset": "已处理的分析数据集",
+  "Imported analysis dataset": "已导入的分析数据集",
+  Imported: "已导入",
+  "Analysis range": "分析范围",
+  "Baseline + Chirp": "基线 + 啁啾校正",
+  "(fixed)": "（固定）",
+  "(IRF-limited)": "（受 IRF 限制）",
+  "Wavelength (nm)": "波长 (nm)",
+  "Time (ps)": "时间 (ps)",
+  Measured: "实测",
+  Fit: "拟合",
+  "Normalized ΔOD": "归一化 ΔOD",
+  "Normalized amplitude": "归一化振幅",
+  "No visible component spectra.": "没有可见的组分光谱。",
+  "No finite values available.": "没有可用的有限数值。",
+  "IRF-limited components hidden": "已隐藏 IRF 受限组分",
+  "Could not complete the operation": "无法完成操作",
+  Cancelled: "已取消",
+  "No file or project state was changed.": "未更改文件或项目状态。",
+});
+
+const ZH_PATTERNS = Object.freeze([
+  [/^Version (.+)$/, "版本 $1"],
+  [/^(\d+) selected$/, "$1 个已选择"],
+  [/^Select (.+) for merge$/, "选择 $1 用于合并"],
+  [/^(.+) was added as a derived dataset; both parent sources remain unchanged\.$/, "$1 已作为派生数据集添加；两个父源数据均保持不变。"],
+  [/^Expand (.+)$/, "展开 $1"],
+  [/^Collapse (.+)$/, "收起 $1"],
+  [/^Delete (.+) folder$/, "删除 $1 文件夹"],
+  [/^Drag (.+) to another folder$/, "将 $1 拖到其他文件夹"],
+  [/^Remove (.+) from project$/, "从项目中移除 $1"],
+  [/^(\d+) components$/, "$1 个组分"],
+  [/^(\d+) datasets linked to one comparison object\.$/, "$1 个数据集已联动到同一比较对象。"],
+  [/^(\d+) datasets? imported into one new folder\. Original CSV text or UFS bytes are preserved\.$/, "$1 个数据集已导入到一个新文件夹；原始 CSV 文本或 UFS 字节已保留。"],
+  [/^(\d+) datasets? imported into the selected folder with its stored range and treatments\. Original CSV text or UFS bytes are preserved\.$/, "$1 个数据集已导入到所选文件夹，并沿用其范围和处理设置；原始 CSV 文本或 UFS 字节已保留。"],
+  [/^Batch Global Fitting \((\d+)\)$/, "批量全局拟合（$1）"],
+  [/^(\d+) IRF-limited$/, "$1 个 IRF 受限组分"],
+  [/^(\d+) hidden$/, "已隐藏 $1 个"],
+  [/^(.+) opened with treated datasets and analysis state\.$/, "$1 已打开，包含已处理数据集和分析状态。"],
+  [/^(EAS|DAS) component spectra$/, "$1 组分光谱"],
+  [/^Paste into (.+)$/, "粘贴到 $1"],
+  [/^No compatible (EAS|DAS) results in the selected datasets\.$/, "所选数据集中没有兼容的 $1 结果。"],
+]);
+
+export function normalizeLocale(locale) {
+  return String(locale || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+}
+
+export function preferredLocale() {
+  try {
+    const saved = globalThis.localStorage?.getItem(STORAGE_KEY);
+    if (saved) return normalizeLocale(saved);
+  } catch {
+    // Local storage can be unavailable in hardened WebViews.
+  }
+  return normalizeLocale(globalThis.navigator?.language);
+}
+
+export function saveLocale(locale) {
+  try {
+    globalThis.localStorage?.setItem(STORAGE_KEY, normalizeLocale(locale));
+  } catch {
+    // The in-memory selection still applies when persistence is unavailable.
+  }
+}
+
+export function translateText(text, locale) {
+  if (normalizeLocale(locale) !== "zh-CN") return String(text ?? "");
+  const value = String(text ?? "");
+  if (ZH_CN[value]) return ZH_CN[value];
+  for (const [pattern, replacement] of ZH_PATTERNS) {
+    if (pattern.test(value)) return value.replace(pattern, replacement);
+  }
+  return value;
+}
+
+export function localizeDom(root, locale) {
+  const normalized = normalizeLocale(locale);
+  root.ownerDocument.documentElement.lang = normalized;
+  if (normalized === "en") return;
+
+  const walker = root.ownerDocument.createTreeWalker(root, 4);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach((node) => {
+    const parent = node.parentElement;
+    if (!parent || parent.closest("[data-i18n-skip],script,style")) return;
+    const raw = node.nodeValue ?? "";
+    const match = raw.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    const translated = translateText(match?.[2] ?? raw, normalized);
+    if (translated !== (match?.[2] ?? raw)) {
+      node.nodeValue = `${match?.[1] ?? ""}${translated}${match?.[3] ?? ""}`;
+    }
+  });
+
+  root.querySelectorAll("[title],[aria-label],[placeholder]").forEach((element) => {
+    ["title", "aria-label", "placeholder"].forEach((attribute) => {
+      if (!element.hasAttribute(attribute) || element.closest("[data-i18n-skip]")) return;
+      const value = element.getAttribute(attribute);
+      element.setAttribute(attribute, translateText(value, normalized));
+    });
+  });
+}

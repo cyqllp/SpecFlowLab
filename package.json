@@ -1,0 +1,25 @@
+{
+  "name": "specflowlab-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test": "node --test tests/*.test.js",
+    "test:origin": "python3 -m unittest discover -s integrations/origin/tests -p 'test_*.py'",
+    "origin:bundle": "node integrations/origin/export-origin-bundle.mjs",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "fflate": "^0.8.2",
+    "vite": "^5.4.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}
