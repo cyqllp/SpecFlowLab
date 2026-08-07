@@ -766,6 +766,30 @@ mod tests {
         assert_eq!(status.state, "completed");
         assert_eq!(status.dataset_count, Some(20));
         assert_eq!(status.workbook_count, Some(20));
+        assert_eq!(status.graph_count, Some(100));
         assert_eq!(status.output_bytes, Some(123456));
+        assert!(status.warnings.is_empty());
+        assert!(status.error.is_none());
+        assert!(status.traceback.is_none());
+    }
+
+    #[test]
+    fn parses_failed_origin_status() {
+        let status: OriginJobStatus = serde_json::from_str(
+            r#"{
+                "state": "failed",
+                "error": "Origin import failed",
+                "traceback": "Traceback (most recent call last):\n  File \"launcher.py\", line 1",
+                "warnings": ["sheet skipped"]
+            }"#,
+        )
+        .expect("failed Origin status should parse");
+        assert_eq!(status.state, "failed");
+        assert_eq!(status.error.as_deref(), Some("Origin import failed"));
+        assert!(status
+            .traceback
+            .as_deref()
+            .is_some_and(|traceback| traceback.starts_with("Traceback")));
+        assert_eq!(status.warnings, vec!["sheet skipped"]);
     }
 }
