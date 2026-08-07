@@ -25,7 +25,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.0.1";
 const plotGeometry = new WeakMap();
 
 const state = {
@@ -2806,11 +2806,14 @@ function drawLinePlot(canvas, series, xMode, options = {}) {
     return;
   }
 
+  const left = Math.max(72, Math.round(width * 0.076));
+  const right = Math.max(left + 60, Math.round(width * 0.978));
+  const top = Math.max(12, Math.round(height * 0.024));
   const plot = {
-    left: 88,
-    right: width - 28,
-    top: 20,
-    bottom: height - (options.bottomPadding ?? 64),
+    left,
+    right,
+    top,
+    bottom: height - Math.max(50, Math.round(height * 0.088)),
   };
   const plotKey = options.plotKey ?? canvas.dataset.plotKey;
   const zoom = state.plotZooms[plotKey];
@@ -3075,7 +3078,11 @@ function setupCanvas(canvas, exportWidth, exportHeight) {
 }
 
 function heatmapPlotArea(width, height) {
-  return { left: 78, right: width - 26, top: 20, bottom: height - 66 };
+  const left = Math.max(64, Math.round(width * 0.072));
+  const right = Math.max(left + 80, Math.round(width * 0.976));
+  const top = Math.max(12, Math.round(height * 0.028));
+  const bottom = Math.max(top + 80, Math.round(height * 0.906));
+  return { left, right, top, bottom };
 }
 
 function applyPlotZoomDrag(canvas, drag) {
@@ -3808,7 +3815,15 @@ document.addEventListener("contextmenu", (event) => {
 });
 window.addEventListener("resize", () => {
   window.clearTimeout(resizeTimer);
-  resizeTimer = window.setTimeout(paintCanvases, 120);
+  resizeTimer = window.setTimeout(() => {
+    // Clear all cached plot geometries so canvases re-measure on next paint
+    document.querySelectorAll("canvas[data-plot-key]").forEach((canvas) => {
+      plotGeometry.delete(canvas);
+    });
+    const expanded = document.getElementById("expanded-canvas");
+    if (expanded) plotGeometry.delete(expanded);
+    paintCanvases();
+  }, 100);
 });
 
 render();

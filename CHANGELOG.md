@@ -2,6 +2,17 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [1.0.1] - 2026-08-07
+
+- Fluid CSS design system with `clamp()`-based layout tokens replacing fixed
+  pixel dimensions; the workspace scales continuously from 1024 px viewports.
+- Proportional plot margins in all canvases (line, heatmap, spectrum, kinetics)
+  so charts adapt to window size without clipping axis labels.
+- Window geometry relaxed: min 1220×760, max 1920×1200 (was 1360×840–1800×1100).
+- Plot geometry cache is cleared on window resize so expanded/fitted views
+  re-measure correctly instead of using stale coordinates.
+- Resize debounce reduced from 120 ms to 100 ms.
+
 ## [1.0.0] - 2026-08-05
 
 The first public-beta candidate:

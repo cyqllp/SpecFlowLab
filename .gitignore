@@ -41,3 +41,4 @@ releases/**/*.exe
 
 # Duplicate local bridge copy
 integrations/origin/*_副本.py
+.xwin-cache/

@@ -1,6 +1,6 @@
 [package]
 name = "specflowlab"
-version = "1.0.0"
+version = "1.0.1"
 description = "SpecFlowLab time-resolved spectroscopy workspace"
 authors = ["SpecFlowLab"]
 edition = "2021"

@@ -134,7 +134,7 @@ Remaining production gaps:
 
 ## Current State
 
-The `1.0.0` desktop application is implemented and syntax-checked, and its
+The `1.0.1` desktop application is implemented and syntax-checked, and its
 spectroscopy and archive workflows are exercised with synthetic regressions
 and the real 20-dataset example project.
 
@@ -150,14 +150,14 @@ npm run tauri -- --version
 npm run tauri -- build --bundles app
 ```
 
-Built and checksum-verified 1.0 artifacts were produced locally. The app bundle
+Built and checksum-verified 1.0.1 artifacts were produced locally. The app bundle
 and portable installers are intentionally published as GitHub Release assets,
 not committed to this source repository; see docs/RELEASE_CHECKLIST.md.
 
 The macOS app bundle is arm64, ad-hoc signed for local testing, and passes
 `codesign --verify --deep --strict` before and after ZIP extraction. The
 Windows portable artifact is a PE32+ x86-64 GUI executable with embedded
-`FileVersion` and `ProductVersion` 1.0.0; it is unsigned and still requires a
+`FileVersion` and `ProductVersion` 1.0.1; it is unsigned and still requires a
 target-Windows/WebView2 smoke test.
 
 ## Public-beta package
