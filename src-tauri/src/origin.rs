@@ -385,6 +385,15 @@ pub fn version_from_file_name(path: &Path) -> (Option<u32>, DetectionConfidence)
     if file_stem.contains("origin96") {
         return (Some(2016), DetectionConfidence::Mapping);
     }
+    // Origin 8.6 (Origin86_64.exe, Origin86.exe)
+    // File name alone can't distinguish 8.5 from 8.6; default to 8.6.
+    if file_stem.contains("origin86") || file_stem.contains("origin_86") {
+        return (Some(8), DetectionConfidence::Mapping);
+    }
+    // Origin 8.5 (Origin85_64.exe, Origin85.exe)
+    if file_stem.contains("origin85") || file_stem.contains("origin_85") {
+        return (Some(8), DetectionConfidence::Mapping);
+    }
     (None, DetectionConfidence::Unknown)
 }
 

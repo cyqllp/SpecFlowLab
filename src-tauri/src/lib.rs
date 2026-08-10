@@ -13,6 +13,7 @@ use std::{
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
+mod labtalk;
 mod origin;
 
 #[cfg(target_os = "windows")]
@@ -279,8 +280,6 @@ fn create_origin_project_on_windows(
         )
     })?;
 
-    let bridge_path = run_directory.join("specflowlab_origin.py");
-    let launcher_path = run_directory.join("launch_specflowlab_origin.py");
     let log_path = output_path.with_extension("origin-startup.log");
     let status_path = output_path.with_extension("origin-status.json");
 
@@ -307,44 +306,71 @@ fn create_origin_project_on_windows(
         })?;
     }
 
-    std::fs::write(&bridge_path, ORIGIN_BRIDGE_SOURCE.as_bytes()).map_err(|error| {
-        format!(
-            "Could not prepare the embedded Origin bridge {}: {error}",
-            bridge_path.display()
-        )
-    })?;
-    std::fs::write(
-        &launcher_path,
-        origin_launcher_source(
-            &run_directory,
-            &bundle_path,
-            &output_path,
-            &status_path,
-            create_plots,
-        ),
-    )
-    .map_err(|error| {
-        format!(
-            "Could not prepare the Origin Python launcher {}: {error}",
-            launcher_path.display()
-        )
-    })?;
-    let launcher_for_labtalk = labtalk_path(&launcher_path)?;
-    let origin_startup_script = origin_startup_labtalk(&launcher_for_labtalk);
-    Command::new(&origin_executable)
-        .arg("-slog")
-        .arg(&log_path)
-        .arg("-rs")
-        // Origin parses everything after -RS as raw LabTalk. Normal Windows
-        // argv quoting can wrap this entire expression so it is not executed.
-        .raw_arg(origin_startup_script)
-        .spawn()
-        .map_err(|error| {
+    // Fork: LabTalk for Origin 8.6, Python bridge for 2021+
+    let is_labtalk = matches!(
+        install_info.backend,
+        origin::OriginBackendKind::LabTalk | origin::OriginBackendKind::LegacyPyOrigin
+    );
+
+    if is_labtalk {
+        // ---- LabTalk staging path (Origin 8.6, 2016–2020) ----
+        let stage = labtalk::stage_labtalk_import(&bundle_path, &output_path, &output_plan)?;
+        let script_for_labtalk = labtalk_path(&stage.script_path)?;
+        let origin_startup_script = origin_startup_labtalk(&script_for_labtalk);
+        Command::new(&origin_executable)
+            .arg("-slog")
+            .arg(&log_path)
+            .arg("-rs")
+            .raw_arg(origin_startup_script)
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "Could not launch OriginPro (LabTalk) from {}: {error}",
+                    origin_executable.display()
+                )
+            })?;
+    } else {
+        // ---- Python bridge path (Origin 2021+) ----
+        let bridge_path = run_directory.join("specflowlab_origin.py");
+        let launcher_path = run_directory.join("launch_specflowlab_origin.py");
+
+        std::fs::write(&bridge_path, ORIGIN_BRIDGE_SOURCE.as_bytes()).map_err(|error| {
             format!(
-                "Could not launch OriginPro from {}: {error}",
-                origin_executable.display()
+                "Could not prepare the embedded Origin bridge {}: {error}",
+                bridge_path.display()
             )
         })?;
+        std::fs::write(
+            &launcher_path,
+            origin_launcher_source(
+                &run_directory,
+                &bundle_path,
+                &output_path,
+                &status_path,
+                create_plots,
+            ),
+        )
+        .map_err(|error| {
+            format!(
+                "Could not prepare the Origin Python launcher {}: {error}",
+                launcher_path.display()
+            )
+        })?;
+        let launcher_for_labtalk = labtalk_path(&launcher_path)?;
+        let origin_startup_script = origin_startup_labtalk(&launcher_for_labtalk);
+        Command::new(&origin_executable)
+            .arg("-slog")
+            .arg(&log_path)
+            .arg("-rs")
+            .raw_arg(origin_startup_script)
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "Could not launch OriginPro (Python) from {}: {error}",
+                    origin_executable.display()
+                )
+            })?;
+    }
 
     Ok(Some(OriginLaunchResult {
         origin_executable: origin_executable.to_string_lossy().into_owned(),
@@ -748,11 +774,14 @@ fn inspect_origin_executable(path: &Path) -> Result<origin::OriginInstallationIn
     };
 
     let major = major.unwrap_or(0);
+    // When the file name maps to major 8 (origin86), assume 8.6 since the
+    // file name alone cannot distinguish 8.5 from 8.6.
+    let minor = minor.unwrap_or(if major == 8 { 6 } else { 0 });
 
     // 3. Resolve capabilities
-    let capabilities = origin::resolve_capabilities(major, minor.unwrap_or(0));
+    let capabilities = origin::resolve_capabilities(major, minor);
     let (backend, project_formats, default_format, support_level) =
-        origin::resolve_backend_and_format(major, minor.unwrap_or(0));
+        origin::resolve_backend_and_format(major, minor);
 
     // 4. Bitness
     let bitness = detect_bitness(path);
