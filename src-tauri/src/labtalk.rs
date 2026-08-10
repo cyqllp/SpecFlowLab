@@ -6,6 +6,7 @@
 // script that imports them, and launch Origin with that script.
 //
 // The .sflorigin sidecar remains the lossless provenance source.
+#![allow(dead_code)]
 
 use std::fs;
 use std::io::{Read, Write};
@@ -13,22 +14,14 @@ use std::path::{Path, PathBuf};
 
 use crate::origin::OutputPlan;
 
-/// Staged data ready for LabTalk import.
-pub struct LabTalkStage {
-    pub run_directory: PathBuf,
-    pub script_path: PathBuf,
-    pub dataset_count: usize,
-    pub workbook_count: usize,
-}
-
 /// Extract the .sflorigin bundle and stage tab-delimited import files.
 ///
-/// Returns the staging directory, script path, and dataset count.
+/// Returns the path to the generated LabTalk .OGS script.
 pub fn stage_labtalk_import(
     bundle_path: &Path,
     output_path: &Path,
     output_plan: &OutputPlan,
-) -> Result<LabTalkStage, String> {
+) -> Result<PathBuf, String> {
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("timestamp error: {e}"))?
@@ -114,14 +107,7 @@ pub fn stage_labtalk_import(
     fs::write(&script_path, script.as_bytes())
         .map_err(|e| format!("Cannot write LabTalk script: {e}"))?;
 
-    let workbook_count = datasets.len();
-
-    Ok(LabTalkStage {
-        run_directory,
-        script_path,
-        dataset_count: datasets.len(),
-        workbook_count,
-    })
+    Ok(script_path)
 }
 
 fn read_f64_from_zip(

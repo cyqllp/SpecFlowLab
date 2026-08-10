@@ -314,8 +314,8 @@ fn create_origin_project_on_windows(
 
     if is_labtalk {
         // ---- LabTalk staging path (Origin 8.6, 2016–2020) ----
-        let stage = labtalk::stage_labtalk_import(&bundle_path, &output_path, &output_plan)?;
-        let script_for_labtalk = labtalk_path(&stage.script_path)?;
+        let script_path = labtalk::stage_labtalk_import(&bundle_path, &output_path, &output_plan)?;
+        let script_for_labtalk = labtalk_path(&script_path)?;
         let origin_startup_script = origin_startup_labtalk(&script_for_labtalk);
         Command::new(&origin_executable)
             .arg("-slog")
