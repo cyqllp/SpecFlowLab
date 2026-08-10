@@ -141,7 +141,7 @@ pub struct OriginInstallationSelection {
 // NOTE: some functions are only called from Windows-gated code in lib.rs.
 // ---------------------------------------------------------------------------
 
-pub fn resolve_capabilities(major: u32, _minor: u32) -> OriginCapabilities {
+pub fn resolve_capabilities(major: u32, minor: u32) -> OriginCapabilities {
     // Per the documented capability matrix (§5.4)
     match major {
         v if v >= 2023 => OriginCapabilities {
@@ -179,9 +179,17 @@ pub fn resolve_capabilities(major: u32, _minor: u32) -> OriginCapabilities {
             residual_heatmap: false,
             unicode_metadata: false,
         },
-        // 8.x (8.6)
-        v if v >= 8 => OriginCapabilities {
+        // 8.6 only — 8.0–8.5 is unsupported (no reliable LabTalk automation)
+        8 if minor >= 6 => OriginCapabilities {
             worksheets: true,
+            line_plots: false,
+            virtual_matrix_heatmap: false,
+            residual_heatmap: false,
+            unicode_metadata: false,
+        },
+        // 8.0–8.5: no automation path verified
+        8 => OriginCapabilities {
+            worksheets: false,
             line_plots: false,
             virtual_matrix_heatmap: false,
             residual_heatmap: false,
@@ -199,7 +207,7 @@ pub fn resolve_capabilities(major: u32, _minor: u32) -> OriginCapabilities {
 
 pub fn resolve_backend_and_format(
     major: u32,
-    _minor: u32,
+    minor: u32,
 ) -> (
     OriginBackendKind,
     Vec<OriginProjectFormat>,
@@ -237,7 +245,8 @@ pub fn resolve_backend_and_format(
             OriginProjectFormat::Opj,
             SupportLevel::Experimental,
         ),
-        v if v >= 8 => (
+        // 8.6 only — 8.0–8.5 falls through to Unsupported
+        8 if minor >= 6 => (
             OriginBackendKind::LabTalk,
             vec![OriginProjectFormat::Opj],
             OriginProjectFormat::Opj,
@@ -536,6 +545,13 @@ mod tests {
     }
 
     #[test]
+    fn origin_8_0_is_unsupported() {
+        // 8.0: no automation path
+        let caps = resolve_capabilities(8, 0);
+        assert!(!caps.worksheets);
+    }
+
+    #[test]
     fn older_origin_is_unsupported() {
         let caps = resolve_capabilities(7, 0);
         assert!(!caps.worksheets);
@@ -567,11 +583,23 @@ mod tests {
     }
 
     #[test]
-    fn origin_8_is_labtalk_opj() {
-        let (backend, formats, default, _) = resolve_backend_and_format(8, 6);
+    fn origin_8_6_is_labtalk_opj() {
+        let (backend, formats, default, support) = resolve_backend_and_format(8, 6);
         assert!(matches!(backend, OriginBackendKind::LabTalk));
         assert_eq!(formats, vec![OriginProjectFormat::Opj]);
         assert!(matches!(default, OriginProjectFormat::Opj));
+        assert!(matches!(support, SupportLevel::Experimental));
+    }
+
+    #[test]
+    fn origin_8_5_is_unsupported() {
+        // 8.0–8.5 have no verified LabTalk automation path
+        let caps = resolve_capabilities(8, 5);
+        assert!(!caps.worksheets);
+        let (backend, formats, _, support) = resolve_backend_and_format(8, 5);
+        assert!(matches!(backend, OriginBackendKind::None));
+        assert!(formats.is_empty());
+        assert!(matches!(support, SupportLevel::Unsupported));
     }
 
     #[test]
