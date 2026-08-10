@@ -520,23 +520,6 @@ fn resolve_origin_executable(app: &tauri::AppHandle) -> Result<Option<PathBuf>, 
     Ok(Some(path))
 }
 
-#[cfg(target_os = "windows")]
-fn validate_origin_executable(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Err(format!(
-            "The configured OriginPro executable does not exist: {}",
-            path.display()
-        ));
-    }
-    if !origin::is_origin_executable_candidate(path) {
-        return Err(format!(
-            "Please select the main OriginPro executable (for OriginPro 2021 this is commonly Origin98_64.exe), not {}.",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
 // Legacy helpers kept for test compatibility — delegate to origin.rs
 #[cfg(any(target_os = "windows", test))]
 fn is_origin_executable_candidate(path: &Path) -> bool {
@@ -763,9 +746,9 @@ fn inspect_origin_executable(path: &Path) -> Result<origin::OriginInstallationIn
     let major = major.unwrap_or(0);
 
     // 3. Resolve capabilities
-    let capabilities = resolve_capabilities(major, minor.unwrap_or(0));
+    let capabilities = origin::resolve_capabilities(major, minor.unwrap_or(0));
     let (backend, project_formats, default_format, support_level) =
-        resolve_backend_and_format(major, minor.unwrap_or(0));
+        origin::resolve_backend_and_format(major, minor.unwrap_or(0));
 
     // 4. Bitness
     let bitness = detect_bitness(path);
@@ -801,7 +784,7 @@ fn read_executable_version(
     Option<u32>,
     Option<u32>,
     Option<String>,
-    DetectionConfidence,
+    origin::DetectionConfidence,
 ) {
     // Use Win32 version info APIs through the windows crate
     // For now, fall back to file-name heuristic (the windows crate dependency
