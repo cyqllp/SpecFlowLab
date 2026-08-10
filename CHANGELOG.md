@@ -2,6 +2,34 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [1.0.3] - 2026-08-10
+
+- **Batch Global Fitting** now scoped to the active dataset folder instead of
+  processing every dataset in the project. The fit modal displays the folder
+  name and unfitted count, and progress messages include the folder context.
+- **Unified Compare and Merge selection** — Compare and Merge now appear
+  side-by-side under Dataset Folders, and both use a shared dataset selection
+  modal. Merge checkboxes are removed from the dataset tree. Merge requires
+  exactly two treated datasets (selectable from different folders) and uses
+  a selection-first workflow. A "Change Datasets" button in the merge workspace
+  returns to the selection stage.
+- **Dataset drag-and-drop reorder** — datasets can be reordered within a folder
+  (before/after a target row) or moved between folders with visual drop
+  indicators. Edge auto-scroll activates near the top and bottom of the tree.
+  No-op drops do not mark the project dirty. Dataset order survives `.sflproj`
+  save/reopen.
+- **Origin version-selection architecture** — the Origin panel now shows the
+  detected installation name, version, bitness, support level, and output
+  format. Users can explicitly select, change, and browse for an Origin
+  executable. The Rust backend resolves capabilities (worksheets, line plots,
+  heatmaps) from the detected version and chooses `.opju` or `.opj` output
+  accordingly. A pure capability resolver and JSON machine config replace the
+  legacy `origin-executable.txt`. The completion dialog reports created and
+  omitted graph types with reasons.
+- **Pure helper modules** (`dataset-scope`, `dataset-order`, `dataset-selection`)
+  with comprehensive unit tests, extracted from the main UI code.
+- Updated Simplified Chinese translations for all new UI strings.
+
 ## [1.0.2] - 2026-08-10
 
 - Added the Zenodo DOI to the in-app About panel, citation metadata, and README.
