@@ -776,12 +776,12 @@ fn inspect_origin_executable(path: &Path) -> Result<origin::OriginInstallationIn
     let major = major.unwrap_or(0);
     // When the file name maps to major 8 (origin86), assume 8.6 since the
     // file name alone cannot distinguish 8.5 from 8.6.
-    let minor = minor.unwrap_or(if major == 8 { 6 } else { 0 });
+    let resolved_minor = minor.unwrap_or(if major == 8 { 6 } else { 0 });
 
     // 3. Resolve capabilities
-    let capabilities = origin::resolve_capabilities(major, minor);
+    let capabilities = origin::resolve_capabilities(major, resolved_minor);
     let (backend, project_formats, default_format, support_level) =
-        origin::resolve_backend_and_format(major, minor);
+        origin::resolve_backend_and_format(major, resolved_minor);
 
     // 4. Bitness
     let bitness = detect_bitness(path);
