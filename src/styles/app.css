@@ -449,8 +449,13 @@ input[type="checkbox"] {
 
 /* Origin mode */
 .origin-mode-select {
+  display: block;
   width: 100%;
   margin: 5px 0;
+}
+
+.origin-mode-select select {
+  width: 100%;
 }
 
 .side > .handoff-panel:last-child {
