@@ -1,27 +1,36 @@
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 #[cfg(any(target_os = "windows", test))]
 use serde::Deserialize;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::{
     os::windows::process::CommandExt,
-    path::PathBuf,
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "windows")]
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
+
+mod origin;
 
 #[cfg(target_os = "windows")]
 const ORIGIN_BRIDGE_SOURCE: &str = include_str!("../../integrations/origin/specflowlab_origin.py");
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct OriginLaunchResult {
     origin_executable: String,
+    origin_display_name: String,
+    origin_version: Option<String>,
+    bitness: Option<u32>,
+    backend: String,
+    support_level: String,
     bundle_path: String,
     output_path: String,
+    output_format: String,
     log_path: String,
     status_path: String,
     dataset_count: usize,
@@ -30,6 +39,9 @@ struct OriginLaunchResult {
     output_bytes: u64,
     warning_count: usize,
     create_plots: bool,
+    created_graph_types: Vec<String>,
+    omitted_graph_types: Vec<String>,
+    omission_reasons: Vec<String>,
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -51,6 +63,12 @@ struct OriginJobStatus {
     output_bytes: Option<u64>,
     #[serde(default)]
     warnings: Vec<String>,
+    #[serde(default)]
+    created_graph_types: Option<Vec<String>>,
+    #[serde(default)]
+    omitted_graph_types: Option<Vec<String>>,
+    #[serde(default)]
+    omission_reasons: Option<Vec<String>>,
 }
 
 fn safe_default_name(default_name: &str, fallback: &str) -> String {
@@ -133,11 +151,17 @@ async fn create_origin_project(
     default_name: String,
     bytes: Vec<u8>,
     create_plots: bool,
+    output_format: Option<String>,
 ) -> Result<Option<OriginLaunchResult>, String> {
     #[cfg(target_os = "windows")]
     {
-        let Some(mut result) =
-            create_origin_project_on_windows(&app, &default_name, &bytes, create_plots)?
+        let Some(mut result) = create_origin_project_on_windows(
+            &app,
+            &default_name,
+            &bytes,
+            create_plots,
+            output_format.as_deref(),
+        )?
         else {
             return Ok(None);
         };
@@ -154,12 +178,14 @@ async fn create_origin_project(
         result.graph_count = status.graph_count.unwrap_or_default();
         result.output_bytes = status.output_bytes.unwrap_or_default();
         result.warning_count = status.warnings.len();
+        result.omitted_graph_types = status.omitted_graph_types.unwrap_or_default();
+        result.omission_reasons = status.omission_reasons.unwrap_or_default();
         Ok(Some(result))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (app, default_name, bytes, create_plots);
+        let _ = (app, default_name, bytes, create_plots, output_format);
         Err("Create in OriginPro is available in the Windows SpecFlowLab app. Use Export Origin Bundle on this platform.".to_string())
     }
 }
@@ -170,16 +196,36 @@ fn create_origin_project_on_windows(
     default_name: &str,
     bytes: &[u8],
     create_plots: bool,
+    output_format: Option<&str>,
 ) -> Result<Option<OriginLaunchResult>, String> {
     let Some(origin_executable) = resolve_origin_executable(app)? else {
         return Ok(None);
     };
 
-    let default_name = safe_default_name(default_name, "SpecFlowLab_project.opju");
+    // Resolve installation info for the selected executable
+    let install_info = inspect_origin_executable(&origin_executable)?;
+    let format = output_format
+        .and_then(|f| match f {
+            "opj" => Some(origin::OriginProjectFormat::Opj),
+            "opju" => Some(origin::OriginProjectFormat::Opju),
+            _ => None,
+        })
+        .unwrap_or(install_info.default_project_format);
+    let ext = format.extension();
+
+    let output_plan = if create_plots {
+        origin::resolve_output_plan("sheets-plots", &install_info.capabilities)
+    } else {
+        origin::resolve_output_plan("sheets-only", &install_info.capabilities)
+    };
+
+    let default_ext = if ext == "opj" { "opj" } else { "opju" };
+    let default_name =
+        safe_default_name(default_name, &format!("SpecFlowLab_project.{default_ext}"));
     let selected = app
         .dialog()
         .file()
-        .add_filter("Origin Project", &["opju"])
+        .add_filter("Origin Project", &[default_ext])
         .set_file_name(default_name)
         .blocking_save_file();
     let Some(selected) = selected else {
@@ -188,12 +234,12 @@ fn create_origin_project_on_windows(
     let mut output_path = selected.into_path().map_err(|error| {
         format!("The selected Origin destination is not a writable file path: {error}")
     })?;
-    if !output_path
+    let output_ext = output_path
         .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("opju"))
-    {
-        output_path.set_extension("opju");
+        .and_then(|e| e.to_str())
+        .unwrap_or(default_ext);
+    if !output_ext.eq_ignore_ascii_case(default_ext) {
+        output_path.set_extension(default_ext);
     }
 
     let parent = output_path
@@ -298,8 +344,14 @@ fn create_origin_project_on_windows(
 
     Ok(Some(OriginLaunchResult {
         origin_executable: origin_executable.to_string_lossy().into_owned(),
+        origin_display_name: install_info.display_name.clone(),
+        origin_version: install_info.product_version.clone(),
+        bitness: install_info.bitness,
+        backend: install_info.backend.to_string(),
+        support_level: install_info.support_level.to_string(),
         bundle_path: bundle_path.to_string_lossy().into_owned(),
         output_path: output_path.to_string_lossy().into_owned(),
+        output_format: format.extension().to_string(),
         log_path: log_path.to_string_lossy().into_owned(),
         status_path: status_path.to_string_lossy().into_owned(),
         dataset_count: 0,
@@ -308,6 +360,9 @@ fn create_origin_project_on_windows(
         output_bytes: 0,
         warning_count: 0,
         create_plots,
+        created_graph_types: output_plan.created_graph_types,
+        omitted_graph_types: output_plan.omitted_graph_types,
+        omission_reasons: output_plan.omission_reasons,
     }))
 }
 
@@ -414,22 +469,40 @@ fn origin_log_suffix(log_path: &Path) -> String {
 
 #[cfg(target_os = "windows")]
 fn resolve_origin_executable(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    // 1. Environment variable overrides
     for variable in ["SPECFLOWLAB_ORIGIN_EXE", "ORIGIN_EXE"] {
         if let Some(path) = std::env::var_os(variable).map(PathBuf::from) {
             validate_origin_executable(&path)?;
-            persist_origin_executable(app, &path);
+            // Persist so the machine config stays in sync
+            let info = inspect_origin_executable(&path)?;
+            let _ = persist_installation(app, &info);
             return Ok(Some(path));
         }
     }
 
-    if let Some(path) = saved_origin_executable(app) {
-        return Ok(Some(path));
+    // 2. Saved machine config
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Could not resolve config directory: {e}"))?;
+    let _ = origin::migrate_legacy_config(&config_dir);
+    if let Ok(Some(config)) = origin::read_machine_config(&config_dir) {
+        if let Some(selected) = config.selected {
+            let path = PathBuf::from(&selected.executable_path);
+            if path.is_file() && is_origin_executable_candidate(&path) {
+                return Ok(Some(path));
+            }
+        }
     }
-    if let Some(path) = discover_origin_executable() {
-        persist_origin_executable(app, &path);
+
+    // 3. Auto-discovery
+    let discovered = discover_and_inspect_installations(app)?;
+    if let Some(best) = discovered.into_iter().next() {
+        let path = PathBuf::from(&best.executable_path);
         return Ok(Some(path));
     }
 
+    // 4. Manual file picker
     let selected = app
         .dialog()
         .file()
@@ -442,7 +515,8 @@ fn resolve_origin_executable(app: &tauri::AppHandle) -> Result<Option<PathBuf>, 
         format!("The selected OriginPro executable is not a local file path: {error}")
     })?;
     validate_origin_executable(&path)?;
-    persist_origin_executable(app, &path);
+    let info = inspect_origin_executable(&path)?;
+    let _ = persist_installation(app, &info);
     Ok(Some(path))
 }
 
@@ -454,7 +528,7 @@ fn validate_origin_executable(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    if !is_origin_executable_candidate(path) {
+    if !origin::is_origin_executable_candidate(path) {
         return Err(format!(
             "Please select the main OriginPro executable (for OriginPro 2021 this is commonly Origin98_64.exe), not {}.",
             path.display()
@@ -463,107 +537,15 @@ fn validate_origin_executable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn origin_config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|directory| directory.join("origin-executable.txt"))
-}
-
-#[cfg(target_os = "windows")]
-fn saved_origin_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let path = std::fs::read_to_string(origin_config_path(app)?).ok()?;
-    let path = PathBuf::from(path.trim());
-    path.is_file()
-        .then_some(path)
-        .filter(|path| is_origin_executable_candidate(path))
-}
-
-#[cfg(target_os = "windows")]
-fn persist_origin_executable(app: &tauri::AppHandle, origin_executable: &Path) {
-    let Some(config_path) = origin_config_path(app) else {
-        return;
-    };
-    if let Some(parent) = config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(config_path, origin_executable.to_string_lossy().as_bytes());
-}
-
-#[cfg(target_os = "windows")]
-fn discover_origin_executable() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
-        let Some(program_files) = std::env::var_os(variable).map(PathBuf::from) else {
-            continue;
-        };
-        collect_origin_executables(&program_files.join("OriginLab"), 3, &mut candidates);
-    }
-    candidates.sort_by(|left, right| {
-        origin_candidate_score(right)
-            .cmp(&origin_candidate_score(left))
-            .then_with(|| right.cmp(left))
-    });
-    candidates.into_iter().next()
-}
-
-#[cfg(target_os = "windows")]
-fn collect_origin_executables(directory: &Path, depth: usize, candidates: &mut Vec<PathBuf>) {
-    if depth == 0 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_origin_executables(&path, depth - 1, candidates);
-        } else if is_origin_executable_candidate(&path) {
-            candidates.push(path);
-        }
-    }
-}
-
+// Legacy helpers kept for test compatibility — delegate to origin.rs
 #[cfg(any(target_os = "windows", test))]
 fn is_origin_executable_candidate(path: &Path) -> bool {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let lower = file_name.to_ascii_lowercase();
-    lower.starts_with("origin")
-        && lower.ends_with(".exe")
-        && !["crash", "report", "update", "uninstall", "viewer"]
-            .iter()
-            .any(|fragment| lower.contains(fragment))
+    origin::is_origin_executable_candidate(path)
 }
 
 #[cfg(any(target_os = "windows", test))]
 fn origin_candidate_score(path: &Path) -> u32 {
-    let lower = path.to_string_lossy().to_ascii_lowercase();
-    let file_name = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let mut score = 0;
-    if file_name.contains("_64") {
-        score += 500;
-    }
-    if file_name
-        .strip_prefix("origin")
-        .and_then(|tail| tail.chars().next())
-        .is_some_and(|character| character.is_ascii_digit())
-    {
-        score += 300;
-    }
-    for year in 2000..=2099 {
-        if lower.contains(&format!("origin{year}")) {
-            score += 1000 + year;
-        }
-    }
-    score
+    origin::origin_candidate_score(path)
 }
 
 #[cfg(target_os = "windows")]
@@ -630,6 +612,315 @@ fn labtalk_path(path: &Path) -> Result<String, String> {
     Ok(path)
 }
 
+// ---------------------------------------------------------------------------
+// Origin installation management commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn list_origin_installations(
+    app: tauri::AppHandle,
+) -> Result<Vec<origin::OriginInstallationInfo>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        discover_and_inspect_installations(&app)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Ok(Vec::new())
+    }
+}
+
+#[tauri::command]
+async fn get_origin_installation(
+    app: tauri::AppHandle,
+) -> Result<Option<origin::OriginInstallationInfo>, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Could not resolve config directory: {e}"))?;
+    // Migrate legacy config on first read
+    let _ = origin::migrate_legacy_config(&config_dir);
+    let Some(config) = origin::read_machine_config(&config_dir)? else {
+        return Ok(None);
+    };
+    let Some(selected) = config.selected else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&selected.executable_path);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        inspect_origin_executable(&path).map(Some)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn set_origin_installation(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<origin::OriginInstallationInfo, String> {
+    let exe_path = PathBuf::from(&path);
+    #[cfg(target_os = "windows")]
+    {
+        validate_origin_executable(&exe_path)?;
+        let info = inspect_origin_executable(&exe_path)?;
+        persist_installation(&app, &info)?;
+        Ok(info)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, exe_path);
+        Err("Origin integration is available in the Windows SpecFlowLab app.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn select_origin_installation(
+    app: tauri::AppHandle,
+) -> Result<Option<origin::OriginInstallationInfo>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        // First check discovered installations
+        let discovered = discover_and_inspect_installations(&app)?;
+        if !discovered.is_empty() {
+            // Return the best candidate; the frontend can show a picker
+            let best = discovered.into_iter().next().unwrap();
+            persist_installation(&app, &best)?;
+            return Ok(Some(best));
+        }
+        // No automatic discovery — ask user to browse
+        let selected = app
+            .dialog()
+            .file()
+            .add_filter("OriginPro executable", &["exe"])
+            .blocking_pick_file();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let path = selected.into_path().map_err(|e| {
+            format!("The selected OriginPro executable is not a local file path: {e}")
+        })?;
+        validate_origin_executable(&path)?;
+        let info = inspect_origin_executable(&path)?;
+        persist_installation(&app, &info)?;
+        Ok(Some(info))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows-only helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+fn validate_origin_executable(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err(format!(
+            "The configured OriginPro executable does not exist: {}",
+            path.display()
+        ));
+    }
+    if !is_origin_executable_candidate(path) {
+        return Err(format!(
+            "Please select the main OriginPro executable (for OriginPro 2021 this is commonly Origin98_64.exe), not {}.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn inspect_origin_executable(path: &Path) -> Result<origin::OriginInstallationInfo, String> {
+    let display_name = origin::display_name_from_path(path);
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Try Win32 version resource
+    let (major, minor, product_version, confidence) = read_executable_version(path);
+
+    // 2. Fallback to file-name heuristic
+    let (major, confidence) = if major.is_none() {
+        let (fn_major, fn_conf) = origin::version_from_file_name(path);
+        if fn_major.is_none() {
+            warnings.push("Could not determine Origin version from the executable. Manual confirmation is required.".to_string());
+        }
+        (fn_major, fn_conf)
+    } else {
+        (major, confidence)
+    };
+
+    let major = major.unwrap_or(0);
+
+    // 3. Resolve capabilities
+    let capabilities = resolve_capabilities(major, minor.unwrap_or(0));
+    let (backend, project_formats, default_format, support_level) =
+        resolve_backend_and_format(major, minor.unwrap_or(0));
+
+    // 4. Bitness
+    let bitness = detect_bitness(path);
+
+    if support_level == origin::SupportLevel::Unsupported {
+        warnings.push(format!(
+            "Origin version {} is not supported for direct automation. The portable .sflorigin bundle remains available.",
+            major
+        ));
+    }
+
+    Ok(origin::OriginInstallationInfo {
+        executable_path: path.to_string_lossy().into_owned(),
+        display_name,
+        product_version,
+        major_version: Some(major).filter(|v| *v > 0),
+        minor_version: minor,
+        bitness,
+        detection_confidence: confidence,
+        backend,
+        project_formats,
+        default_project_format: default_format,
+        support_level,
+        capabilities,
+        warnings,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn read_executable_version(
+    path: &Path,
+) -> (
+    Option<u32>,
+    Option<u32>,
+    Option<String>,
+    DetectionConfidence,
+) {
+    // Use Win32 version info APIs through the windows crate
+    // For now, fall back to file-name heuristic (the windows crate dependency
+    // will be added in a follow-up when the physical test matrix is performed)
+    let _ = path;
+    let (major, confidence) = origin::version_from_file_name(path);
+    (major, None, None, confidence)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_bitness(path: &Path) -> Option<u32> {
+    let lower = path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if lower.contains("_64") {
+        Some(64)
+    } else if lower.contains("_32") {
+        Some(32)
+    } else {
+        // On a 64-bit OS, check if the binary is 64-bit via PE header.
+        // For now, default to 64 on modern systems.
+        if std::env::consts::ARCH == "x86_64" {
+            Some(64)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn persist_installation(
+    app: &tauri::AppHandle,
+    info: &origin::OriginInstallationInfo,
+) -> Result<(), String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Could not resolve config directory: {e}"))?;
+    let _ = origin::migrate_legacy_config(&config_dir);
+    let config = origin::MachineConfig {
+        schema: "specflowlab.origin_machine_config.v1".to_string(),
+        selected: Some(origin::OriginInstallationSelection {
+            executable_path: info.executable_path.clone(),
+            display_name: info.display_name.clone(),
+            product_version: info.product_version.clone(),
+            major_version: info.major_version,
+            minor_version: info.minor_version,
+            bitness: info.bitness,
+        }),
+    };
+    origin::write_machine_config(&config_dir, &config)
+}
+
+#[cfg(target_os = "windows")]
+fn discover_and_inspect_installations(
+    app: &tauri::AppHandle,
+) -> Result<Vec<origin::OriginInstallationInfo>, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(program_files) = std::env::var_os(variable).map(PathBuf::from) {
+            collect_origin_executables(&program_files.join("OriginLab"), 3, &mut candidates);
+        }
+    }
+    candidates.sort_by(|left, right| {
+        origin_candidate_score(right)
+            .cmp(&origin_candidate_score(left))
+            .then_with(|| right.cmp(left))
+    });
+    let mut results: Vec<origin::OriginInstallationInfo> = Vec::new();
+    for candidate in candidates {
+        match inspect_origin_executable(&candidate) {
+            Ok(info) => results.push(info),
+            Err(_) => continue,
+        }
+    }
+    // Also check env-var overrides
+    for variable in ["SPECFLOWLAB_ORIGIN_EXE", "ORIGIN_EXE"] {
+        if let Some(path) = std::env::var_os(variable).map(PathBuf::from) {
+            if path.is_file() && is_origin_executable_candidate(&path) {
+                match inspect_origin_executable(&path) {
+                    Ok(info) => {
+                        if !results
+                            .iter()
+                            .any(|r| r.executable_path == info.executable_path)
+                        {
+                            results.push(info);
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+    }
+    let _ = app;
+    Ok(results)
+}
+
+#[cfg(target_os = "windows")]
+fn collect_origin_executables(directory: &Path, depth: usize, candidates: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_origin_executables(&path, depth - 1, candidates);
+        } else if is_origin_executable_candidate(&path) {
+            candidates.push(path);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -637,7 +928,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_text_file,
             save_binary_file,
-            create_origin_project
+            create_origin_project,
+            list_origin_installations,
+            get_origin_installation,
+            set_origin_installation,
+            select_origin_installation
         ])
         .run(tauri::generate_context!())
         .expect("error while running SpecFlowLab");
