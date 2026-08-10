@@ -6,6 +6,9 @@ import {
   readProjectArchive,
 } from "./lib/project-archive.js";
 import { createOriginBundle } from "./lib/origin-bundle.js";
+import { getUnfittedDatasetsInFolder } from "./lib/dataset-scope.js";
+import { isEligibleForMode, SELECTION_MODES, toggleSelection, validateSelection } from "./lib/dataset-selection.js";
+import { moveDataset } from "./lib/dataset-order.js";
 import {
   createMergedAnalysis,
   mergePreviewSeries,
@@ -25,7 +28,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 const plotGeometry = new WeakMap();
 
 const state = {
@@ -70,6 +73,8 @@ const state = {
   },
   origin: {
     outputMode: "sheets-plots",
+    installation: null,
+    outputFormat: null,
   },
   modal: null,
   expandedPlot: null,
@@ -145,7 +150,10 @@ function render() {
           </div>
         </div>
         <div class="dataset-tree-scroll">${renderDatasetFolders()}</div>
-        <button class="wide-command" data-action="compare" ${state.datasets.length > 1 && !busy ? "" : "disabled"}>Compare...</button>
+        <div class="context-actions two">
+          <button class="wide-command" data-action="compare" ${state.datasets.length > 1 && !busy ? "" : "disabled"}>Compare...</button>
+          <button class="wide-command" data-action="open-merge-selection" ${state.datasets.length && !busy ? "" : "disabled"}>Merge...</button>
+        </div>
       </section>
 
       <section class="panel sidebar-panel handoff-panel">
@@ -159,10 +167,20 @@ function render() {
         <div class="section-heading">
           <h2>OriginPro Output</h2>
         </div>
-        <label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
-          <option value="sheets-plots" ${state.origin.outputMode === "sheets-plots" ? "selected" : ""}>Sheets and plots</option>
-          <option value="sheets-only" ${state.origin.outputMode === "sheets-only" ? "selected" : ""}>Only sheets</option>
-        </select></label>
+        ${state.origin.installation ? `
+          <div class="origin-status-block">
+            <span class="origin-version">${escapeHtml(state.origin.installation.displayName ?? state.origin.installation.executablePath)}${state.origin.installation.bitness ? ` (${state.origin.installation.bitness}-bit)` : ""}</span>
+            <span class="origin-support ${state.origin.installation.supportLevel}">${state.origin.installation.supportLevel} · ${escapeHtml(state.origin.installation.backend)} · ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat || "opju").toUpperCase()}</span>
+          </div>
+          <label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
+            <option value="sheets-plots" ${state.origin.outputMode === "sheets-plots" && state.origin.installation.capabilities?.linePlots ? "selected" : ""} ${state.origin.installation.capabilities?.linePlots ? "" : "disabled"}>Sheets and supported plots</option>
+            <option value="sheets-only" ${state.origin.outputMode === "sheets-only" ? "selected" : ""}>Only sheets</option>
+          </select></label>
+          ${(state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
+            ${state.origin.installation.projectFormats.map((fmt) => `<option value="${fmt}" ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat) === fmt ? "selected" : ""}>${fmt.toUpperCase()}</option>`).join("")}
+          </select></label>` : ""}
+        ` : `<p class="origin-placeholder">Select an OriginPro installation to enable direct export.</p>`}
+        <button class="wide-command" data-action="${state.origin.installation ? "change-origin" : "select-origin"}" ${busy ? "disabled" : ""}>${state.origin.installation ? "Change..." : "Select Origin..."}</button>
         <button class="wide-command" data-action="create-origin" ${dataset && !busy && isTauriRuntime() && isWindowsPlatform() ? "" : "disabled"}>Create in OriginPro...</button>
       </section>
     </aside>
@@ -206,11 +224,8 @@ function renderDatasetFolders() {
               ${datasets.length ? datasets.map((item) => {
                 const index = state.datasets.indexOf(item);
                 return `
-                  <li class="dataset-row" data-dataset-id="${escapeHtml(item.id)}">
-                    <button type="button" class="dataset-drag-handle" title="Drag to move dataset" aria-label="Drag ${escapeHtml(datasetDisplayName(item))} to another folder">&#8942;&#8942;</button>
-                    <label class="dataset-merge-select" title="${isMergeReadyDataset(item) ? "Select for merge" : "Treat the dataset before merging"}">
-                      <input class="merge-check" type="checkbox" data-merge-id="${escapeHtml(item.id)}" aria-label="Select ${escapeHtml(datasetDisplayName(item))} for merge" ${state.merge.selectedIds.includes(item.id) ? "checked" : ""} ${isMergeReadyDataset(item) ? "" : "disabled"} />
-                    </label>
+                  <li class="dataset-row" data-dataset-id="${escapeHtml(item.id)}" data-dataset-drop="${escapeHtml(item.id)}">
+                    <button type="button" class="dataset-drag-handle" title="Drag to reorder or move dataset" aria-label="Drag ${escapeHtml(datasetDisplayName(item))} to reorder or move">&#8942;&#8942;</button>
                     <button class="dataset-activate ${index === state.activeIndex ? "active" : ""}" data-action="activate" data-dataset-id="${escapeHtml(item.id)}" title="${escapeHtml(datasetDisplayName(item))}">
                       <span data-i18n-skip>${escapeHtml(datasetDisplayName(item))}</span>
                       <small>${datasetStateLabel(item)}</small>
@@ -282,7 +297,6 @@ function renderOverview() {
               <p>${datasetStateLabel(dataset)} analysis dataset</p>
             </div>
             <div class="active-dataset-actions">
-              <span class="merge-selection-copy">${state.merge.selectedIds.length} selected</span>
               <span class="dataset-badge">${analysisRangeLabel(analysis)}</span>
             </div>
           </div>
@@ -297,7 +311,6 @@ function renderOverview() {
             <div class="treatment-actions">
               <button data-action="baseline" class="${folder?.treatments?.baseline ? "active" : ""}" ${state.job ? "disabled" : ""}>Baseline</button>
               <button data-action="chirp" class="${folder?.treatments?.chirp ? "active" : ""}" ${state.job ? "disabled" : ""}>Chirp</button>
-              <button data-action="open-merge" ${canOpenMergeWorkspace() && !state.job ? "" : "disabled"} title="Select exactly two treated datasets">Merge...</button>
               <button data-action="reset" ${state.job ? "disabled" : ""}>Reset</button>
             </div>
           </div>
@@ -433,7 +446,8 @@ function renderModal() {
   if (state.modal === "merge") return renderMergeWorkspace();
   if (state.modal === "manual") return renderManualModal();
   if (state.modal === "about") return renderAboutModal();
-  if (state.modal === "compare-select") return renderCompareSelection();
+  if (state.modal === "compare-select") return renderDatasetSelection("compare");
+  if (state.modal === "merge-select") return renderDatasetSelection("merge");
   if (state.modal === "compare-workspace") return renderCompareWorkspace();
   if (state.modal === "fit") return renderFitModal();
   if (state.modal === "new-folder") return renderNewFolderModal();
@@ -460,7 +474,10 @@ function renderMergeWorkspace() {
             <h2>Merge Spectral Ranges</h2>
             <p>Join clean wavelength ranges from two treated datasets on their common measured time support.</p>
           </div>
-          <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
+          <div class="modal-head-actions">
+            <button data-action="change-merge">Change Datasets</button>
+            <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
+          </div>
         </header>
 
         <div class="merge-workspace-stack">
@@ -629,35 +646,67 @@ function renderPlotContextMenu() {
     </menu>`;
 }
 
-function renderCompareSelection() {
-  const selectedCount = state.compare.selectedIds.length;
+function renderDatasetSelection(mode) {
+  const config = SELECTION_MODES[mode];
+  const selectedIds = mode === "compare" ? state.compare.selectedIds : state.merge.selectedIds;
+  const selectedCount = selectedIds.length;
+  const eligible = state.datasets.filter((d) => isEligibleForMode(d, mode));
+  const validation = validateSelection(selectedIds, mode);
+  const title = mode === "compare" ? "Select Datasets to Compare" : "Select Datasets to Merge";
+  const description = mode === "compare"
+    ? "Choose at least two datasets for coordinated comparison."
+    : "Choose exactly two treated datasets for merging.";
+  const continueLabel = mode === "compare" ? "Open Comparison" : "Open Merge Workspace";
+  const continueAction = mode === "compare" ? "open-comparison" : "open-merge-workspace";
+
+  // Group eligible datasets by folder
+  const grouped = new Map();
+  for (const dataset of eligible) {
+    const folder = state.folders.find((f) => f.id === dataset.folderId);
+    const key = folder?.name ?? "Unfiled";
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(dataset);
+  }
+
+  let rows = "";
+  for (const [folderName, datasets] of grouped) {
+    rows += `<div class="selection-group-heading">${escapeHtml(folderName)}</div>`;
+    for (const dataset of datasets) {
+      const datasetEligible = isEligibleForMode(dataset, mode);
+      const checked = selectedIds.includes(dataset.id);
+      const disabled = !datasetEligible;
+      rows += `
+        <label class="selection-row ${disabled ? "disabled" : ""}">
+          <input class="selection-check" type="checkbox" data-dataset-id="${escapeHtml(dataset.id)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
+          <span class="selection-name"><strong data-i18n-skip>${escapeHtml(datasetDisplayName(dataset))}</strong><small>${datasetStateLabel(dataset)}</small>${disabled ? `<em>Treat before merging</em>` : ""}</span>
+          <span>${formatWavelength(dataset.analysis.spectralAxis[0])}-${formatWavelength(dataset.analysis.spectralAxis.at(-1))} nm</span>
+          <span>${formatCoordinate(dataset.analysis.timeAxis[0])}-${formatCoordinate(dataset.analysis.timeAxis.at(-1))} ps</span>
+          <span>${dataset.fit ? `${dataset.fit.componentCount}C fit` : "No fit"}</span>
+        </label>`;
+    }
+  }
+
+  const selectAllRow = config.supportsSelectAll ? `
+    <label class="selection-select-all">
+      <input id="selection-select-all" type="checkbox" ${selectedCount === eligible.length && eligible.length > 0 ? "checked" : ""} />
+      <span><strong>Select all</strong><small>Include every project dataset</small></span>
+    </label>` : "";
+
   return `
-    <section class="modal-shell" role="dialog" aria-modal="true" aria-label="Select datasets to compare">
+    <section class="modal-shell" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
       <div class="modal selection-modal">
         <header class="modal-head">
           <div>
-            <h2>Select Datasets</h2>
-            <p>Choose at least two treated datasets for coordinated comparison.</p>
+            <h2>${escapeHtml(title)}</h2>
+            <p>${escapeHtml(description)}</p>
           </div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
-        <label class="selection-select-all">
-          <input id="compare-select-all" type="checkbox" />
-          <span><strong>Select all</strong><small>Include every project dataset</small></span>
-        </label>
-        <div class="selection-list">
-          ${state.datasets.map((dataset, index) => `
-            <label class="selection-row">
-              <input class="compare-check" type="checkbox" data-index="${index}" ${state.compare.selectedIds.includes(dataset.id) ? "checked" : ""} />
-              <span class="selection-name"><strong data-i18n-skip>${escapeHtml(datasetDisplayName(dataset))}</strong><small>${datasetStateLabel(dataset)}</small></span>
-              <span>${formatWavelength(dataset.analysis.spectralAxis[0])}-${formatWavelength(dataset.analysis.spectralAxis.at(-1))} nm</span>
-              <span>${formatCoordinate(dataset.analysis.timeAxis[0])}-${formatCoordinate(dataset.analysis.timeAxis.at(-1))} ps</span>
-              <span>${dataset.fit ? `${dataset.fit.componentCount}C fit` : "No fit"}</span>
-            </label>`).join("")}
-        </div>
+        ${selectAllRow}
+        <div class="selection-list">${rows}</div>
         <footer class="modal-footer">
-          <span id="compare-selection-count">${selectedCount} selected</span>
-          <button data-action="open-comparison" id="open-comparison" ${selectedCount >= 2 ? "" : "disabled"}>Open Comparison</button>
+          <span id="selection-count">${selectedCount} selected</span>
+          <button data-action="${continueAction}" id="selection-continue" ${validation.valid ? "" : "disabled"}>${continueLabel}</button>
         </footer>
       </div>
     </section>
@@ -741,8 +790,15 @@ function renderCompareWorkspace() {
 
 function renderFitModal() {
   const dataset = activeDataset();
+  const folder = activeFolder();
   const limitedCount = irfLimitedCount(dataset);
-  const unfittedCount = state.datasets.filter((item) => !item.fit).length;
+  const folderTargets = folder
+    ? getUnfittedDatasetsInFolder(state.datasets, folder.id)
+    : [];
+  const unfittedCount = folderTargets.length;
+  const folderContext = folder
+    ? `Batch fit unfitted datasets in "${escapeHtml(folder.name)}" (${unfittedCount})`
+    : "No active folder";
   return `
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="Global fitting">
       <div class="modal fit-modal">
@@ -759,7 +815,7 @@ function renderFitModal() {
           </select></label>
           <label><span>IRF FWHM (ps)</span><input id="fit-irf" type="number" min="0" step="0.01" value="${state.fitting.irfFwhm}" /></label>
           <button data-action="run-fit" ${state.job ? "disabled" : ""}>${state.job?.kind === "fit" ? "Processing..." : "Fit Active Dataset"}</button>
-          <button data-action="batch-fit" ${state.job || !unfittedCount ? "disabled" : ""}>${state.job?.kind === "batch-fit" ? "Processing..." : unfittedCount ? `Batch Global Fitting (${unfittedCount})` : "All Datasets Fitted"}</button>
+          <button data-action="batch-fit" ${state.job || !unfittedCount ? "disabled" : ""} title="${escapeHtml(folderContext)}">${state.job?.kind === "batch-fit" ? "Processing..." : unfittedCount ? `Batch Global Fitting (${unfittedCount})` : "Current Folder Fitted"}</button>
           <label class="check-control fit-hide-control ${limitedCount ? "" : "disabled-control"}"><input id="fit-hide-irf" type="checkbox" ${state.fitting.hideIrfLimited && limitedCount ? "checked" : ""} ${limitedCount ? "" : "disabled"} /> ${limitedCount ? "Hide IRF-limited spectra" : "No IRF-limited components"}</label>
         </section>
         ${renderLifetimeControls()}
@@ -959,8 +1015,35 @@ function bindDom() {
       ? "sheets-only"
       : "sheets-plots";
   });
-  document.querySelectorAll(".merge-check").forEach((checkbox) => {
-    checkbox.addEventListener("change", (event) => updateMergeSelection(event.currentTarget.dataset.mergeId, event.currentTarget.checked));
+  document.getElementById("origin-format")?.addEventListener("change", (event) => {
+    state.origin.outputFormat = event.target.value;
+  });
+
+  // Shared selection-modal listeners (compare and merge)
+  document.querySelectorAll(".selection-check").forEach((checkbox) => {
+    checkbox.addEventListener("change", (event) => {
+      const datasetId = event.currentTarget.dataset.datasetId;
+      const mode = state.modal === "merge-select" ? "merge" : "compare";
+      const selectedIds = mode === "compare" ? state.compare.selectedIds : state.merge.selectedIds;
+      const newIds = toggleSelection(selectedIds, datasetId, mode);
+      if (mode === "compare") {
+        state.compare.selectedIds = newIds;
+      } else {
+        state.merge.selectedIds = newIds;
+        state.merge.plan = null;
+        state.merge.draft = null;
+      }
+      markDirty();
+      render();
+    });
+  });
+  document.getElementById("selection-select-all")?.addEventListener("change", (event) => {
+    if (state.modal === "compare-select") {
+      state.compare.selectedIds = event.target.checked
+        ? state.datasets.filter((d) => isEligibleForMode(d, "compare")).map((d) => d.id)
+        : [];
+    }
+    render();
   });
   document.getElementById("merge-preview-time")?.addEventListener("input", (event) => {
     state.merge.draft.previewTimeIndex = Number(event.target.value);
@@ -1052,17 +1135,6 @@ function bindDom() {
     });
   });
 
-  document.querySelectorAll(".compare-check").forEach((checkbox) => {
-    checkbox.addEventListener("change", updateComparisonSelection);
-  });
-  document.getElementById("compare-select-all")?.addEventListener("change", (event) => {
-    state.compare.selectedIds = event.target.checked ? state.datasets.map((dataset) => dataset.id) : [];
-    document.querySelectorAll(".compare-check").forEach((checkbox) => {
-      checkbox.checked = event.target.checked;
-    });
-    syncComparisonSelectionControls();
-    markDirty();
-  });
   syncComparisonSelectionControls();
   document.getElementById("compare-time-slider")?.addEventListener("input", (event) => {
     state.compare.timeIndex = Number(event.target.value);
@@ -1184,19 +1256,41 @@ function bindDom() {
       const startX = event.clientX;
       const startY = event.clientY;
       let started = false;
-      let dropTarget = null;
+      let resolvedTarget = null;
       dragHandle.setPointerCapture?.(pointerId);
 
       const clearTarget = () => {
-        dropTarget?.classList.remove("drop-target");
-        dropTarget = null;
+        if (resolvedTarget) {
+          resolvedTarget.element.classList.remove(resolvedTarget.dropClass);
+          resolvedTarget = null;
+        }
       };
       const updateTarget = (pointerEvent) => {
-        const nextTarget = document.elementFromPoint(pointerEvent.clientX, pointerEvent.clientY)?.closest("[data-folder-drop]") ?? null;
-        if (nextTarget === dropTarget) return;
+        const element = document.elementFromPoint(pointerEvent.clientX, pointerEvent.clientY);
+        // First, try a dataset row for before/after placement
+        const rowTarget = element?.closest("[data-dataset-drop]");
+        if (rowTarget && rowTarget.dataset.datasetDrop !== datasetId) {
+          const rect = rowTarget.getBoundingClientRect();
+          const placement = pointerEvent.clientY < rect.top + rect.height / 2 ? "before" : "after";
+          const dropClass = `drop-${placement}`;
+          const key = `${rowTarget.dataset.datasetDrop}-${placement}`;
+          if (resolvedTarget?.key === key) return;
+          clearTarget();
+          resolvedTarget = { element: rowTarget, placement, targetDatasetId: rowTarget.dataset.datasetDrop, folderId: rowTarget.closest("[data-folder-drop]")?.dataset.folderDrop, dropClass, key };
+          rowTarget.classList.add(dropClass);
+          return;
+        }
+        // Fallback to folder-level for end-of-folder drops
+        const folderTarget = element?.closest("[data-folder-drop]");
+        if (folderTarget) {
+          const key = `end-${folderTarget.dataset.folderDrop}`;
+          if (resolvedTarget?.key === key) return;
+          clearTarget();
+          resolvedTarget = { element: folderTarget, placement: "end", targetDatasetId: null, folderId: folderTarget.dataset.folderDrop, dropClass: "drop-end", key };
+          folderTarget.classList.add("drop-end");
+          return;
+        }
         clearTarget();
-        dropTarget = nextTarget;
-        dropTarget?.classList.add("drop-target");
       };
       const move = (pointerEvent) => {
         if (pointerEvent.pointerId !== pointerId) return;
@@ -1205,14 +1299,30 @@ function bindDom() {
           row.classList.add("dragging");
           document.documentElement.classList.add("dataset-drag-active");
         }
-        if (started) updateTarget(pointerEvent);
+        if (started) {
+          updateTarget(pointerEvent);
+          // Edge auto-scroll
+          const tree = document.querySelector(".dataset-tree-scroll");
+          if (tree) {
+            const treeRect = tree.getBoundingClientRect();
+            const edge = 40;
+            if (pointerEvent.clientY < treeRect.top + edge) tree.scrollTop -= 8;
+            else if (pointerEvent.clientY > treeRect.bottom - edge) tree.scrollTop += 8;
+          }
+        }
       };
       const finish = (pointerEvent) => {
         if (pointerEvent.pointerId !== pointerId) return;
         if (started) updateTarget(pointerEvent);
-        const folderId = dropTarget?.dataset.folderDrop;
+        const target = resolvedTarget;
         cleanup();
-        if (started && folderId) moveDatasetToFolder(datasetId, folderId);
+        if (started && target) {
+          reorderDataset(datasetId, {
+            targetFolderId: target.folderId,
+            targetDatasetId: target.targetDatasetId,
+            placement: target.placement,
+          });
+        }
       };
       const cleanup = () => {
         clearTarget();
@@ -1387,8 +1497,38 @@ async function handleAction(event) {
     } else if (action === "open-about") {
       state.modal = "about";
       render();
-    } else if (action === "open-merge") {
-      openMergeWorkspace();
+    } else if (action === "open-merge-selection") {
+      state.merge.stage = "select";
+      state.modal = "merge-select";
+      render();
+    } else if (action === "open-merge-workspace") {
+      const datasets = state.merge.selectedIds
+        .map((id) => state.datasets.find((d) => d.id === id))
+        .filter(Boolean);
+      if (datasets.length !== 2 || !datasets.every((d) => isEligibleForMode(d, "merge"))) {
+        state.notice = { kind: "error", title: "Select exactly two treated datasets", message: "Treat both datasets before merging." };
+        render();
+        return;
+      }
+      const plan = prepareMergePlan(datasets[0], datasets[1], {
+        alignmentMode: "treated-time-axis",
+        timeShiftPs: 0,
+      });
+      state.merge.plan = plan;
+      state.merge.draft = {
+        lowRange: { ...plan.recommendedRanges.low },
+        highRange: { ...plan.recommendedRanges.high },
+        seamWavelength: plan.seam.wavelength,
+        applyAmplitudeScale: Number.isFinite(plan.amplitudeScale.scale),
+        outputName: uniqueDatasetLabel(`${plan.low.label} + ${plan.high.label}`),
+        folderId: "__new__",
+        previewTimeIndex: nearestIndex(plan.commonTimeAxis, Math.max(0, plan.commonTimeAxis[0])),
+      };
+      state.modal = "merge";
+      render();
+    } else if (action === "change-merge") {
+      state.modal = "merge-select";
+      render();
     } else if (action === "create-merged-dataset") {
       await runJob("Creating aligned merged dataset", "merge", createMergedDatasetFromDraft,
         (dataset) => `${datasetDisplayName(dataset)} was added as a derived dataset; both parent sources remain unchanged.`);
@@ -1419,6 +1559,8 @@ async function handleAction(event) {
       await saveProject();
     } else if (action === "export-md") {
       await exportMarkdown();
+    } else if (action === "select-origin" || action === "change-origin") {
+      await selectOriginInstallation();
     } else if (action === "create-origin") {
       await createInOrigin();
     } else if (action === "export-plot-png") {
@@ -1703,16 +1845,24 @@ async function runFitActive() {
 
 async function runBatchFit() {
   const configuration = readLifetimeConfiguration();
-  const targets = state.datasets.filter((dataset) => !dataset.fit);
+  const activeId = activeDataset()?.id ?? null;
+  const folder = activeFolder();
+  if (!folder) {
+    state.notice = { kind: "info", title: "No active folder", message: "Select a dataset so the batch fit knows which folder to process." };
+    render();
+    return;
+  }
+  const targets = getUnfittedDatasetsInFolder(state.datasets, folder.id);
   if (!targets.length) {
-    state.notice = { kind: "info", title: "No unfitted datasets", message: "Batch Global Fitting preserves existing results and found no unfitted datasets to process." };
+    state.notice = { kind: "info", title: "Current Folder Fitted", message: `No unfitted datasets in "${folder.name}". Batch Global Fitting preserves existing results.` };
     render();
     return;
   }
   const targetIds = new Set(targets.map((dataset) => dataset.id));
-  await runJob("Batch Global Fitting", "batch-fit", async () => {
+  const folderName = folder.name;
+  await runJob(`Batch Global Fitting in ${folderName}`, "batch-fit", async () => {
     for (let index = 0; index < targets.length; index += 1) {
-      state.job.detail = `${index + 1} of ${targets.length}: ${targets[index].source.fileName}`;
+      state.job.detail = `${index + 1} of ${targets.length} in ${folderName}: ${targets[index].source.fileName}`;
       render();
       await nextFrame();
       targets[index].fit = Parser.fitGlobalExponentials(targets[index].analysis, state.fitting.components, {
@@ -1722,14 +1872,14 @@ async function runBatchFit() {
       });
     }
     const activeFit = activeDataset()?.fit;
-    if (activeFit && targetIds.has(activeDataset().id)) {
+    if (activeFit && targetIds.has(activeId)) {
       state.fitting.lifetimeValues = activeFit.lifetimes.map((value) => conciseInputNumber(value));
       state.fitting.fixedLifetimes = activeFit.fixedLifetimes.slice();
     }
     state.fitting.spectrumMode = "EAS";
     clearPlotZooms(["main-components", "modal-eas", "modal-das", "fit-residual", "compare-components"]);
     markDirty();
-  }, `Global fitting completed for ${targets.length} previously unfitted dataset${targets.length === 1 ? "" : "s"}; existing fits were preserved.`);
+  }, `Global fitting completed for ${targets.length} dataset(s) in "${folderName}"; existing fits were preserved.`);
 }
 
 function resetLifetimeEditor() {
@@ -1945,6 +2095,20 @@ async function exportMarkdown() {
   }, "AI-ready Markdown exported to the selected path.");
 }
 
+async function selectOriginInstallation() {
+  try {
+    const result = await invoke("select_origin_installation");
+    if (result) {
+      state.origin.installation = result;
+      state.origin.outputFormat = result.defaultProjectFormat;
+      state.notice = { kind: "success", title: "OriginPro selected", message: `${result.displayName} (${result.supportLevel}, ${result.backend})` };
+    }
+  } catch (error) {
+    state.notice = { kind: "error", title: "Could not select OriginPro", message: errorMessage(error) };
+  }
+  render();
+}
+
 async function createInOrigin() {
   await runJob("Launching OriginPro bridge", "create-origin", async () => {
     if (!isTauriRuntime() || !isWindowsPlatform()) {
@@ -1952,18 +2116,29 @@ async function createInOrigin() {
     }
     const bundle = createOriginBundle(serializeProject());
     const projectName = projectArchiveDefaultName().replace(/\.sflproj$/i, "");
+    const ext = state.origin.outputFormat || state.origin.installation?.defaultProjectFormat || "opju";
     return invoke("create_origin_project", {
-      defaultName: `${projectName || "SpecFlowLab_project"}.opju`,
+      defaultName: `${projectName || "SpecFlowLab_project"}.${ext}`,
       bytes: Array.from(bundle),
       createPlots: state.origin.outputMode === "sheets-plots",
+      outputFormat: state.origin.outputFormat || null,
     });
   }, (result) => {
+    const originInfo = result.originDisplayName
+      ? `${result.originDisplayName}${result.originVersion ? ` ${result.originVersion}` : ""} (${result.supportLevel}, ${result.backend})`
+      : result.originExecutable;
+    const formatLabel = (result.outputFormat || "opju").toUpperCase();
     const graphSummary = result.createPlots
       ? ` and ${result.graphCount} automatically rescaled graphs`
       : " in sheets-only mode";
+    let omittedMsg = "";
+    if (result.omittedGraphTypes?.length) {
+      omittedMsg = ` Omitted: ${result.omittedGraphTypes.join(", ")}. ${result.omissionReasons?.join(" ") ?? ""}`;
+    }
     return (
-      `OriginPro imported ${result.datasetCount} datasets into ${result.workbookCount} workbooks${graphSummary}, `
-      + `then saved a ${formatBytes(result.outputBytes)} project at ${result.outputPath}. `
+      `${originInfo} imported ${result.datasetCount} datasets into ${result.workbookCount} workbooks${graphSummary}, `
+      + `then saved a ${formatBytes(result.outputBytes)} ${formatLabel} project at ${result.outputPath}.`
+      + `${omittedMsg} `
       + `The exact bridge input remains at ${result.bundlePath}. `
       + `${result.warningCount ? `${result.warningCount} plot warning(s) were recorded. ` : ""}`
       + `Diagnostics: ${result.statusPath} and ${result.logPath}.`
@@ -3419,19 +3594,27 @@ function deleteEmptyFolder(folderId) {
   render();
 }
 
-function moveDatasetToFolder(datasetId, folderId) {
-  const dataset = state.datasets.find((item) => item.id === datasetId);
-  const folder = state.folders.find((item) => item.id === folderId);
-  if (!dataset || !folder || dataset.folderId === folderId) return;
-  dataset.folderId = folderId;
-  folder.collapsed = false;
+function reorderDataset(datasetId, { targetFolderId, targetDatasetId, placement }) {
+  const activeId = activeDataset()?.id ?? null;
+  const result = moveDataset(state.datasets, state.folders, {
+    datasetId,
+    targetFolderId,
+    targetDatasetId,
+    placement,
+  }, activeId);
+  if (!result.changed) {
+    render();
+    return;
+  }
+  state.activeIndex = result.activeIndex;
+  const targetFolder = state.folders.find((f) => f.id === targetFolderId);
+  if (targetFolder) targetFolder.collapsed = false;
   markDirty();
-  state.notice = {
-    kind: "success",
-    title: "Dataset moved",
-    message: `${dataset.source.fileName} moved to ${folder.name}. Its current treated version was preserved.`,
-  };
   render();
+}
+
+function moveDatasetToFolder(datasetId, folderId) {
+  reorderDataset(datasetId, { targetFolderId: folderId, targetDatasetId: null, placement: "end" });
 }
 
 function saveDatasetDetails() {
@@ -3828,3 +4011,18 @@ window.addEventListener("resize", () => {
 });
 
 render();
+
+// Load saved Origin installation on startup
+(async () => {
+  if (!isTauriRuntime()) return;
+  try {
+    const installation = await invoke("get_origin_installation");
+    if (installation) {
+      state.origin.installation = installation;
+      state.origin.outputFormat = installation.defaultProjectFormat;
+      render();
+    }
+  } catch (_) {
+    // No saved installation — that's fine
+  }
+})();

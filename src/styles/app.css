@@ -485,9 +485,17 @@ input[type="checkbox"] {
   transition: border-color 120ms ease, background 120ms ease;
 }
 
-.folder-node.drop-target {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+.folder-node.drop-end {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.dataset-row.drop-before {
+  box-shadow: 0 -2px 0 var(--accent);
+}
+
+.dataset-row.drop-after {
+  box-shadow: 0 2px 0 var(--accent);
 }
 
 .folder-heading {
@@ -681,9 +689,7 @@ input[type="checkbox"] {
   color: inherit;
 }
 
-.dataset-drag-active .folder-node.drop-target {
-  border-color: transparent;
-  background: transparent;
+.dataset-drag-active .folder-node.drop-end {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
