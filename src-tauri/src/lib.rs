@@ -39,8 +39,11 @@ struct OriginLaunchResult {
     output_bytes: u64,
     warning_count: usize,
     create_plots: bool,
+    #[allow(dead_code)]
     created_graph_types: Vec<String>,
+    #[allow(dead_code)]
     omitted_graph_types: Vec<String>,
+    #[allow(dead_code)]
     omission_reasons: Vec<String>,
 }
 
