@@ -563,7 +563,7 @@ input[type="checkbox"] {
 /* Dataset rows */
 .dataset-row {
   display: grid;
-  grid-template-columns: 18px 22px minmax(0, 1fr) 26px;
+  grid-template-columns: 18px minmax(0, 1fr) 26px;
   align-items: center;
   border-top: 1px solid rgba(210, 220, 222, 0.75);
   margin-left: 21px;
@@ -593,13 +593,6 @@ input[type="checkbox"] {
   border-color: transparent;
   background: transparent;
   color: var(--accent);
-}
-
-.dataset-merge-select {
-  display: grid;
-  min-height: 32px;
-  place-items: center;
-  cursor: pointer;
 }
 
 .dataset-merge-select input {

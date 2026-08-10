@@ -63,6 +63,12 @@ jobs:
       - name: Build Tauri for Windows (.msi + .exe)
         run: npx tauri build --ci
 
+      - name: Copy portable exe to releases
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path releases
+          Copy-Item src-tauri/target/release/specflowlab.exe releases/SpecFlowLab-portable.exe
+
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
@@ -70,4 +76,5 @@ jobs:
           path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
+            releases/SpecFlowLab-portable.exe
           retention-days: 30
