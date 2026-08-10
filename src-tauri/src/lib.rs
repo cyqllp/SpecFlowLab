@@ -50,6 +50,7 @@ struct OriginLaunchResult {
 #[cfg(any(target_os = "windows", test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct OriginJobStatus {
     state: String,
     #[serde(default)]
