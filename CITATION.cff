@@ -2,8 +2,11 @@ cff-version: 1.2.0
 title: "SpecFlowLab"
 message: "If SpecFlowLab helps your work, please cite the versioned release."
 type: software
-version: 1.0.0
-date-released: 2026-08-05
+version: 1.0.2
+date-released: 2026-08-10
+doi: 10.5281/zenodo.21839697
+repository-code: "https://github.com/cyqllp/SpecFlowLab"
+url: "https://doi.org/10.5281/zenodo.21839697"
 abstract: >-
   A provenance-preserving desktop workspace for time-resolved spectroscopy,
   VIS/NIR comparison and merging, reproducible project archives, and

@@ -2,6 +2,14 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [1.0.2] - 2026-08-10
+
+- Added the Zenodo DOI to the in-app About panel, citation metadata, and README.
+- Updated the Manual and application metadata for version 1.0.2.
+- Consolidated the OriginPro output heading onto one row and widened the output
+  mode selector so “Sheets and plots” remains fully visible.
+- Added Simplified Chinese translations for the new OriginPro output labels.
+
 ## [1.0.1] - 2026-08-07
 
 - Fluid CSS design system with `clamp()`-based layout tokens replacing fixed

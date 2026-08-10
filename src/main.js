@@ -25,7 +25,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 const plotGeometry = new WeakMap();
 
 const state = {
@@ -157,9 +157,9 @@ function render() {
 
       <section class="panel sidebar-panel handoff-panel">
         <div class="section-heading">
-          <h2>OriginPro</h2>
+          <h2>OriginPro Output</h2>
         </div>
-        <label class="inline-select origin-mode-select"><span>Output</span><select id="origin-output-mode" ${busy ? "disabled" : ""}>
+        <label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
           <option value="sheets-plots" ${state.origin.outputMode === "sheets-plots" ? "selected" : ""}>Sheets and plots</option>
           <option value="sheets-only" ${state.origin.outputMode === "sheets-only" ? "selected" : ""}>Only sheets</option>
         </select></label>
@@ -530,7 +530,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.2 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -567,6 +567,7 @@ function renderAboutModal() {
         <p>SpecFlowLab organizes, treats, compares, merges, fits, and exports time-resolved spectroscopy datasets while preserving source data and analysis provenance.</p>
         <dl class="about-details">
           <div><dt>Version</dt><dd>${APP_VERSION}</dd></div>
+          <div><dt>DOI</dt><dd><a href="https://doi.org/10.5281/zenodo.21839697" target="_blank" rel="noreferrer" data-i18n-skip>10.5281/zenodo.21839697</a></dd></div>
           <div><dt>Feedback</dt><dd><a href="mailto:specflowlab@icluod.com" data-i18n-skip>specflowlab@icluod.com</a></dd></div>
           <div><dt>Copyright</dt><dd>© 2026 SpecFlowLab. All rights reserved.</dd></div>
         </dl>
