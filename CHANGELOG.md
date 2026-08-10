@@ -2,6 +2,17 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [1.0.4] - 2026-08-10
+
+- **Windows CI packaging** — GitHub Actions now builds signed Windows installers
+  (`.msi` and `.exe` via NSIS) on every push to `main`. Artifacts are retained
+  for 30 days. The bundle targets now include `msi` in addition to `nsis`.
+- **Rust clippy** added to CI lint gate alongside `cargo fmt` and `cargo test`.
+- **`.opj` / `.opju` format selection** — the Origin panel adapts the file-save
+  dialog filter to the selected output format. The Rust capability resolver
+  determines the default format per detected Origin version, and the user can
+  override it when the installation supports both.
+
 ## [1.0.3] - 2026-08-10
 
 - **Batch Global Fitting** now scoped to the active dataset folder instead of

@@ -28,7 +28,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.3";
+const APP_VERSION = "1.0.4";
 const plotGeometry = new WeakMap();
 
 const state = {
