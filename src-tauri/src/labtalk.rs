@@ -205,8 +205,7 @@ pub fn stage_labtalk_import(bundle_path: &Path) -> Result<LabTalkStage, String> 
                         index + 1
                     ));
                 }
-                let fit_matrix =
-                    read_f64_matrix_from_zip(&mut archive, entry, fit_rows, fit_cols)?;
+                let fit_matrix = read_f64_matrix_from_zip(&mut archive, entry, fit_rows, fit_cols)?;
                 let path = dataset_dir.join(file_name);
                 write_wide_table(
                     &path,
@@ -242,12 +241,8 @@ pub fn stage_labtalk_import(bundle_path: &Path) -> Result<LabTalkStage, String> 
                         wave_axis.len()
                     ));
                 }
-                let spectra = read_f64_matrix_from_zip(
-                    &mut archive,
-                    entry,
-                    component_count,
-                    spectral_count,
-                )?;
+                let spectra =
+                    read_f64_matrix_from_zip(&mut archive, entry, component_count, spectral_count)?;
                 let path = dataset_dir.join(file_name);
                 write_spectra_table(
                     &path,
@@ -446,9 +441,9 @@ fn dataset_metadata_pairs(
     let folder_name = manifest["folders"]
         .as_array()
         .and_then(|folders| {
-            folders.iter().find(|folder| {
-                folder["id"].as_str().unwrap_or_default() == folder_id.as_str()
-            })
+            folders
+                .iter()
+                .find(|folder| folder["id"].as_str().unwrap_or_default() == folder_id.as_str())
         })
         .and_then(|folder| folder["name"].as_str())
         .unwrap_or("Unfiled");
@@ -477,10 +472,22 @@ fn dataset_metadata_pairs(
             "Sample note".to_string(),
             json_string(&dataset["sampleNote"], ""),
         ),
-        ("Dataset kind".to_string(), json_string(&dataset["kind"], "imported")),
-        ("Source file".to_string(), json_string(&source["fileName"], "")),
-        ("Source format".to_string(), json_string(&source["format"], "")),
-        ("Source bundle".to_string(), bundle_path.display().to_string()),
+        (
+            "Dataset kind".to_string(),
+            json_string(&dataset["kind"], "imported"),
+        ),
+        (
+            "Source file".to_string(),
+            json_string(&source["fileName"], ""),
+        ),
+        (
+            "Source format".to_string(),
+            json_string(&source["format"], ""),
+        ),
+        (
+            "Source bundle".to_string(),
+            bundle_path.display().to_string(),
+        ),
         (
             "Bundle schema".to_string(),
             json_string(&manifest["bundleSchema"], ""),
@@ -489,7 +496,10 @@ fn dataset_metadata_pairs(
             "Source project schema".to_string(),
             json_string(&manifest["sourceProjectSchema"], ""),
         ),
-        ("App version".to_string(), json_string(&manifest["appVersion"], "")),
+        (
+            "App version".to_string(),
+            json_string(&manifest["appVersion"], ""),
+        ),
         (
             "Source saved at".to_string(),
             json_string(&manifest["sourceSavedAt"], ""),
@@ -504,16 +514,19 @@ fn dataset_metadata_pairs(
             "Selected wavelength".to_string(),
             format!("{selected_wavelength} {spectral_unit}"),
         ),
-        (
-            "Units".to_string(),
-            render_json_value(&dataset["units"]),
-        ),
+        ("Units".to_string(), render_json_value(&dataset["units"])),
         (
             "Treatment metadata".to_string(),
             render_json_value(&dataset["analysis"]["metadata"]),
         ),
-        ("Merge lineage".to_string(), render_json_value(&dataset["merge"])),
-        ("Plot plan".to_string(), render_json_value(&dataset["plotPlan"])),
+        (
+            "Merge lineage".to_string(),
+            render_json_value(&dataset["merge"]),
+        ),
+        (
+            "Plot plan".to_string(),
+            render_json_value(&dataset["plotPlan"]),
+        ),
     ]
 }
 
@@ -559,8 +572,13 @@ fn write_text_pairs(path: &Path, pairs: &[(String, String)]) -> Result<(), Strin
         fs::File::create(path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
     writeln!(file, "Property\tValue").map_err(|e| format!("Write error: {e}"))?;
     for (key, value) in pairs {
-        writeln!(file, "{}\t{}", sanitize_tsv_cell(key), sanitize_tsv_cell(value))
-            .map_err(|e| format!("Write error: {e}"))?;
+        writeln!(
+            file,
+            "{}\t{}",
+            sanitize_tsv_cell(key),
+            sanitize_tsv_cell(value)
+        )
+        .map_err(|e| format!("Write error: {e}"))?;
     }
     Ok(())
 }
@@ -608,8 +626,7 @@ fn write_selected_table(
     signal_unit: &str,
 ) -> Result<Vec<usize>, String> {
     let time_indices = representative_indices(time_axis.len(), selected_time_index, 5);
-    let wavelength_indices =
-        representative_indices(wave_axis.len(), selected_wavelength_index, 5);
+    let wavelength_indices = representative_indices(wave_axis.len(), selected_wavelength_index, 5);
     let kinetics_x_column = 1 + time_indices.len();
     let mut headers = vec![format!("Wavelength ({spectral_unit})")];
     headers.extend(time_indices.iter().map(|index| {
@@ -645,7 +662,13 @@ fn write_selected_table(
     let row_count = wave_axis.len().max(time_axis.len());
     for row in 0..row_count {
         let mut fields = Vec::with_capacity(headers.len());
-        fields.push(wave_axis.get(row).copied().map(format_f64).unwrap_or_default());
+        fields.push(
+            wave_axis
+                .get(row)
+                .copied()
+                .map(format_f64)
+                .unwrap_or_default(),
+        );
         fields.extend(time_indices.iter().map(|index| {
             matrix
                 .get(row)
@@ -654,7 +677,13 @@ fn write_selected_table(
                 .map(format_f64)
                 .unwrap_or_default()
         }));
-        fields.push(time_axis.get(row).copied().map(format_f64).unwrap_or_default());
+        fields.push(
+            time_axis
+                .get(row)
+                .copied()
+                .map(format_f64)
+                .unwrap_or_default(),
+        );
         fields.extend(wavelength_indices.iter().map(|index| {
             matrix
                 .get(*index)
@@ -751,8 +780,7 @@ fn representative_indices(length: usize, selected_index: usize, base_count: usiz
     }
     let mut indices: Vec<usize> = (0..base_count)
         .map(|position| {
-            ((position as f64) * ((length - 1) as f64) / ((base_count - 1) as f64)).round()
-                as usize
+            ((position as f64) * ((length - 1) as f64) / ((base_count - 1) as f64)).round() as usize
         })
         .collect();
     indices.push(selected_index.min(length - 1));
@@ -890,8 +918,14 @@ mod tests {
                 "datasets/0001/residual-matrix.f64",
                 vec![0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
             ),
-            ("datasets/0001/das-spectra.f64", vec![10.0, 11.0, 20.0, 21.0]),
-            ("datasets/0001/eas-spectra.f64", vec![30.0, 31.0, 40.0, 41.0]),
+            (
+                "datasets/0001/das-spectra.f64",
+                vec![10.0, 11.0, 20.0, 21.0],
+            ),
+            (
+                "datasets/0001/eas-spectra.f64",
+                vec![30.0, 31.0, 40.0, 41.0],
+            ),
         ] {
             writer.start_file(name, options).unwrap();
             for value in values {
@@ -925,13 +959,8 @@ mod tests {
         assert!(metadata.contains("Display name\tVIS sample"));
         assert!(metadata.contains("Folder\tVIS"));
         assert!(metadata.contains("Treatment metadata\t{\"provenance\""));
-        let das = fs::read_to_string(
-            stage
-                .run_directory
-                .join("0001-VIS_sample")
-                .join("das.txt"),
-        )
-        .unwrap();
+        let das = fs::read_to_string(stage.run_directory.join("0001-VIS_sample").join("das.txt"))
+            .unwrap();
         assert_eq!(
             das,
             "Wavelength (nm)\tDAS 1, tau=0.5 ps\tDAS 2, tau=12 ps\n500\t10\t20\n510\t11\t21\n"
