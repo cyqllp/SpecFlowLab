@@ -181,7 +181,7 @@ function render() {
           </select></label>` : ""}
           <p class="origin-placeholder">OriginPro 8.6 or later is required. Versions before 2021 use the experimental COM sheets-only adapter.</p>
         ` : `<p class="origin-placeholder">Select an OriginPro installation to enable direct export.</p>`}
-        <button class="wide-command" data-action="${state.origin.installation ? "change-origin" : "select-origin"}" ${busy ? "disabled" : ""}>${state.origin.installation ? "Change..." : "Select Origin..."}</button>
+        <button class="wide-command" data-action="${state.origin.installation ? "change-origin" : "select-origin"}" ${busy ? "disabled" : ""}>${state.origin.installation ? "Choose another EXE..." : "Choose Origin EXE..."}</button>
         <button class="wide-command" data-action="create-origin" ${dataset && !busy && isTauriRuntime() && isWindowsPlatform() && state.origin.installation?.capabilities?.worksheets && state.origin.installation?.supportLevel !== "unsupported" ? "" : "disabled"}>Create in OriginPro...</button>
       </section>
     </aside>

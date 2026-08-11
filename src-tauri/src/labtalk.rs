@@ -343,14 +343,9 @@ mod tests {
             table,
             "Wavelength_nm\t-1\t0\t1.5\n500\t1\t2\t3\n510\t4\t\t6.123456789012345\n"
         );
-        let com_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(&stage.manifest_path).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            com_manifest["schema"],
-            "specflowlab.origin_com_import.v1"
-        );
+        let com_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&stage.manifest_path).unwrap()).unwrap();
+        assert_eq!(com_manifest["schema"], "specflowlab.origin_com_import.v1");
         assert_eq!(com_manifest["datasets"][0]["workbookName"], "SFL0001");
         assert_eq!(com_manifest["datasets"][0]["label"], "VIS_sample");
         assert!(com_manifest["datasets"][0]["tablePath"]

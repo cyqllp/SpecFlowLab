@@ -1273,15 +1273,11 @@ async fn select_origin_installation(
 ) -> Result<Option<origin::OriginInstallationInfo>, String> {
     #[cfg(target_os = "windows")]
     {
-        // First check discovered installations
-        let discovered = discover_and_inspect_installations(&app)?;
-        if !discovered.is_empty() {
-            // Return the best candidate; the frontend can show a picker
-            let best = discovered.into_iter().next().unwrap();
-            persist_installation(&app, &best)?;
-            return Ok(Some(best));
-        }
-        // No automatic discovery — ask user to browse
+        // This command is invoked by both Select and Change. Always let the
+        // user choose the exact executable: one Origin installation can ship
+        // 32-bit and 64-bit launchers whose COM registrations are independent.
+        // Auto-discovery remains available to the launch fallback, but must
+        // never override an explicit selection request.
         let selected = app
             .dialog()
             .file()
@@ -1547,13 +1543,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::detect_bitness;
     use super::{
         is_origin_executable_candidate, origin_candidate_score, origin_com_launcher_source,
         origin_launcher_source, origin_startup_labtalk, powershell_single_quoted,
         safe_default_name, OriginJobStatus,
     };
-    #[cfg(target_os = "windows")]
-    use super::detect_bitness;
     use std::path::Path;
 
     #[test]
@@ -1673,7 +1669,10 @@ mod tests {
 
     #[test]
     fn powershell_literal_escapes_single_quotes() {
-        assert_eq!(powershell_single_quoted("C:/O'Brien/a.ps1"), "'C:/O''Brien/a.ps1'");
+        assert_eq!(
+            powershell_single_quoted("C:/O'Brien/a.ps1"),
+            "'C:/O''Brien/a.ps1'"
+        );
     }
 
     #[cfg(target_os = "macos")]
