@@ -179,9 +179,10 @@ function render() {
           ${(state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
             ${state.origin.installation.projectFormats.map((fmt) => `<option value="${fmt}" ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat) === fmt ? "selected" : ""}>${fmt.toUpperCase()}</option>`).join("")}
           </select></label>` : ""}
+          <p class="origin-placeholder">OriginPro 8.6 or later is required. Versions before 2021 use the experimental LabTalk sheets-only adapter.</p>
         ` : `<p class="origin-placeholder">Select an OriginPro installation to enable direct export.</p>`}
         <button class="wide-command" data-action="${state.origin.installation ? "change-origin" : "select-origin"}" ${busy ? "disabled" : ""}>${state.origin.installation ? "Change..." : "Select Origin..."}</button>
-        <button class="wide-command" data-action="create-origin" ${dataset && !busy && isTauriRuntime() && isWindowsPlatform() ? "" : "disabled"}>Create in OriginPro...</button>
+        <button class="wide-command" data-action="create-origin" ${dataset && !busy && isTauriRuntime() && isWindowsPlatform() && state.origin.installation?.capabilities?.worksheets && state.origin.installation?.supportLevel !== "unsupported" ? "" : "disabled"}>Create in OriginPro...</button>
       </section>
     </aside>
 
@@ -547,7 +548,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.2 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.4 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -561,7 +562,7 @@ function renderManualModal() {
           <li><div><strong>Merge treated spectral ranges</strong><p>Select exactly two treated datasets, click Merge between Chirp and Reset, choose clean retained wavelength ranges, review the spectral preview, and create the derived dataset.</p></div></li>
           <li><div><strong>Compare datasets</strong><p>Use Compare to inspect coordinated kinetics, spectra, EAS, and DAS views with reusable sample styles.</p></div></li>
           <li><div><strong>Run global fitting</strong><p>Open Global Fitting, set component starts and IRF options, and review lifetimes, residuals, DAS, EAS, and fit diagnostics.</p></div></li>
-          <li><div><strong>Save and export</strong><p>Save the complete .sflproj archive, export an AI-ready Markdown summary, or create OriginPro sheets and plots on Windows.</p></div></li>
+          <li><div><strong>Save and export</strong><p>Save the complete .sflproj archive, export an AI-ready Markdown summary, or create OriginPro output on Windows. OriginPro 8.6–2020 uses experimental LabTalk sheets-only export; OriginPro 2021+ uses the Python adapter.</p></div></li>
         </ol>
         <div class="manual-integrity-note"><strong>Data integrity</strong><span>Original CSV text and UFS bytes remain unchanged. Treatments, fits, merges, warnings, and provenance are stored separately and reproducibly.</span></div>
         <footer class="modal-footer"><span>For feedback, open About.</span><button data-action="close-modal">Close</button></footer>

@@ -21,13 +21,15 @@ src-tauri/Cargo.lock.
 
 ## Current local evidence
 
-- 21 JavaScript tests pass.
+- 61 JavaScript tests pass.
 - 11 Origin bridge Python tests pass.
-- 7 Rust tests pass.
+- 44 Rust tests pass, including a valid `.sflorigin` to LabTalk staging
+  regression and the Origin 8.5/8.6 boundary.
 - Frontend production build passes.
 - macOS arm64 app bundle was verified and ad-hoc signed for local testing.
-- Windows portable output was structurally checked as PE32+ x86-64, but
-  physical Windows, WebView2, and OriginPro 2021 runtime tests remain pending.
+- Windows output is compiled in CI, but physical Windows/WebView2 tests and
+  OriginPro 8.6 LabTalk plus OriginPro 2021+ Python save/close/reopen tests
+  remain pending.
 
 ## Scientific integrity boundary
 

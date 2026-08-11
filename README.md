@@ -4,7 +4,7 @@ SpecFlowLab is a public-beta portfolio project for provenance-preserving time-re
 
 It imports CSV and UFS data, applies explicit treatments, compares and merges
 VIS/NIR measurements, previews global analysis, and hands off exact project
-data to OriginPro 2021.
+data to OriginPro 8.6 or later on Windows.
 
 Start with the 60-second demo in docs/DEMO.md, the job-search brief in
 docs/JOB_SEARCH.md, or the reproducibility note in docs/REPRODUCIBILITY.md.
@@ -78,12 +78,12 @@ Implemented version 1.0 scope:
   UFS data, a derived matrix CSV for OriginPro compatibility, treated
   axes/matrices, selections, metadata, and available plot-ready
   fitted/residual/DAS/EAS results for the standalone OriginPro Python bridge;
-- the Windows app can create an Origin project directly: it discovers the
-  OriginPro 2021 executable, retains the `.sflorigin` provenance bundle,
-  launches Origin's embedded Python importer, and monitors atomic status plus
-  startup-log diagnostics; success requires the expected workbooks and a
-  non-empty saved `.opju`; users can choose sheets only or sheets plus
-  automatically ranged plots;
+- the Windows app can create an Origin project directly while retaining the
+  `.sflorigin` provenance bundle beside it: OriginPro 8.6–2020 uses an
+  experimental LabTalk worksheet adapter and saves `.opj`, while OriginPro
+  2021+ uses the embedded Python adapter and defaults to `.opju`; both paths
+  require the expected workbook count and a non-empty saved project before
+  reporting success, and OriginPro 8.5 or older is rejected;
 - Origin heatmaps place wavelength on the horizontal axis and log-scaled time
   on the vertical axis from 0.1 ps to the measured maximum; line graphs are
   created on independent one-layer pages, and hidden IRF-limited components

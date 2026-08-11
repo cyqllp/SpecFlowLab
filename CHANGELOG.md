@@ -2,6 +2,18 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [Unreleased]
+
+- Repaired the experimental OriginPro 8.6 LabTalk bridge: valid bundle matrices
+  now use manifest dimensions, staged worksheets retain wavelength/time axes
+  and full numeric precision, OGS files launch with `run.section`, OPJ saving
+  uses the legacy-compatible command, and completion writes parseable JSON.
+- OriginPro 8.6 is now the explicit minimum for direct automation. OriginPro
+  8.5 and older are rejected, OriginPro 8.6–2020 uses sheets-only LabTalk OPJ
+  export, and OriginPro 2021+ retains the embedded Python adapter.
+- Added regression coverage for a real `.sflorigin` staging pass, 8.5 versus
+  8.6 detection, custom-folder executable mappings, and Python-free OGS launch.
+
 ## [1.0.4] - 2026-08-10
 
 - **Windows CI packaging** — GitHub Actions now builds signed Windows installers

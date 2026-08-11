@@ -14,14 +14,21 @@ use std::path::{Path, PathBuf};
 
 use crate::origin::OutputPlan;
 
+#[derive(Debug)]
+pub struct LabTalkStage {
+    pub run_directory: PathBuf,
+    pub script_path: PathBuf,
+    pub dataset_count: usize,
+}
+
 /// Extract the .sflorigin bundle and stage tab-delimited import files.
 ///
-/// Returns the path to the generated LabTalk .OGS script.
+/// Returns the generated LabTalk stage and its expected dataset count.
 pub fn stage_labtalk_import(
     bundle_path: &Path,
     output_path: &Path,
     output_plan: &OutputPlan,
-) -> Result<PathBuf, String> {
+) -> Result<LabTalkStage, String> {
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("timestamp error: {e}"))?
@@ -58,47 +65,53 @@ pub fn stage_labtalk_import(
         return Err("Bundle contains no datasets".to_string());
     }
 
-    let mut tab_paths: Vec<Vec<String>> = Vec::new();
+    let mut table_paths: Vec<String> = Vec::new();
 
-    for dataset in datasets {
-        let dir = dataset["directory"].as_str().unwrap_or("datasets/0001");
-        let name = dataset["label"].as_str().unwrap_or("Dataset");
+    for (index, dataset) in datasets.iter().enumerate() {
+        let name = dataset["projectLabel"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Dataset");
 
         // Extract Float64 data from zip entries
-        let time_path = format!("{dir}/treated-time.f64");
-        let wave_path = format!("{dir}/treated-wavelength.f64");
-        let matrix_path = format!("{dir}/treated-matrix.f64");
+        let analysis = dataset["analysis"]
+            .as_object()
+            .ok_or_else(|| format!("Dataset {} has no analysis descriptor", index + 1))?;
+        let time_descriptor = &analysis["timeAxis"];
+        let wave_descriptor = &analysis["spectralAxis"];
+        let matrix_descriptor = &analysis["matrix"];
+        let time_path = descriptor_entry(time_descriptor, "time axis", index)?;
+        let wave_path = descriptor_entry(wave_descriptor, "spectral axis", index)?;
+        let matrix_path = descriptor_entry(matrix_descriptor, "matrix", index)?;
+        let rows = descriptor_size(matrix_descriptor, "rows", "matrix", index)?;
+        let cols = descriptor_size(matrix_descriptor, "cols", "matrix", index)?;
 
-        let time_axis = read_f64_from_zip(&mut archive, &time_path)?;
-        let wave_axis = read_f64_from_zip(&mut archive, &wave_path)?;
-        let matrix = read_f64_matrix_from_zip(&mut archive, &matrix_path)?;
+        let time_axis = read_f64_from_zip(&mut archive, time_path)?;
+        let wave_axis = read_f64_from_zip(&mut archive, wave_path)?;
+        if time_axis.len() != cols || wave_axis.len() != rows {
+            return Err(format!(
+                "Dataset {} descriptor mismatch: matrix is {rows}x{cols}, time axis has {}, spectral axis has {}",
+                index + 1,
+                time_axis.len(),
+                wave_axis.len()
+            ));
+        }
+        let matrix = read_f64_matrix_from_zip(&mut archive, matrix_path, rows, cols)?;
 
         let sanitized = sanitize_for_labtalk(name);
-        let dataset_dir = run_directory.join(&sanitized);
+        let dataset_dir = run_directory.join(format!("{:04}-{sanitized}", index + 1));
         fs::create_dir_all(&dataset_dir).map_err(|e| format!("Cannot create dataset dir: {e}"))?;
 
-        // Write time axis as tab-delimited
-        let time_tab = dataset_dir.join("time.txt");
-        write_f64_column(&time_tab, &time_axis)?;
-
-        // Write wavelength axis
-        let wave_tab = dataset_dir.join("wavelength.txt");
-        write_f64_column(&wave_tab, &wave_axis)?;
-
-        // Write matrix as tab-delimited (wavelength rows × time columns)
-        let matrix_tab = dataset_dir.join("matrix.txt");
-        write_f64_matrix(&matrix_tab, &matrix)?;
-
-        tab_paths.push(vec![
-            time_tab.to_string_lossy().into_owned(),
-            wave_tab.to_string_lossy().into_owned(),
-            matrix_tab.to_string_lossy().into_owned(),
-        ]);
+        // One deterministic wide worksheet: wavelength in column A, exact
+        // time coordinates in the header row, signal values in B onward.
+        let table_path = dataset_dir.join("worksheet.txt");
+        write_wide_table(&table_path, &time_axis, &wave_axis, &matrix)?;
+        table_paths.push(table_path.to_string_lossy().into_owned());
     }
 
     let script_path = run_directory.join("import.ogs");
     let script = generate_labtalk_script(
-        &tab_paths,
+        &table_paths,
         datasets,
         output_path,
         output_plan,
@@ -107,7 +120,41 @@ pub fn stage_labtalk_import(
     fs::write(&script_path, script.as_bytes())
         .map_err(|e| format!("Cannot write LabTalk script: {e}"))?;
 
-    Ok(script_path)
+    Ok(LabTalkStage {
+        run_directory,
+        script_path,
+        dataset_count: datasets.len(),
+    })
+}
+
+fn descriptor_entry<'a>(
+    descriptor: &'a serde_json::Value,
+    label: &str,
+    dataset_index: usize,
+) -> Result<&'a str, String> {
+    descriptor["entry"].as_str().ok_or_else(|| {
+        format!(
+            "Dataset {} {label} descriptor has no archive entry",
+            dataset_index + 1
+        )
+    })
+}
+
+fn descriptor_size(
+    descriptor: &serde_json::Value,
+    key: &str,
+    label: &str,
+    dataset_index: usize,
+) -> Result<usize, String> {
+    descriptor[key]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            format!(
+                "Dataset {} {label} descriptor has no valid {key}",
+                dataset_index + 1
+            )
+        })
 }
 
 fn read_f64_from_zip(
@@ -135,6 +182,8 @@ fn read_f64_from_zip(
 fn read_f64_matrix_from_zip(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     name: &str,
+    rows: usize,
+    cols: usize,
 ) -> Result<Vec<Vec<f64>>, String> {
     let mut file = archive
         .by_name(name)
@@ -143,20 +192,14 @@ fn read_f64_matrix_from_zip(
     file.read_to_end(&mut bytes)
         .map_err(|e| format!("Read error {name}: {e}"))?;
 
-    // The matrix header: first 8 bytes = row count (u32), next 8 bytes = col count (u32)
-    if bytes.len() < 16 {
-        return Err(format!("{name}: too short for matrix header"));
-    }
-    let rows = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let cols = u32::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-    let data = &bytes[16..];
-    if data.len() != rows * cols * 8 {
+    let expected_bytes = rows
+        .checked_mul(cols)
+        .and_then(|values| values.checked_mul(8))
+        .ok_or_else(|| format!("{name}: matrix dimensions overflow"))?;
+    if bytes.len() != expected_bytes {
         return Err(format!(
-            "{name}: expected {}×{} ({}) f64 values, got {} bytes",
-            rows,
-            cols,
-            rows * cols,
-            data.len()
+            "{name}: expected {rows}x{cols} ({expected_bytes} bytes), got {} bytes",
+            bytes.len()
         ));
     }
     let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(rows);
@@ -165,7 +208,7 @@ fn read_f64_matrix_from_zip(
         let mut row = Vec::with_capacity(cols);
         for c in 0..cols {
             let offset = start + c * 8;
-            let arr: [u8; 8] = data[offset..offset + 8].try_into().unwrap();
+            let arr: [u8; 8] = bytes[offset..offset + 8].try_into().unwrap();
             row.push(f64::from_le_bytes(arr));
         }
         matrix.push(row);
@@ -173,36 +216,46 @@ fn read_f64_matrix_from_zip(
     Ok(matrix)
 }
 
-fn write_f64_column(path: &Path, values: &[f64]) -> Result<(), String> {
+fn write_wide_table(
+    path: &Path,
+    time_axis: &[f64],
+    wave_axis: &[f64],
+    matrix: &[Vec<f64>],
+) -> Result<(), String> {
     let mut file =
         fs::File::create(path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
-    for v in values {
-        writeln!(file, "{v:.6}").map_err(|e| format!("Write error: {e}"))?;
+    let mut header = vec!["Wavelength_nm".to_string()];
+    header.extend(time_axis.iter().map(|value| format_f64(*value)));
+    writeln!(file, "{}", header.join("\t")).map_err(|e| format!("Write error: {e}"))?;
+    for (wavelength, row) in wave_axis.iter().zip(matrix.iter()) {
+        let mut fields = Vec::with_capacity(row.len() + 1);
+        fields.push(format_f64(*wavelength));
+        fields.extend(row.iter().map(|value| format_f64(*value)));
+        writeln!(file, "{}", fields.join("\t")).map_err(|e| format!("Write error: {e}"))?;
     }
     Ok(())
 }
 
-fn write_f64_matrix(path: &Path, matrix: &[Vec<f64>]) -> Result<(), String> {
-    let mut file =
-        fs::File::create(path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
-    for row in matrix {
-        let line: Vec<String> = row.iter().map(|v| format!("{v:.6}")).collect();
-        writeln!(file, "{}", line.join("\t")).map_err(|e| format!("Write error: {e}"))?;
+fn format_f64(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        String::new()
     }
-    Ok(())
 }
 
 /// Generate a LabTalk script that imports tab-delimited data into Origin 8.6.
 ///
 /// Strategy:
 /// - Create one workbook per dataset
-/// - Import time axis → column A (X), wavelength axis → header row
-/// - Import matrix → fill remaining columns
+/// - Import wavelength axis into column A (X)
+/// - Store exact time coordinates in the remaining column long names
+/// - Import the matrix into the remaining Y columns
 /// - Set column designations
 /// - Create line plots if requested
 /// - Save as .opj
 fn generate_labtalk_script(
-    tab_paths: &[Vec<String>],
+    table_paths: &[String],
     datasets: &[serde_json::Value],
     output_path: &Path,
     output_plan: &OutputPlan,
@@ -215,10 +268,14 @@ fn generate_labtalk_script(
 
     let mut script = String::new();
 
-    // Header: version marker so we can detect completion
+    script.push_str("[Main]\r\n");
+
+    // Header: version marker so the startup log confirms the handoff.
     script.push_str("// SpecFlowLab LabTalk handoff reached\r\n");
     script.push_str("type -a \"SpecFlowLab LabTalk handoff reached\";\r\n");
     script.push_str("\r\n");
+
+    push_status_json(&mut script, &status, "started", datasets.len());
 
     // Suppress dialogs
     script.push_str("// Suppress save prompts and update dialogs\r\n");
@@ -228,33 +285,32 @@ fn generate_labtalk_script(
 
     let wants_plots = output_plan.actual_mode != "sheets-only";
 
-    for (i, (paths, dataset)) in tab_paths.iter().zip(datasets.iter()).enumerate() {
+    for (i, (table_path, dataset)) in table_paths.iter().zip(datasets.iter()).enumerate() {
         let idx = i + 1;
-        let time_file = paths[0].replace('\\', "/");
-        let _wave_file = paths[1].replace('\\', "/");
-        let matrix_file = paths[2].replace('\\', "/");
-        let label = dataset["label"].as_str().unwrap_or("Dataset");
+        let table_file = table_path.replace('\\', "/");
+        let label = dataset["projectLabel"].as_str().unwrap_or("Dataset");
         let safe_label = sanitize_for_labtalk(label);
+        let workbook_name = format!("SFL{idx:04}");
 
         script.push_str(&format!("// --- Dataset {idx}: {safe_label} ---\r\n"));
 
         // Create new workbook
         script.push_str(&format!(
-            "newbook name:=\"{safe_label}\" result:=bkName$ option:=lsname;\r\n"
+            "newbook name:=\"{workbook_name}\" result:=bkName$ option:=lsname;\r\n"
         ));
         script.push_str("win -a %H;\r\n");
+        script.push_str(&format!("page.label$ = \"{safe_label}\";\r\n"));
         script.push_str("\r\n");
 
-        // Import time axis as column A
-        script.push_str(&format!("open -w \"{time_file}\";\r\n"));
-        script.push_str("wks.col1.type = 4;\r\n"); // X
-
-        // Import matrix data (rows = wavelengths, columns = times)
-        // We can't easily import a full matrix in one step with LabTalk,
-        // so we do a simple import
-        script.push_str(&format!("open -w \"{matrix_file}\";\r\n"));
-        // Set all data columns as Y
-        script.push_str("loop(ii,1,wks.ncols) { wks.col$(ii).type = 1; };\r\n");
+        // The first row becomes column Long Names. Column A contains the
+        // wavelength axis; B onward contain signals at the exact time values
+        // recorded in their Long Names.
+        script.push_str("wo -k 1;\r\n");
+        script.push_str(&format!("open -w \"{table_file}\";\r\n"));
+        script.push_str("wks.col1.type = 4;\r\n");
+        script.push_str("wks.col1.lname$ = \"Wavelength\";\r\n");
+        script.push_str("wks.col1.units$ = \"nm\";\r\n");
+        script.push_str("loop(ii,2,wks.ncols) { wks.col$(ii).type = 1; };\r\n");
         script.push_str(&format!("wks.name$ = \"{safe_label}\";\r\n"));
         script.push_str("\r\n");
 
@@ -270,15 +326,24 @@ fn generate_labtalk_script(
 
     // Save project
     script.push_str("// Save project\r\n");
-    script.push_str(&format!("save -opj \"{output}\";\r\n"));
+    script.push_str(&format!("save \"{output}\";\r\n"));
     script.push_str("\r\n");
 
-    // Write completion marker
-    script.push_str("// Completion marker\r\n");
-    script.push_str(&format!("file -c \"{status}\";\r\n"));
+    // Atomic replacement is unavailable in Origin 8.6 LabTalk. Write the
+    // completed JSON only after save returns; the Rust monitor validates the
+    // non-empty OPJ before reporting success.
+    push_status_json(&mut script, &status, "completed", datasets.len());
     script.push_str("type -a \"SpecFlowLab LabTalk complete\";\r\n");
 
     Ok(script)
+}
+
+fn push_status_json(script: &mut String, status_path: &str, state: &str, dataset_count: usize) {
+    script.push_str(&format!("type -gbef \"{status_path}\";\r\n"));
+    script.push_str(&format!(
+        "type \"{{\\x22state\\x22:\\x22{state}\\x22,\\x22datasetCount\\x22:{dataset_count},\\x22workbookCount\\x22:{dataset_count},\\x22graphCount\\x22:0,\\x22warnings\\x22:[]}}\";\r\n"
+    ));
+    script.push_str("type -ge;\r\n");
 }
 
 /// Sanitize a dataset name for LabTalk (ASCII-safe, no special chars).
@@ -322,12 +387,8 @@ mod tests {
 
     #[test]
     fn labtalk_script_includes_save_and_status() {
-        let paths = vec![vec![
-            "C:/tmp/time.txt".to_string(),
-            "C:/tmp/wave.txt".to_string(),
-            "C:/tmp/matrix.txt".to_string(),
-        ]];
-        let datasets = vec![serde_json::json!({"label": "VIS"})];
+        let paths = vec!["C:/tmp/worksheet.txt".to_string()];
+        let datasets = vec![serde_json::json!({"projectLabel": "VIS"})];
         let plan = OutputPlan {
             actual_mode: "sheets-only".to_string(),
             created_graph_types: vec![],
@@ -344,9 +405,90 @@ mod tests {
         .unwrap();
 
         assert!(script.contains("SpecFlowLab LabTalk handoff reached"));
+        assert!(script.contains("[Main]"));
         assert!(script.contains("newbook"));
-        assert!(script.contains("save -opj"));
-        assert!(script.contains("file -c"));
+        assert!(script.contains("open -w \"C:/tmp/worksheet.txt\""));
+        assert!(script.contains("save \"C:/output/project.opj\""));
+        assert!(script.contains("type -gbef"));
+        assert!(script.contains("\\x22state\\x22:\\x22completed\\x22"));
+    }
+
+    #[test]
+    fn stages_a_valid_origin_bundle_without_inventing_a_matrix_header() {
+        use std::io::Cursor;
+        use zip::write::SimpleFileOptions;
+
+        let root = std::env::temp_dir().join(format!(
+            "sfl-labtalk-valid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let bundle = root.join("valid.sflorigin");
+        let manifest = serde_json::json!({
+            "bundleSchema": "specflowlab.origin_bundle.v1",
+            "datasets": [{
+                "directory": "datasets/0001",
+                "projectLabel": "VIS sample",
+                "analysis": {
+                    "timeAxis": {"entry": "datasets/0001/treated-time.f64", "length": 3},
+                    "spectralAxis": {"entry": "datasets/0001/treated-wavelength.f64", "length": 2},
+                    "matrix": {"entry": "datasets/0001/treated-matrix.f64", "rows": 2, "cols": 3}
+                }
+            }]
+        });
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+        writer.start_file("manifest.json", options).unwrap();
+        writer.write_all(manifest.to_string().as_bytes()).unwrap();
+        for (name, values) in [
+            ("datasets/0001/treated-time.f64", vec![-1.0, 0.0, 1.5]),
+            ("datasets/0001/treated-wavelength.f64", vec![500.0, 510.0]),
+            (
+                "datasets/0001/treated-matrix.f64",
+                vec![1.0, 2.0, 3.0, 4.0, f64::NAN, 6.123456789012345],
+            ),
+        ] {
+            writer.start_file(name, options).unwrap();
+            for value in values {
+                writer.write_all(&value.to_le_bytes()).unwrap();
+            }
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+        fs::write(&bundle, bytes).unwrap();
+
+        let stage = stage_labtalk_import(
+            &bundle,
+            Path::new("C:/out.opj"),
+            &OutputPlan {
+                actual_mode: "sheets-only".to_string(),
+                created_graph_types: vec![],
+                omitted_graph_types: vec![],
+                omission_reasons: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(stage.dataset_count, 1);
+        let table = fs::read_to_string(
+            stage
+                .run_directory
+                .join("0001-VIS_sample")
+                .join("worksheet.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            table,
+            "Wavelength_nm\t-1\t0\t1.5\n500\t1\t2\t3\n510\t4\t\t6.123456789012345\n"
+        );
+        let script = fs::read_to_string(&stage.script_path).unwrap();
+        assert!(!script.contains("run.python"));
+        assert!(!script.contains("projectLabel"));
+        let _ = fs::remove_dir_all(&stage.run_directory);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

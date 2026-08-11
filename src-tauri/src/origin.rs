@@ -50,7 +50,6 @@ pub enum DetectionConfidence {
 #[serde(rename_all = "camelCase")]
 pub enum OriginBackendKind {
     ModernPyOrigin,
-    LegacyPyOrigin,
     LabTalk,
     None,
 }
@@ -59,7 +58,6 @@ impl std::fmt::Display for OriginBackendKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OriginBackendKind::ModernPyOrigin => write!(f, "Python adapter"),
-            OriginBackendKind::LegacyPyOrigin => write!(f, "Legacy PyOrigin"),
             OriginBackendKind::LabTalk => write!(f, "LabTalk"),
             OriginBackendKind::None => write!(f, "None"),
         }
@@ -158,21 +156,10 @@ pub fn resolve_capabilities(major: u32, minor: u32) -> OriginCapabilities {
             residual_heatmap: true,
             unicode_metadata: true,
         },
-        2018..=2020 => OriginCapabilities {
-            worksheets: true,
-            line_plots: true,
-            virtual_matrix_heatmap: false,
-            residual_heatmap: false,
-            unicode_metadata: true,
-        },
-        2016..=2017 => OriginCapabilities {
-            worksheets: true,
-            line_plots: false,
-            virtual_matrix_heatmap: false,
-            residual_heatmap: false,
-            unicode_metadata: false,
-        },
-        9..=2015 => OriginCapabilities {
+        // Origin 8.6 through 2020 use the conservative LabTalk adapter. Until
+        // each family passes a physical save/reopen test, advertise only the
+        // worksheet path that all of them share.
+        9..=2020 => OriginCapabilities {
             worksheets: true,
             line_plots: false,
             virtual_matrix_heatmap: false,
@@ -225,20 +212,10 @@ pub fn resolve_backend_and_format(
             OriginBackendKind::ModernPyOrigin,
             vec![OriginProjectFormat::Opju, OriginProjectFormat::Opj],
             OriginProjectFormat::Opju,
-            SupportLevel::Verified,
-        ),
-        v if v >= 2018 => (
-            OriginBackendKind::LegacyPyOrigin,
-            vec![OriginProjectFormat::Opju, OriginProjectFormat::Opj],
-            OriginProjectFormat::Opju,
             SupportLevel::Experimental,
         ),
-        v if v >= 2016 => (
-            OriginBackendKind::LegacyPyOrigin,
-            vec![OriginProjectFormat::Opj],
-            OriginProjectFormat::Opj,
-            SupportLevel::Experimental,
-        ),
+        // There is no implemented legacy PyOrigin adapter. Use the common
+        // LabTalk worksheet bridge for every supported pre-2021 release.
         v if v >= 9 => (
             OriginBackendKind::LabTalk,
             vec![OriginProjectFormat::Opj],
@@ -360,14 +337,19 @@ pub fn origin_candidate_score(path: &Path) -> u32 {
     score
 }
 
-/// Best-effort version guess from the executable file name alone.
-/// Returns (major, confidence).
-pub fn version_from_file_name(path: &Path) -> (Option<u32>, DetectionConfidence) {
+/// Best-effort version guess from the executable path and file name.
+///
+/// Calendar releases are normalized to their release year because the
+/// capability resolver uses year boundaries. Origin 8.6/8.5 retain their
+/// major/minor pair so the minimum-version boundary remains exact.
+pub fn version_details_from_file_name(
+    path: &Path,
+) -> (Option<u32>, Option<u32>, DetectionConfidence) {
     let lower = path.to_string_lossy().to_ascii_lowercase();
     // Try to find a year in the path
     for year in (2000..=2099).rev() {
         if lower.contains(&format!("origin{year}")) || lower.contains(&format!("origin {year}")) {
-            return (Some(year), DetectionConfidence::Heuristic);
+            return (Some(year), Some(0), DetectionConfidence::Heuristic);
         }
     }
     // Fallback mapping for known executable names
@@ -376,25 +358,45 @@ pub fn version_from_file_name(path: &Path) -> (Option<u32>, DetectionConfidence)
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if file_stem.contains("origin98") || file_stem.contains("origin_98") {
-        return (Some(2018), DetectionConfidence::Mapping);
-    }
-    if file_stem.contains("origin97") {
-        return (Some(2017), DetectionConfidence::Mapping);
-    }
-    if file_stem.contains("origin96") {
-        return (Some(2016), DetectionConfidence::Mapping);
-    }
     // Origin 8.6 (Origin86_64.exe, Origin86.exe)
-    // File name alone can't distinguish 8.5 from 8.6; default to 8.6.
     if file_stem.contains("origin86") || file_stem.contains("origin_86") {
-        return (Some(8), DetectionConfidence::Mapping);
+        return (Some(8), Some(6), DetectionConfidence::Mapping);
     }
     // Origin 8.5 (Origin85_64.exe, Origin85.exe)
     if file_stem.contains("origin85") || file_stem.contains("origin_85") {
-        return (Some(8), DetectionConfidence::Mapping);
+        return (Some(8), Some(5), DetectionConfidence::Mapping);
     }
-    (None, DetectionConfidence::Unknown)
+
+    // Internal version to calendar-release mapping. The normal installation
+    // path includes the release year; these mappings cover custom folders.
+    for (stem, year) in [
+        ("origin99", 2022),
+        ("origin98", 2021),
+        ("origin97", 2020),
+        ("origin96", 2019),
+        ("origin95", 2018),
+        ("origin94", 2017),
+        ("origin93", 2016),
+        ("origin92", 2015),
+    ] {
+        if file_stem.contains(stem) {
+            return (Some(year), Some(0), DetectionConfidence::Mapping);
+        }
+    }
+    if file_stem.contains("origin91") {
+        return (Some(9), Some(1), DetectionConfidence::Mapping);
+    }
+    if file_stem == "origin9" || file_stem.starts_with("origin9_") {
+        return (Some(9), Some(0), DetectionConfidence::Mapping);
+    }
+    (None, None, DetectionConfidence::Unknown)
+}
+
+/// Compatibility wrapper for callers that only need the normalized major
+/// release value.
+pub fn version_from_file_name(path: &Path) -> (Option<u32>, DetectionConfidence) {
+    let (major, _minor, confidence) = version_details_from_file_name(path);
+    (major, confidence)
 }
 
 /// Build a display name from path components.
@@ -523,10 +525,10 @@ mod tests {
     }
 
     #[test]
-    fn origin_2019_has_worksheets_and_lines_only() {
+    fn origin_2019_uses_conservative_worksheet_capabilities() {
         let caps = resolve_capabilities(2019, 0);
         assert!(caps.worksheets);
-        assert!(caps.line_plots);
+        assert!(!caps.line_plots);
         assert!(!caps.virtual_matrix_heatmap);
         assert!(!caps.residual_heatmap);
     }
@@ -586,7 +588,7 @@ mod tests {
     #[test]
     fn origin_2016_is_opj_only() {
         let (backend, formats, default, _) = resolve_backend_and_format(2016, 0);
-        assert!(matches!(backend, OriginBackendKind::LegacyPyOrigin));
+        assert!(matches!(backend, OriginBackendKind::LabTalk));
         assert_eq!(formats, vec![OriginProjectFormat::Opj]);
         assert!(matches!(default, OriginProjectFormat::Opj));
     }
@@ -630,13 +632,11 @@ mod tests {
     }
 
     #[test]
-    fn sheets_and_plots_degraded_when_heatmaps_unsupported() {
+    fn pre_2021_labtalk_degrades_to_sheets_only() {
         let caps = resolve_capabilities(2019, 0);
         let plan = resolve_output_plan("sheets-plots", &caps);
-        assert_eq!(plan.actual_mode, "sheets-and-supported-plots");
-        assert!(plan
-            .created_graph_types
-            .contains(&"spectra/kinetics/DAS/EAS line plots".to_string()));
+        assert_eq!(plan.actual_mode, "sheets-only");
+        assert!(plan.omitted_graph_types.contains(&"line plots".to_string()));
         assert!(!plan.omitted_graph_types.is_empty());
         assert!(plan.omission_reasons.iter().any(|r| r.contains("heatmap")));
     }
@@ -698,8 +698,21 @@ mod tests {
     #[test]
     fn version_from_mapped_exe_name() {
         let (ver, conf) = version_from_file_name(Path::new("C:/OriginLab/Origin98_64.exe"));
-        assert_eq!(ver, Some(2018));
+        assert_eq!(ver, Some(2021));
         assert!(matches!(conf, DetectionConfidence::Mapping));
+    }
+
+    #[test]
+    fn origin_86_and_85_keep_distinct_minor_versions() {
+        let (major, minor, confidence) =
+            version_details_from_file_name(Path::new("C:/OriginLab/Origin86/Origin86.exe"));
+        assert_eq!((major, minor), (Some(8), Some(6)));
+        assert!(matches!(confidence, DetectionConfidence::Mapping));
+
+        let (major, minor, confidence) =
+            version_details_from_file_name(Path::new("C:/OriginLab/Origin85/Origin85.exe"));
+        assert_eq!((major, minor), (Some(8), Some(5)));
+        assert!(matches!(confidence, DetectionConfidence::Mapping));
     }
 
     #[test]

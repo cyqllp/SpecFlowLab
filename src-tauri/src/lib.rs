@@ -173,8 +173,9 @@ async fn create_origin_project(
         let status_path = PathBuf::from(&result.status_path);
         let output_path = PathBuf::from(&result.output_path);
         let log_path = PathBuf::from(&result.log_path);
+        let backend = result.backend.clone();
         let status = tauri::async_runtime::spawn_blocking(move || {
-            wait_for_origin_result(&status_path, &output_path, &log_path)
+            wait_for_origin_result(&status_path, &output_path, &log_path, &backend)
         })
         .await
         .map_err(|error| format!("Could not monitor the OriginPro import task: {error}"))??;
@@ -209,6 +210,14 @@ fn create_origin_project_on_windows(
 
     // Resolve installation info for the selected executable
     let install_info = inspect_origin_executable(&origin_executable)?;
+    if install_info.support_level == origin::SupportLevel::Unsupported
+        || install_info.backend == origin::OriginBackendKind::None
+    {
+        return Err(format!(
+            "{} is not supported for direct automation. SpecFlowLab supports OriginPro 8.6 or later; use Export Origin Bundle for Origin 8.5 and older.",
+            install_info.display_name
+        ));
+    }
     let format = output_format
         .and_then(|f| match f {
             "opj" => Some(origin::OriginProjectFormat::Opj),
@@ -216,6 +225,13 @@ fn create_origin_project_on_windows(
             _ => None,
         })
         .unwrap_or(install_info.default_project_format);
+    if !install_info.project_formats.contains(&format) {
+        return Err(format!(
+            "{} does not support {} output through the selected adapter.",
+            install_info.display_name,
+            format.extension().to_ascii_uppercase()
+        ));
+    }
     let ext = format.extension();
 
     let output_plan = if create_plots {
@@ -307,16 +323,15 @@ fn create_origin_project_on_windows(
     }
 
     // Fork: LabTalk for Origin 8.6, Python bridge for 2021+
-    let is_labtalk = matches!(
-        install_info.backend,
-        origin::OriginBackendKind::LabTalk | origin::OriginBackendKind::LegacyPyOrigin
-    );
+    let is_labtalk = install_info.backend == origin::OriginBackendKind::LabTalk;
+    let mut staged_dataset_count = 0;
 
     if is_labtalk {
         // ---- LabTalk staging path (Origin 8.6, 2016–2020) ----
-        let script_path = labtalk::stage_labtalk_import(&bundle_path, &output_path, &output_plan)?;
-        let script_for_labtalk = labtalk_path(&script_path)?;
-        let origin_startup_script = origin_startup_labtalk(&script_for_labtalk);
+        let stage = labtalk::stage_labtalk_import(&bundle_path, &output_path, &output_plan)?;
+        staged_dataset_count = stage.dataset_count;
+        let script_for_labtalk = labtalk_path(&stage.script_path)?;
+        let origin_startup_script = origin_startup_ogs(&script_for_labtalk);
         Command::new(&origin_executable)
             .arg("-slog")
             .arg(&log_path)
@@ -384,8 +399,8 @@ fn create_origin_project_on_windows(
         output_format: format.extension().to_string(),
         log_path: log_path.to_string_lossy().into_owned(),
         status_path: status_path.to_string_lossy().into_owned(),
-        dataset_count: 0,
-        workbook_count: 0,
+        dataset_count: staged_dataset_count,
+        workbook_count: staged_dataset_count,
         graph_count: 0,
         output_bytes: 0,
         warning_count: 0,
@@ -401,79 +416,78 @@ fn wait_for_origin_result(
     status_path: &Path,
     output_path: &Path,
     log_path: &Path,
+    backend: &str,
 ) -> Result<OriginJobStatus, String> {
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
     const IMPORT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
     let started_at = Instant::now();
-    let mut observed_python = false;
+    let mut observed_bridge = false;
     loop {
         if status_path.is_file() {
-            let status_text = std::fs::read_to_string(status_path).map_err(|error| {
-                format!(
-                    "Could not read Origin status file {}: {error}",
-                    status_path.display()
-                )
-            })?;
-            let status: OriginJobStatus = serde_json::from_str(&status_text).map_err(|error| {
-                format!(
-                    "Origin wrote an invalid status file {}: {error}",
-                    status_path.display()
-                )
-            })?;
-            observed_python = true;
-            match status.state.as_str() {
-                "completed" => {
-                    let dataset_count = status.dataset_count.unwrap_or_default();
-                    let workbook_count = status.workbook_count.unwrap_or_default();
-                    let actual_bytes = output_path
-                        .metadata()
-                        .map_err(|error| {
-                            format!(
-                                "Origin reported completion, but the project {} is unavailable: {error}",
-                                output_path.display()
-                            )
-                        })?
-                        .len();
-                    if dataset_count == 0 || workbook_count != dataset_count || actual_bytes == 0 {
-                        return Err(format!(
-                            "Origin reported completion without a valid populated project (datasets: {dataset_count}, workbooks: {workbook_count}, bytes: {actual_bytes}). Status: {}. Startup log: {}.",
-                            status_path.display(),
-                            log_path.display()
-                        ));
+            // The modern Python bridge replaces this file atomically. Origin
+            // 8.6 LabTalk cannot, so polling may briefly observe an empty or
+            // partial file between `type -gbef` and `type -ge`.
+            if let Ok(status_text) = std::fs::read_to_string(status_path) {
+                if let Ok(status) = serde_json::from_str::<OriginJobStatus>(&status_text) {
+                    observed_bridge = true;
+                    match status.state.as_str() {
+                        "completed" => {
+                            let dataset_count = status.dataset_count.unwrap_or_default();
+                            let workbook_count = status.workbook_count.unwrap_or_default();
+                            let actual_bytes = output_path
+                                .metadata()
+                                .map_err(|error| {
+                                    format!(
+                                        "Origin reported completion, but the project {} is unavailable: {error}",
+                                        output_path.display()
+                                    )
+                                })?
+                                .len();
+                            if dataset_count == 0
+                                || workbook_count != dataset_count
+                                || actual_bytes == 0
+                            {
+                                return Err(format!(
+                                    "Origin reported completion without a valid populated project (datasets: {dataset_count}, workbooks: {workbook_count}, bytes: {actual_bytes}). Status: {}. Startup log: {}.",
+                                    status_path.display(),
+                                    log_path.display()
+                                ));
+                            }
+                            return Ok(status);
+                        }
+                        "failed" => {
+                            let error = status
+                                .error
+                                .as_deref()
+                                .unwrap_or("Origin reported an unspecified bridge error.");
+                            let traceback = status.traceback.as_deref().unwrap_or("");
+                            return Err(format!(
+                                "Origin import failed: {error}\n{traceback}\nStatus: {}\nStartup log: {}{}",
+                                status_path.display(),
+                                log_path.display(),
+                                origin_log_suffix(log_path)
+                            ));
+                        }
+                        _ => {}
                     }
-                    return Ok(status);
                 }
-                "failed" => {
-                    let error = status
-                        .error
-                        .as_deref()
-                        .unwrap_or("Origin's embedded Python reported an unspecified error.");
-                    let traceback = status.traceback.as_deref().unwrap_or("");
-                    return Err(format!(
-                        "Origin import failed: {error}\n{traceback}\nStatus: {}\nStartup log: {}{}",
-                        status_path.display(),
-                        log_path.display(),
-                        origin_log_suffix(log_path)
-                    ));
-                }
-                _ => {}
             }
         }
 
         let elapsed = started_at.elapsed();
-        if !observed_python && elapsed >= STARTUP_TIMEOUT {
+        if !observed_bridge && elapsed >= STARTUP_TIMEOUT {
             return Err(format!(
-                "OriginPro opened, but its embedded Python did not start the SpecFlowLab bridge within 120 seconds. Close all Origin windows and retry once. Status: {}. Startup log: {}{}",
+                "OriginPro opened, but the {backend} bridge did not start within 120 seconds. Close all Origin windows and retry once. Status: {}. Startup log: {}{}",
                 status_path.display(),
                 log_path.display(),
                 origin_log_suffix(log_path)
             ));
         }
-        if observed_python && elapsed >= IMPORT_TIMEOUT {
+        if observed_bridge && elapsed >= IMPORT_TIMEOUT {
             return Err(format!(
-                "Origin's embedded Python started but did not finish the import within 30 minutes. Status: {}. Startup log: {}{}",
+                "Origin's {backend} bridge started but did not finish the import within 30 minutes. Status: {}. Startup log: {}{}",
                 status_path.display(),
                 log_path.display(),
                 origin_log_suffix(log_path)
@@ -587,6 +601,15 @@ fn origin_startup_labtalk(launcher_for_labtalk: &str) -> String {
         "type -a \"SpecFlowLab LabTalk handoff reached\";\
 run.python(\"{launcher_for_labtalk}\",2);\
 type -a \"SpecFlowLab Python call returned\";"
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn origin_startup_ogs(script_for_labtalk: &str) -> String {
+    format!(
+        "type -a \"SpecFlowLab LabTalk handoff reached\";\
+run.section(\"{script_for_labtalk}\",Main);\
+type -a \"SpecFlowLab LabTalk call returned\";"
     )
 }
 
@@ -763,20 +786,18 @@ fn inspect_origin_executable(path: &Path) -> Result<origin::OriginInstallationIn
     let (major, minor, product_version, confidence) = read_executable_version(path);
 
     // 2. Fallback to file-name heuristic
-    let (major, confidence) = if major.is_none() {
-        let (fn_major, fn_conf) = origin::version_from_file_name(path);
+    let (major, minor, confidence) = if major.is_none() {
+        let (fn_major, fn_minor, fn_conf) = origin::version_details_from_file_name(path);
         if fn_major.is_none() {
             warnings.push("Could not determine Origin version from the executable. Manual confirmation is required.".to_string());
         }
-        (fn_major, fn_conf)
+        (fn_major, fn_minor, fn_conf)
     } else {
-        (major, confidence)
+        (major, minor, confidence)
     };
 
     let major = major.unwrap_or(0);
-    // When the file name maps to major 8 (origin86), assume 8.6 since the
-    // file name alone cannot distinguish 8.5 from 8.6.
-    let resolved_minor = minor.unwrap_or(if major == 8 { 6 } else { 0 });
+    let resolved_minor = minor.unwrap_or(0);
 
     // 3. Resolve capabilities
     let capabilities = origin::resolve_capabilities(major, resolved_minor);
@@ -823,8 +844,8 @@ fn read_executable_version(
     // For now, fall back to file-name heuristic (the windows crate dependency
     // will be added in a follow-up when the physical test matrix is performed)
     let _ = path;
-    let (major, confidence) = origin::version_from_file_name(path);
-    (major, None, None, confidence)
+    let (major, minor, confidence) = origin::version_details_from_file_name(path);
+    (major, minor, None, confidence)
 }
 
 #[cfg(target_os = "windows")]
@@ -958,7 +979,7 @@ pub fn run() {
 mod tests {
     use super::{
         is_origin_executable_candidate, origin_candidate_score, origin_launcher_source,
-        origin_startup_labtalk, safe_default_name, OriginJobStatus,
+        origin_startup_labtalk, origin_startup_ogs, safe_default_name, OriginJobStatus,
     };
     use std::path::Path;
 
@@ -1021,6 +1042,17 @@ mod tests {
             "run.python(\"C:/Temp/SpecFlowLab-OriginBridge/launch_specflowlab_origin.py\",2);"
         ));
         assert!(script.ends_with("type -a \"SpecFlowLab Python call returned\";"));
+        assert!(!script.contains('\r'));
+        assert!(!script.contains('\n'));
+    }
+
+    #[test]
+    fn origin_86_startup_runs_the_ogs_main_section_without_python() {
+        let script = origin_startup_ogs("C:/Temp/SpecFlowLab-LabTalk/import.ogs");
+        assert!(script.starts_with("type -a \"SpecFlowLab LabTalk handoff reached\";"));
+        assert!(script.contains("run.section(\"C:/Temp/SpecFlowLab-LabTalk/import.ogs\",Main);"));
+        assert!(script.ends_with("type -a \"SpecFlowLab LabTalk call returned\";"));
+        assert!(!script.contains("run.python"));
         assert!(!script.contains('\r'));
         assert!(!script.contains('\n'));
     }

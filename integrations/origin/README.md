@@ -1,7 +1,15 @@
 # SpecFlowLab OriginPro Bridge
 
 This integration imports SpecFlowLab datasets into OriginPro without mouse or
-keyboard automation. It has two intentionally separate parts:
+keyboard automation. OriginPro 8.6 is the minimum supported version.
+
+| Origin version | Backend | Output | Current validation level |
+| --- | --- | --- | --- |
+| 2021+ | embedded Python and `originpro` | `.opju` by default; `.opj` where offered | automated bridge tests; physical Windows/Origin smoke test required |
+| 8.6–2020 | LabTalk staging | `.opj`, worksheets only | experimental until a physical save/close/reopen record exists |
+| 8.5 and older | none | portable `.sflorigin` fallback | unsupported for direct automation |
+
+The implementation has three intentionally separate parts:
 
 - `src/lib/origin-bundle.js` is the app-side exporter. It has no DOM or Tauri
   dependency and can be called directly by the Windows app, tests, or a future
@@ -9,6 +17,9 @@ keyboard automation. It has two intentionally separate parts:
 - `specflowlab_origin.py` is the archive/parser and Origin adapter. Its parser
   uses only the Python standard library; `originpro` is imported only when an
   actual Origin import is requested.
+- `src-tauri/src/labtalk.rs` decodes the same bundle for OriginPro 8.6–2020,
+  stages one deterministic wavelength-by-time text worksheet per dataset, and
+  generates an Origin 8.6-compatible LabTalk OGS script.
 
 The separation keeps the file contract testable on every platform and confines
 Origin-specific behavior to one small adapter.
@@ -17,15 +28,14 @@ Origin-specific behavior to one small adapter.
 
 1. In SpecFlowLab, open or prepare the project and run any required treatment
    and fitting.
-2. In the Windows app, choose **Sheets and plots** or **Only sheets**, click
-   **Create in OriginPro...**, choose the `.opju` destination, and let
+2. In the Windows app, click **Create in OriginPro...**, choose the project
+   destination, and let
    SpecFlowLab launch Origin. The app retains the exact
    `.sflorigin` input beside the Origin project and writes
    `.origin-status.json` plus `.origin-startup.log` diagnostics beside it.
-   SpecFlowLab waits for Origin's embedded Python to finish and reports success
-   only after the expected workbooks exist and the `.opju` is non-empty.
-   OriginPro 2021 is supported; its main executable is commonly
-   `Origin98_64.exe`.
+   SpecFlowLab reports success only after the expected workbooks exist and the
+   project is non-empty. OriginPro 8.6–2020 offers sheets-only `.opj` output;
+   OriginPro 2021+ also offers the modern Python plots supported by its adapter.
 
 The first use searches the normal `Program Files\OriginLab` installation
 folders. If Origin is installed elsewhere, choose its main executable once;
@@ -212,13 +222,16 @@ Windows Origin installation.
 
 ## Windows app integration
 
-The one-click action embeds this Python adapter inside the SpecFlowLab
-executable, writes an isolated temporary launcher, and starts Origin with its
-documented `-RS` LabTalk startup command. Because Origin consumes the remaining
-command line as raw LabTalk rather than ordinary C-style arguments, the Windows
-launcher appends the expression without normal argv quoting. That expression
-calls `run.python(path, 2)` directly through Origin's embedded Python and writes
-LabTalk handoff markers to the startup log; no system Python or separate
-package installation is required. The Python launcher writes atomic status
-updates with a traceback on failure, and the app monitors those updates for up
-to 30 minutes rather than treating process creation as import success.
+The one-click action selects a backend from the detected Origin version:
+
+- OriginPro 2021+ embeds the Python adapter inside SpecFlowLab, writes an
+  isolated launcher, and invokes `run.python(path, 2)` through Origin's
+  embedded Python. No system Python installation is required.
+- OriginPro 8.6–2020 decodes the bundle in Rust, writes exact-precision wide
+  worksheets under an isolated temporary directory, generates `[Main]` in an
+  OGS file, and invokes it with `run.section(path, Main)`. The script saves an
+  `.opj` and writes a JSON completion record only after the save returns.
+
+Both routes use Origin's documented `-RS` startup path, retain startup-log
+markers, wait up to 30 minutes, and validate the expected workbook count plus a
+non-empty project instead of treating process creation as success.
