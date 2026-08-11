@@ -550,15 +550,12 @@ fn sanitize_tsv_cell(value: &str) -> String {
     value
         .replace('\t', " ")
         .replace("\r\n", "\\n")
-        .replace('\r', "\\n")
-        .replace('\n', "\\n")
+        .replace(['\r', '\n'], "\\n")
 }
 
 fn sanitize_labtalk_label(value: &str) -> String {
     value
-        .replace('\t', " ")
-        .replace('\r', " ")
-        .replace('\n', " ")
+        .replace(['\t', '\r', '\n'], " ")
         .replace('"', "'")
         .replace('\\', "/")
         .replace(';', ",")
