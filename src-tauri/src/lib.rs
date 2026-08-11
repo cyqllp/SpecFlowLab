@@ -832,6 +832,12 @@ try {
                     for ($column = 0; $column -lt $columnCount; $column += 1) {
                         if ([string]$sheetSpec.valueType -eq 'text') {
                             $data[$row,$column] = [string]$fields[$column]
+                        } elseif ($fields[$column] -eq 'NaN') {
+                            $data[$row,$column] = [double]::NaN
+                        } elseif ($fields[$column] -eq 'Infinity') {
+                            $data[$row,$column] = [double]::PositiveInfinity
+                        } elseif ($fields[$column] -eq '-Infinity') {
+                            $data[$row,$column] = [double]::NegativeInfinity
                         } elseif ([String]::IsNullOrWhiteSpace($fields[$column])) {
                             $data[$row,$column] = [double]::NaN
                         } else {
@@ -1717,6 +1723,9 @@ mod tests {
         assert!(source.contains("newsheet name:="));
         assert!(source.contains("specflowlab.origin_com_import.v2"));
         assert!(source.contains("New-Object 'string[,]'"));
+        assert!(source.contains("$fields[$column] -eq 'NaN'"));
+        assert!(source.contains("$fields[$column] -eq 'Infinity'"));
+        assert!(source.contains("$fields[$column] -eq '-Infinity'"));
         assert!(source.contains("$origin.Save($outputPath)"));
         assert!(source.contains("$origin.FindWorksheet(('[' + $pageName + ']Sheet1'))"));
         assert!(!source.contains("open -w"));

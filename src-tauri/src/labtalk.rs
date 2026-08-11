@@ -133,9 +133,7 @@ pub fn stage_labtalk_import(bundle_path: &Path) -> Result<LabTalkStage, String> 
             &time_axis,
             &wave_axis,
             &matrix,
-            &time_unit,
             &spectral_unit,
-            "Treated signal",
         )?;
         sheets.push(sheet_manifest(
             "TreatedVM",
@@ -177,20 +175,18 @@ pub fn stage_labtalk_import(bundle_path: &Path) -> Result<LabTalkStage, String> 
                 &[],
             ));
 
-            for (key, sheet_name, long_name, file_name, signal_label) in [
+            for (key, sheet_name, long_name, file_name) in [
                 (
                     "fittedMatrix",
                     "FittedVM",
                     "Fitted virtual matrix",
                     "fitted-vm.txt",
-                    "Fitted signal",
                 ),
                 (
                     "residualMatrix",
                     "ResidualVM",
                     "Residual virtual matrix",
                     "residual-vm.txt",
-                    "Fit residual",
                 ),
             ] {
                 let Some(descriptor) = fit.get(key).filter(|value| value.is_object()) else {
@@ -207,15 +203,7 @@ pub fn stage_labtalk_import(bundle_path: &Path) -> Result<LabTalkStage, String> 
                 }
                 let fit_matrix = read_f64_matrix_from_zip(&mut archive, entry, fit_rows, fit_cols)?;
                 let path = dataset_dir.join(file_name);
-                write_wide_table(
-                    &path,
-                    &time_axis,
-                    &wave_axis,
-                    &fit_matrix,
-                    &time_unit,
-                    &spectral_unit,
-                    signal_label,
-                )?;
+                write_wide_table(&path, &time_axis, &wave_axis, &fit_matrix, &spectral_unit)?;
                 sheets.push(sheet_manifest(
                     sheet_name,
                     long_name,
@@ -585,22 +573,23 @@ fn write_wide_table(
     time_axis: &[f64],
     wave_axis: &[f64],
     matrix: &[Vec<f64>],
-    time_unit: &str,
     spectral_unit: &str,
-    signal_label: &str,
 ) -> Result<(), String> {
     let mut file =
         fs::File::create(path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
+    // Virtual-matrix layout: the wavelength axis occupies the first column and
+    // the exact time coordinates occupy the first data row, so the name row
+    // carries only the axis label instead of the time values.
     let mut header = vec![format!("Wavelength ({spectral_unit})")];
-    header.extend(
-        time_axis
-            .iter()
-            .map(|value| format!("{signal_label} at {} {time_unit}", format_f64(*value))),
-    );
+    header.extend((0..time_axis.len()).map(|_| String::new()));
     header.iter_mut().for_each(|value| {
         *value = sanitize_labtalk_label(value);
     });
     writeln!(file, "{}", header.join("\t")).map_err(|e| format!("Write error: {e}"))?;
+    let mut time_row = Vec::with_capacity(time_axis.len() + 1);
+    time_row.push(String::new());
+    time_row.extend(time_axis.iter().map(|value| format_f64(*value)));
+    writeln!(file, "{}", time_row.join("\t")).map_err(|e| format!("Write error: {e}"))?;
     for (wavelength, row) in wave_axis.iter().zip(matrix.iter()) {
         let mut fields = Vec::with_capacity(row.len() + 1);
         fields.push(format_f64(*wavelength));
@@ -787,10 +776,14 @@ fn representative_indices(length: usize, selected_index: usize, base_count: usiz
 }
 
 fn format_f64(value: f64) -> String {
-    if value.is_finite() {
-        value.to_string()
+    if value.is_nan() {
+        "NaN".to_string()
+    } else if value == f64::INFINITY {
+        "Infinity".to_string()
+    } else if value == f64::NEG_INFINITY {
+        "-Infinity".to_string()
     } else {
-        String::new()
+        value.to_string()
     }
 }
 
@@ -944,7 +937,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             table,
-            "Wavelength (nm)\tTreated signal at -1 ps\tTreated signal at 0 ps\tTreated signal at 1.5 ps\n500\t1\t2\t3\n510\t4\t\t6.123456789012345\n"
+            "Wavelength (nm)\t\t\t\n\t-1\t0\t1.5\n500\t1\t2\t3\n510\t4\tNaN\t6.123456789012345\n"
         );
         let metadata = fs::read_to_string(
             stage

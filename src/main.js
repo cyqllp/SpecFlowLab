@@ -28,7 +28,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.4";
+const APP_VERSION = "1.0.5";
 const plotGeometry = new WeakMap();
 
 const state = {
@@ -170,16 +170,15 @@ function render() {
         ${state.origin.installation ? `
           <div class="origin-status-block">
             <span class="origin-version">${escapeHtml(state.origin.installation.displayName ?? state.origin.installation.executablePath)}${state.origin.installation.bitness ? ` (${state.origin.installation.bitness}-bit)` : ""}</span>
-            <span class="origin-support ${state.origin.installation.supportLevel}">${state.origin.installation.supportLevel} · ${escapeHtml(state.origin.installation.backend)} · ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat || "opju").toUpperCase()}</span>
+            <span class="origin-support ${state.origin.installation.supportLevel}">${state.origin.installation.supportLevel === "experimental" ? "Origin 8.6+ · Worksheets only" : `${state.origin.installation.supportLevel} · ${escapeHtml(state.origin.installation.backend)} · ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat || "opju").toUpperCase()}`}</span>
           </div>
-          <label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
+          ${state.origin.installation.supportLevel !== "experimental" ? `<label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
             <option value="sheets-plots" ${state.origin.outputMode === "sheets-plots" && state.origin.installation.capabilities?.linePlots ? "selected" : ""} ${state.origin.installation.capabilities?.linePlots ? "" : "disabled"}>Sheets and supported plots</option>
             <option value="sheets-only" ${state.origin.outputMode === "sheets-only" ? "selected" : ""}>Only sheets</option>
-          </select></label>
-          ${(state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
+          </select></label>` : ""}
+          ${state.origin.installation.supportLevel !== "experimental" && (state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
             ${state.origin.installation.projectFormats.map((fmt) => `<option value="${fmt}" ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat) === fmt ? "selected" : ""}>${fmt.toUpperCase()}</option>`).join("")}
           </select></label>` : ""}
-          <p class="origin-placeholder">OriginPro 8.6 or later is required. Versions before 2021 use the experimental COM sheets-only adapter.</p>
         ` : `<p class="origin-placeholder">Select an OriginPro installation to enable direct export.</p>`}
         <button class="wide-command" data-action="${state.origin.installation ? "change-origin" : "select-origin"}" ${busy ? "disabled" : ""}>${state.origin.installation ? "Choose another EXE..." : "Choose Origin EXE..."}</button>
         <button class="wide-command" data-action="create-origin" ${dataset && !busy && isTauriRuntime() && isWindowsPlatform() && state.origin.installation?.capabilities?.worksheets && state.origin.installation?.supportLevel !== "unsupported" ? "" : "disabled"}>Create in OriginPro...</button>
@@ -548,7 +547,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.4 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.5 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -2121,7 +2120,7 @@ async function createInOrigin() {
     return invoke("create_origin_project", {
       defaultName: `${projectName || "SpecFlowLab_project"}.${ext}`,
       bytes: Array.from(bundle),
-      createPlots: state.origin.outputMode === "sheets-plots",
+      createPlots: state.origin.outputMode === "sheets-plots" && state.origin.installation?.capabilities?.linePlots === true,
       outputFormat: state.origin.outputFormat || null,
     });
   }, (result) => {

@@ -2,17 +2,27 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
-## [Unreleased]
+## [1.0.5] - 2026-08-11
 
-- Repaired the experimental OriginPro 8.6 LabTalk bridge: valid bundle matrices
-  now use manifest dimensions, staged worksheets retain wavelength/time axes
-  and full numeric precision, OGS files launch with `run.section`, OPJ saving
-  uses the legacy-compatible command, and completion writes parseable JSON.
-- OriginPro 8.6 is now the explicit minimum for direct automation. OriginPro
-  8.5 and older are rejected, OriginPro 8.6–2020 uses sheets-only LabTalk OPJ
-  export, and OriginPro 2021+ retains the embedded Python adapter.
-- Added regression coverage for a real `.sflorigin` staging pass, 8.5 versus
-  8.6 detection, custom-folder executable mappings, and Python-free OGS launch.
+- **OriginPro 8.6 direct automation** — a bitness-matched Windows PowerShell COM
+  helper replaces the earlier command-line LabTalk transport. OriginPro
+  8.6–2020 exports metadata, treated/selected data, and available fit/DAS/EAS
+  worksheets to `.opj`; OriginPro 2021+ retains the embedded Python adapter.
+  OriginPro 8.5 and older are rejected, and the app validates that COM launched
+  the exact executable selected in SpecFlowLab.
+- **Clean virtual-matrix worksheets** — `TreatedVM`, `FittedVM`, and
+  `ResidualVM` now store the wavelength axis in the first column and the exact
+  time coordinates in the first data row, so the sheet plots directly as a 2D
+  heatmap instead of embedding time values in column names.
+- **Explicit non-finite values** — staged worksheets preserve `NaN`,
+  `Infinity`, and `-Infinity` as literal tokens, matching the documented
+  `nanPolicy`, instead of silently blanking them.
+- **OriginPro output panel** — the experimental backend is summarized compactly
+  as “Origin 8.6+ · Worksheets only”, and sheets-only export no longer reports
+  phantom graph omissions.
+- Added regression coverage for a real `.sflorigin` staging pass, the
+  virtual-matrix worksheet layout, non-finite token handling, 8.5 versus 8.6
+  detection, custom-folder executable mappings, and the COM helper source.
 
 ## [1.0.4] - 2026-08-10
 

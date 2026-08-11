@@ -155,8 +155,10 @@ Each SpecFlowLab dataset becomes one Origin workbook with:
 
 - `Metadata`: source path/hash, dataset identity, selection, treatment
   metadata, and units.
-- `TreatedVM`: wavelength in the first column and one treated-signal Y column
-  per measured time, with exact time coordinates in column Long Names.
+- `TreatedVM`: a virtual-matrix worksheet with wavelength down the first column
+  and the exact time coordinates across the first data row, so the sheet plots
+  as a 2D heatmap directly. `NaN` values are written as the literal token
+  `NaN`.
 - `Selected`: the current selection plus five evenly distributed measured
   positions from each axis, producing five or six explicit spectral and
   kinetic XY traces without interpolation.
