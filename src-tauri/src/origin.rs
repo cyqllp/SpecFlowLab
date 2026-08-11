@@ -58,7 +58,7 @@ impl std::fmt::Display for OriginBackendKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OriginBackendKind::ModernPyOrigin => write!(f, "Python adapter"),
-            OriginBackendKind::LabTalk => write!(f, "LabTalk"),
+            OriginBackendKind::LabTalk => write!(f, "COM worksheet adapter"),
             OriginBackendKind::None => write!(f, "None"),
         }
     }
@@ -156,7 +156,7 @@ pub fn resolve_capabilities(major: u32, minor: u32) -> OriginCapabilities {
             residual_heatmap: true,
             unicode_metadata: true,
         },
-        // Origin 8.6 through 2020 use the conservative LabTalk adapter. Until
+        // Origin 8.6 through 2020 use the conservative COM worksheet adapter. Until
         // each family passes a physical save/reopen test, advertise only the
         // worksheet path that all of them share.
         9..=2020 => OriginCapabilities {
@@ -166,7 +166,7 @@ pub fn resolve_capabilities(major: u32, minor: u32) -> OriginCapabilities {
             residual_heatmap: false,
             unicode_metadata: false,
         },
-        // 8.6 only — 8.0–8.5 is unsupported (no reliable LabTalk automation)
+        // 8.6 only — 8.0–8.5 is unsupported (no verified worksheet automation)
         8 if minor >= 6 => OriginCapabilities {
             worksheets: true,
             line_plots: false,
@@ -215,7 +215,7 @@ pub fn resolve_backend_and_format(
             SupportLevel::Experimental,
         ),
         // There is no implemented legacy PyOrigin adapter. Use the common
-        // LabTalk worksheet bridge for every supported pre-2021 release.
+        // COM worksheet bridge for every supported pre-2021 release.
         v if v >= 9 => (
             OriginBackendKind::LabTalk,
             vec![OriginProjectFormat::Opj],
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn origin_8_5_is_unsupported() {
-        // 8.0–8.5 have no verified LabTalk automation path
+        // 8.0–8.5 have no verified worksheet automation path
         let caps = resolve_capabilities(8, 5);
         assert!(!caps.worksheets);
         let (backend, formats, _, support) = resolve_backend_and_format(8, 5);

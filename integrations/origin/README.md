@@ -6,7 +6,7 @@ keyboard automation. OriginPro 8.6 is the minimum supported version.
 | Origin version | Backend | Output | Current validation level |
 | --- | --- | --- | --- |
 | 2021+ | embedded Python and `originpro` | `.opju` by default; `.opj` where offered | automated bridge tests; physical Windows/Origin smoke test required |
-| 8.6–2020 | LabTalk staging | `.opj`, worksheets only | experimental until a physical save/close/reopen record exists |
+| 8.6–2020 | bitness-matched COM | `.opj`, worksheets only | physical Origin 8.6 save/close/reopen passed |
 | 8.5 and older | none | portable `.sflorigin` fallback | unsupported for direct automation |
 
 The implementation has three intentionally separate parts:
@@ -19,7 +19,7 @@ The implementation has three intentionally separate parts:
   actual Origin import is requested.
 - `src-tauri/src/labtalk.rs` decodes the same bundle for OriginPro 8.6–2020,
   stages one deterministic wavelength-by-time text worksheet per dataset, and
-  generates an Origin 8.6-compatible LabTalk OGS script.
+  writes the manifest consumed by the bitness-matched COM helper.
 
 The separation keeps the file contract testable on every platform and confines
 Origin-specific behavior to one small adapter.
@@ -228,10 +228,12 @@ The one-click action selects a backend from the detected Origin version:
   isolated launcher, and invokes `run.python(path, 2)` through Origin's
   embedded Python. No system Python installation is required.
 - OriginPro 8.6–2020 decodes the bundle in Rust, writes exact-precision wide
-  worksheets under an isolated temporary directory, generates `[Main]` in an
-  OGS file, and invokes it with `run.section(path, Main)`. The script saves an
-  `.opj` and writes a JSON completion record only after the save returns.
+  worksheets under an isolated temporary directory, transfers them as
+  two-dimensional SAFEARRAYs with `PutWorksheet`, and saves with the COM
+  `Application.Save` method. The helper validates the exact Origin executable,
+  closes its hidden automation instance, and reopens the saved `.opj` normally.
 
-Both routes use Origin's documented `-RS` startup path, retain startup-log
-markers, wait up to 30 minutes, and validate the expected workbook count plus a
-non-empty project instead of treating process creation as success.
+The modern route retains its command-line startup path. The legacy route uses
+COM because physical Origin 8.6 testing proved that `-RS` and `-SLOG` are
+ignored. Both routes wait up to 30 minutes and validate the expected workbook
+count plus a non-empty project instead of treating process creation as success.

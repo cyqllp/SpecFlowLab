@@ -1,9 +1,9 @@
-// LabTalk staging adapter for Origin 8.6.
+// COM worksheet staging adapter for Origin 8.6.
 //
 // Origin 8.6 does not have embedded Python, so we cannot use the originpro
 // bridge. Instead we extract the portable .sflorigin bundle, write Float64
-// axes and matrices as tab-delimited text files, generate a LabTalk .OGS
-// script that imports them, and launch Origin with that script.
+// axes and matrices as tab-delimited text files, and generate a manifest for
+// the bitness-matched COM helper.
 //
 // The .sflorigin sidecar remains the lossless provenance source.
 #![allow(dead_code)]
@@ -12,23 +12,17 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::origin::OutputPlan;
-
 #[derive(Debug)]
 pub struct LabTalkStage {
     pub run_directory: PathBuf,
-    pub script_path: PathBuf,
+    pub manifest_path: PathBuf,
     pub dataset_count: usize,
 }
 
 /// Extract the .sflorigin bundle and stage tab-delimited import files.
 ///
-/// Returns the generated LabTalk stage and its expected dataset count.
-pub fn stage_labtalk_import(
-    bundle_path: &Path,
-    output_path: &Path,
-    output_plan: &OutputPlan,
-) -> Result<LabTalkStage, String> {
+/// Returns the generated COM import stage and its expected dataset count.
+pub fn stage_labtalk_import(bundle_path: &Path) -> Result<LabTalkStage, String> {
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("timestamp error: {e}"))?
@@ -37,7 +31,7 @@ pub fn stage_labtalk_import(
         .join("SpecFlowLab-LabTalk")
         .join(format!("{}-{run_id}", std::process::id()));
     fs::create_dir_all(&run_directory)
-        .map_err(|e| format!("Cannot create LabTalk staging directory: {e}"))?;
+        .map_err(|e| format!("Cannot create Origin COM staging directory: {e}"))?;
 
     // Read the .sflorigin zip
     let bundle_bytes = fs::read(bundle_path).map_err(|e| format!("Cannot read bundle: {e}"))?;
@@ -65,7 +59,7 @@ pub fn stage_labtalk_import(
         return Err("Bundle contains no datasets".to_string());
     }
 
-    let mut table_paths: Vec<String> = Vec::new();
+    let mut com_datasets: Vec<serde_json::Value> = Vec::new();
 
     for (index, dataset) in datasets.iter().enumerate() {
         let name = dataset["projectLabel"]
@@ -106,23 +100,28 @@ pub fn stage_labtalk_import(
         // time coordinates in the header row, signal values in B onward.
         let table_path = dataset_dir.join("worksheet.txt");
         write_wide_table(&table_path, &time_axis, &wave_axis, &matrix)?;
-        table_paths.push(table_path.to_string_lossy().into_owned());
+        com_datasets.push(serde_json::json!({
+            "tablePath": table_path,
+            "workbookName": format!("SFL{:04}", index + 1),
+            "label": sanitized,
+        }));
     }
 
-    let script_path = run_directory.join("import.ogs");
-    let script = generate_labtalk_script(
-        &table_paths,
-        datasets,
-        output_path,
-        output_plan,
-        &run_directory,
-    )?;
-    fs::write(&script_path, script.as_bytes())
-        .map_err(|e| format!("Cannot write LabTalk script: {e}"))?;
+    let manifest_path = run_directory.join("com-import.json");
+    let com_manifest = serde_json::json!({
+        "schema": "specflowlab.origin_com_import.v1",
+        "datasets": com_datasets,
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&com_manifest)
+            .map_err(|e| format!("Cannot serialize Origin COM manifest: {e}"))?,
+    )
+    .map_err(|e| format!("Cannot write Origin COM manifest: {e}"))?;
 
     Ok(LabTalkStage {
         run_directory,
-        script_path,
+        manifest_path,
         dataset_count: datasets.len(),
     })
 }
@@ -244,108 +243,6 @@ fn format_f64(value: f64) -> String {
     }
 }
 
-/// Generate a LabTalk script that imports tab-delimited data into Origin 8.6.
-///
-/// Strategy:
-/// - Create one workbook per dataset
-/// - Import wavelength axis into column A (X)
-/// - Store exact time coordinates in the remaining column long names
-/// - Import the matrix into the remaining Y columns
-/// - Set column designations
-/// - Create line plots if requested
-/// - Save as .opj
-fn generate_labtalk_script(
-    table_paths: &[String],
-    datasets: &[serde_json::Value],
-    output_path: &Path,
-    output_plan: &OutputPlan,
-    run_directory: &Path,
-) -> Result<String, String> {
-    let output = output_path.to_string_lossy().replace('\\', "/");
-    let _run_dir = run_directory.to_string_lossy().replace('\\', "/");
-    let status_path = output_path.with_extension("origin-status.json");
-    let status = status_path.to_string_lossy().replace('\\', "/");
-
-    let mut script = String::new();
-
-    script.push_str("[Main]\r\n");
-
-    // Header: version marker so the startup log confirms the handoff.
-    script.push_str("// SpecFlowLab LabTalk handoff reached\r\n");
-    script.push_str("type -a \"SpecFlowLab LabTalk handoff reached\";\r\n");
-    script.push_str("\r\n");
-
-    push_status_json(&mut script, &status, "started", datasets.len());
-
-    // Suppress dialogs
-    script.push_str("// Suppress save prompts and update dialogs\r\n");
-    script.push_str("@SD = 0;\r\n");
-    script.push_str("@SP = 0;\r\n");
-    script.push_str("\r\n");
-
-    let wants_plots = output_plan.actual_mode != "sheets-only";
-
-    for (i, (table_path, dataset)) in table_paths.iter().zip(datasets.iter()).enumerate() {
-        let idx = i + 1;
-        let table_file = table_path.replace('\\', "/");
-        let label = dataset["projectLabel"].as_str().unwrap_or("Dataset");
-        let safe_label = sanitize_for_labtalk(label);
-        let workbook_name = format!("SFL{idx:04}");
-
-        script.push_str(&format!("// --- Dataset {idx}: {safe_label} ---\r\n"));
-
-        // Create new workbook
-        script.push_str(&format!(
-            "newbook name:=\"{workbook_name}\" result:=bkName$ option:=lsname;\r\n"
-        ));
-        script.push_str("win -a %H;\r\n");
-        script.push_str(&format!("page.label$ = \"{safe_label}\";\r\n"));
-        script.push_str("\r\n");
-
-        // The first row becomes column Long Names. Column A contains the
-        // wavelength axis; B onward contain signals at the exact time values
-        // recorded in their Long Names.
-        script.push_str("wo -k 1;\r\n");
-        script.push_str(&format!("open -w \"{table_file}\";\r\n"));
-        script.push_str("wks.col1.type = 4;\r\n");
-        script.push_str("wks.col1.lname$ = \"Wavelength\";\r\n");
-        script.push_str("wks.col1.units$ = \"nm\";\r\n");
-        script.push_str("loop(ii,2,wks.ncols) { wks.col$(ii).type = 1; };\r\n");
-        script.push_str(&format!("wks.name$ = \"{safe_label}\";\r\n"));
-        script.push_str("\r\n");
-
-        // Line plots
-        if wants_plots {
-            script.push_str("plotxy iy:=(1,2) plot:=200 ogl:=[<new>]!;\r\n");
-            script.push_str(&format!(
-                "label -s -px 0 -py 0 -sa -n MyGraph Legend \"{safe_label}\";\r\n"
-            ));
-            script.push_str("\r\n");
-        }
-    }
-
-    // Save project
-    script.push_str("// Save project\r\n");
-    script.push_str(&format!("save \"{output}\";\r\n"));
-    script.push_str("\r\n");
-
-    // Atomic replacement is unavailable in Origin 8.6 LabTalk. Write the
-    // completed JSON only after save returns; the Rust monitor validates the
-    // non-empty OPJ before reporting success.
-    push_status_json(&mut script, &status, "completed", datasets.len());
-    script.push_str("type -a \"SpecFlowLab LabTalk complete\";\r\n");
-
-    Ok(script)
-}
-
-fn push_status_json(script: &mut String, status_path: &str, state: &str, dataset_count: usize) {
-    script.push_str(&format!("type -gbef \"{status_path}\";\r\n"));
-    script.push_str(&format!(
-        "type \"{{\\x22state\\x22:\\x22{state}\\x22,\\x22datasetCount\\x22:{dataset_count},\\x22workbookCount\\x22:{dataset_count},\\x22graphCount\\x22:0,\\x22warnings\\x22:[]}}\";\r\n"
-    ));
-    script.push_str("type -ge;\r\n");
-}
-
 /// Sanitize a dataset name for LabTalk (ASCII-safe, no special chars).
 fn sanitize_for_labtalk(name: &str) -> String {
     name.chars()
@@ -383,34 +280,6 @@ mod tests {
     fn sanitize_truncates_long_names() {
         let long = "a".repeat(50);
         assert_eq!(sanitize_for_labtalk(&long).len(), 25);
-    }
-
-    #[test]
-    fn labtalk_script_includes_save_and_status() {
-        let paths = vec!["C:/tmp/worksheet.txt".to_string()];
-        let datasets = vec![serde_json::json!({"projectLabel": "VIS"})];
-        let plan = OutputPlan {
-            actual_mode: "sheets-only".to_string(),
-            created_graph_types: vec![],
-            omitted_graph_types: vec![],
-            omission_reasons: vec![],
-        };
-        let script = generate_labtalk_script(
-            &paths,
-            &datasets,
-            Path::new("C:/output/project.opj"),
-            &plan,
-            Path::new("C:/tmp/SpecFlowLab-LabTalk"),
-        )
-        .unwrap();
-
-        assert!(script.contains("SpecFlowLab LabTalk handoff reached"));
-        assert!(script.contains("[Main]"));
-        assert!(script.contains("newbook"));
-        assert!(script.contains("open -w \"C:/tmp/worksheet.txt\""));
-        assert!(script.contains("save \"C:/output/project.opj\""));
-        assert!(script.contains("type -gbef"));
-        assert!(script.contains("\\x22state\\x22:\\x22completed\\x22"));
     }
 
     #[test]
@@ -461,17 +330,7 @@ mod tests {
         let bytes = writer.finish().unwrap().into_inner();
         fs::write(&bundle, bytes).unwrap();
 
-        let stage = stage_labtalk_import(
-            &bundle,
-            Path::new("C:/out.opj"),
-            &OutputPlan {
-                actual_mode: "sheets-only".to_string(),
-                created_graph_types: vec![],
-                omitted_graph_types: vec![],
-                omission_reasons: vec![],
-            },
-        )
-        .unwrap();
+        let stage = stage_labtalk_import(&bundle).unwrap();
         assert_eq!(stage.dataset_count, 1);
         let table = fs::read_to_string(
             stage
@@ -484,9 +343,20 @@ mod tests {
             table,
             "Wavelength_nm\t-1\t0\t1.5\n500\t1\t2\t3\n510\t4\t\t6.123456789012345\n"
         );
-        let script = fs::read_to_string(&stage.script_path).unwrap();
-        assert!(!script.contains("run.python"));
-        assert!(!script.contains("projectLabel"));
+        let com_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(&stage.manifest_path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            com_manifest["schema"],
+            "specflowlab.origin_com_import.v1"
+        );
+        assert_eq!(com_manifest["datasets"][0]["workbookName"], "SFL0001");
+        assert_eq!(com_manifest["datasets"][0]["label"], "VIS_sample");
+        assert!(com_manifest["datasets"][0]["tablePath"]
+            .as_str()
+            .unwrap()
+            .ends_with("worksheet.txt"));
         let _ = fs::remove_dir_all(&stage.run_directory);
         let _ = fs::remove_dir_all(&root);
     }
@@ -497,16 +367,7 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let bundle = dir.join("empty.sflorigin");
         fs::write(&bundle, b"not a zip").unwrap();
-        let result = stage_labtalk_import(
-            &bundle,
-            Path::new("C:/out.opj"),
-            &OutputPlan {
-                actual_mode: "sheets-only".to_string(),
-                created_graph_types: vec![],
-                omitted_graph_types: vec![],
-                omission_reasons: vec![],
-            },
-        );
+        let result = stage_labtalk_import(&bundle);
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&dir);
     }
