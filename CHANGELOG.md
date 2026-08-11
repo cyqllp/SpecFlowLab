@@ -2,6 +2,28 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [1.0.5] - 2026-08-11
+
+- **OriginPro 8.6 direct automation** — a bitness-matched Windows PowerShell COM
+  helper replaces the earlier command-line LabTalk transport. OriginPro
+  8.6–2020 exports metadata, treated/selected data, and available fit/DAS/EAS
+  worksheets to `.opj`; OriginPro 2021+ retains the embedded Python adapter.
+  OriginPro 8.5 and older are rejected, and the app validates that COM launched
+  the exact executable selected in SpecFlowLab.
+- **Clean virtual-matrix worksheets** — `TreatedVM`, `FittedVM`, and
+  `ResidualVM` now store the wavelength axis in the first column and the exact
+  time coordinates in the first data row, so the sheet plots directly as a 2D
+  heatmap instead of embedding time values in column names.
+- **Explicit non-finite values** — staged worksheets preserve `NaN`,
+  `Infinity`, and `-Infinity` as literal tokens, matching the documented
+  `nanPolicy`, instead of silently blanking them.
+- **OriginPro output panel** — the experimental backend is summarized compactly
+  as “Origin 8.6+ · Worksheets only”, and sheets-only export no longer reports
+  phantom graph omissions.
+- Added regression coverage for a real `.sflorigin` staging pass, the
+  virtual-matrix worksheet layout, non-finite token handling, 8.5 versus 8.6
+  detection, custom-folder executable mappings, and the COM helper source.
+
 ## [1.0.4] - 2026-08-10
 
 - **Windows CI packaging** — GitHub Actions now builds signed Windows installers

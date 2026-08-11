@@ -28,7 +28,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.4";
+const APP_VERSION = "1.0.5";
 const plotGeometry = new WeakMap();
 
 const state = {
@@ -170,18 +170,18 @@ function render() {
         ${state.origin.installation ? `
           <div class="origin-status-block">
             <span class="origin-version">${escapeHtml(state.origin.installation.displayName ?? state.origin.installation.executablePath)}${state.origin.installation.bitness ? ` (${state.origin.installation.bitness}-bit)` : ""}</span>
-            <span class="origin-support ${state.origin.installation.supportLevel}">${state.origin.installation.supportLevel} · ${escapeHtml(state.origin.installation.backend)} · ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat || "opju").toUpperCase()}</span>
+            <span class="origin-support ${state.origin.installation.supportLevel}">${state.origin.installation.supportLevel === "experimental" ? "Origin 8.6+ · Worksheets only" : `${state.origin.installation.supportLevel} · ${escapeHtml(state.origin.installation.backend)} · ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat || "opju").toUpperCase()}`}</span>
           </div>
-          <label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
+          ${state.origin.installation.supportLevel !== "experimental" ? `<label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
             <option value="sheets-plots" ${state.origin.outputMode === "sheets-plots" && state.origin.installation.capabilities?.linePlots ? "selected" : ""} ${state.origin.installation.capabilities?.linePlots ? "" : "disabled"}>Sheets and supported plots</option>
             <option value="sheets-only" ${state.origin.outputMode === "sheets-only" ? "selected" : ""}>Only sheets</option>
-          </select></label>
-          ${(state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
+          </select></label>` : ""}
+          ${state.origin.installation.supportLevel !== "experimental" && (state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
             ${state.origin.installation.projectFormats.map((fmt) => `<option value="${fmt}" ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat) === fmt ? "selected" : ""}>${fmt.toUpperCase()}</option>`).join("")}
           </select></label>` : ""}
         ` : `<p class="origin-placeholder">Select an OriginPro installation to enable direct export.</p>`}
-        <button class="wide-command" data-action="${state.origin.installation ? "change-origin" : "select-origin"}" ${busy ? "disabled" : ""}>${state.origin.installation ? "Change..." : "Select Origin..."}</button>
-        <button class="wide-command" data-action="create-origin" ${dataset && !busy && isTauriRuntime() && isWindowsPlatform() ? "" : "disabled"}>Create in OriginPro...</button>
+        <button class="wide-command" data-action="${state.origin.installation ? "change-origin" : "select-origin"}" ${busy ? "disabled" : ""}>${state.origin.installation ? "Choose another EXE..." : "Choose Origin EXE..."}</button>
+        <button class="wide-command" data-action="create-origin" ${dataset && !busy && isTauriRuntime() && isWindowsPlatform() && state.origin.installation?.capabilities?.worksheets && state.origin.installation?.supportLevel !== "unsupported" ? "" : "disabled"}>Create in OriginPro...</button>
       </section>
     </aside>
 
@@ -547,7 +547,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.2 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.5 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -561,7 +561,7 @@ function renderManualModal() {
           <li><div><strong>Merge treated spectral ranges</strong><p>Select exactly two treated datasets, click Merge between Chirp and Reset, choose clean retained wavelength ranges, review the spectral preview, and create the derived dataset.</p></div></li>
           <li><div><strong>Compare datasets</strong><p>Use Compare to inspect coordinated kinetics, spectra, EAS, and DAS views with reusable sample styles.</p></div></li>
           <li><div><strong>Run global fitting</strong><p>Open Global Fitting, set component starts and IRF options, and review lifetimes, residuals, DAS, EAS, and fit diagnostics.</p></div></li>
-          <li><div><strong>Save and export</strong><p>Save the complete .sflproj archive, export an AI-ready Markdown summary, or create OriginPro sheets and plots on Windows.</p></div></li>
+          <li><div><strong>Save and export</strong><p>Save the complete .sflproj archive, export an AI-ready Markdown summary, or create OriginPro output on Windows. OriginPro 8.6–2020 uses experimental COM sheets-only export; OriginPro 2021+ uses the Python adapter.</p></div></li>
         </ol>
         <div class="manual-integrity-note"><strong>Data integrity</strong><span>Original CSV text and UFS bytes remain unchanged. Treatments, fits, merges, warnings, and provenance are stored separately and reproducibly.</span></div>
         <footer class="modal-footer"><span>For feedback, open About.</span><button data-action="close-modal">Close</button></footer>
@@ -2120,7 +2120,7 @@ async function createInOrigin() {
     return invoke("create_origin_project", {
       defaultName: `${projectName || "SpecFlowLab_project"}.${ext}`,
       bytes: Array.from(bundle),
-      createPlots: state.origin.outputMode === "sheets-plots",
+      createPlots: state.origin.outputMode === "sheets-plots" && state.origin.installation?.capabilities?.linePlots === true,
       outputFormat: state.origin.outputFormat || null,
     });
   }, (result) => {
@@ -2131,17 +2131,20 @@ async function createInOrigin() {
     const graphSummary = result.createPlots
       ? ` and ${result.graphCount} automatically rescaled graphs`
       : " in sheets-only mode";
+    const sheetSummary = result.sheetCount
+      ? ` containing ${result.sheetCount} worksheets`
+      : "";
     let omittedMsg = "";
     if (result.omittedGraphTypes?.length) {
       omittedMsg = ` Omitted: ${result.omittedGraphTypes.join(", ")}. ${result.omissionReasons?.join(" ") ?? ""}`;
     }
     return (
-      `${originInfo} imported ${result.datasetCount} datasets into ${result.workbookCount} workbooks${graphSummary}, `
+      `${originInfo} imported ${result.datasetCount} datasets into ${result.workbookCount} workbooks${sheetSummary}${graphSummary}, `
       + `then saved a ${formatBytes(result.outputBytes)} ${formatLabel} project at ${result.outputPath}.`
       + `${omittedMsg} `
       + `The exact bridge input remains at ${result.bundlePath}. `
       + `${result.warningCount ? `${result.warningCount} plot warning(s) were recorded. ` : ""}`
-      + `Diagnostics: ${result.statusPath} and ${result.logPath}.`
+      + `Diagnostics: ${result.statusPath}, ${result.logPath}, and ${result.launchDiagnosticPath}.`
     );
   });
 }

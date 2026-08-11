@@ -34,8 +34,12 @@ struct OriginLaunchResult {
     output_format: String,
     log_path: String,
     status_path: String,
+    launch_diagnostic_path: String,
+    command_probe_path: String,
+    process_id: u32,
     dataset_count: usize,
     workbook_count: usize,
+    sheet_count: usize,
     graph_count: usize,
     output_bytes: u64,
     warning_count: usize,
@@ -62,6 +66,8 @@ struct OriginJobStatus {
     dataset_count: Option<usize>,
     #[serde(default)]
     workbook_count: Option<usize>,
+    #[serde(default)]
+    sheet_count: Option<usize>,
     #[serde(default)]
     graph_count: Option<usize>,
     #[serde(default)]
@@ -173,13 +179,24 @@ async fn create_origin_project(
         let status_path = PathBuf::from(&result.status_path);
         let output_path = PathBuf::from(&result.output_path);
         let log_path = PathBuf::from(&result.log_path);
+        let command_probe_path = PathBuf::from(&result.command_probe_path);
+        let launch_diagnostic_path = PathBuf::from(&result.launch_diagnostic_path);
+        let backend = result.backend.clone();
         let status = tauri::async_runtime::spawn_blocking(move || {
-            wait_for_origin_result(&status_path, &output_path, &log_path)
+            wait_for_origin_result(
+                &status_path,
+                &output_path,
+                &log_path,
+                &command_probe_path,
+                &launch_diagnostic_path,
+                &backend,
+            )
         })
         .await
         .map_err(|error| format!("Could not monitor the OriginPro import task: {error}"))??;
         result.dataset_count = status.dataset_count.unwrap_or_default();
         result.workbook_count = status.workbook_count.unwrap_or_default();
+        result.sheet_count = status.sheet_count.unwrap_or(result.sheet_count);
         result.graph_count = status.graph_count.unwrap_or_default();
         result.output_bytes = status.output_bytes.unwrap_or_default();
         result.warning_count = status.warnings.len();
@@ -209,6 +226,14 @@ fn create_origin_project_on_windows(
 
     // Resolve installation info for the selected executable
     let install_info = inspect_origin_executable(&origin_executable)?;
+    if install_info.support_level == origin::SupportLevel::Unsupported
+        || install_info.backend == origin::OriginBackendKind::None
+    {
+        return Err(format!(
+            "{} is not supported for direct automation. SpecFlowLab supports OriginPro 8.6 or later; use Export Origin Bundle for Origin 8.5 and older.",
+            install_info.display_name
+        ));
+    }
     let format = output_format
         .and_then(|f| match f {
             "opj" => Some(origin::OriginProjectFormat::Opj),
@@ -216,6 +241,13 @@ fn create_origin_project_on_windows(
             _ => None,
         })
         .unwrap_or(install_info.default_project_format);
+    if !install_info.project_formats.contains(&format) {
+        return Err(format!(
+            "{} does not support {} output through the selected adapter.",
+            install_info.display_name,
+            format.extension().to_ascii_uppercase()
+        ));
+    }
     let ext = format.extension();
 
     let output_plan = if create_plots {
@@ -282,8 +314,10 @@ fn create_origin_project_on_windows(
 
     let log_path = output_path.with_extension("origin-startup.log");
     let status_path = output_path.with_extension("origin-status.json");
+    let launch_diagnostic_path = output_path.with_extension("origin-launch.json");
+    let command_probe_path = run_directory.join("command-line-probe.txt");
 
-    for generated_path in [&log_path, &status_path] {
+    for generated_path in [&log_path, &status_path, &launch_diagnostic_path] {
         if generated_path.exists() {
             std::fs::remove_file(generated_path).map_err(|error| {
                 format!(
@@ -307,28 +341,29 @@ fn create_origin_project_on_windows(
     }
 
     // Fork: LabTalk for Origin 8.6, Python bridge for 2021+
-    let is_labtalk = matches!(
-        install_info.backend,
-        origin::OriginBackendKind::LabTalk | origin::OriginBackendKind::LegacyPyOrigin
-    );
+    let is_labtalk = install_info.backend == origin::OriginBackendKind::LabTalk;
+    let mut staged_dataset_count = 0;
+    let mut staged_sheet_count = 0;
+    let process_id;
 
     if is_labtalk {
-        // ---- LabTalk staging path (Origin 8.6, 2016–2020) ----
-        let script_path = labtalk::stage_labtalk_import(&bundle_path, &output_path, &output_plan)?;
-        let script_for_labtalk = labtalk_path(&script_path)?;
-        let origin_startup_script = origin_startup_labtalk(&script_for_labtalk);
-        Command::new(&origin_executable)
-            .arg("-slog")
-            .arg(&log_path)
-            .arg("-rs")
-            .raw_arg(origin_startup_script)
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "Could not launch OriginPro (LabTalk) from {}: {error}",
-                    origin_executable.display()
-                )
-            })?;
+        // ---- COM worksheet staging path (Origin 8.6, 2016–2020) ----
+        let stage = labtalk::stage_labtalk_import(&bundle_path)?;
+        staged_dataset_count = stage.dataset_count;
+        staged_sheet_count = stage.sheet_count;
+        let com_launcher_path = run_directory.join("launch_origin_com.ps1");
+        process_id = spawn_origin_com_bridge(
+            &origin_executable,
+            &com_launcher_path,
+            &stage.manifest_path,
+            &log_path,
+            &status_path,
+            &command_probe_path,
+            &launch_diagnostic_path,
+            &output_path,
+            stage.dataset_count,
+            &install_info,
+        )?;
     } else {
         // ---- Python bridge path (Origin 2021+) ----
         let bridge_path = run_directory.join("specflowlab_origin.py");
@@ -357,19 +392,20 @@ fn create_origin_project_on_windows(
             )
         })?;
         let launcher_for_labtalk = labtalk_path(&launcher_path)?;
-        let origin_startup_script = origin_startup_labtalk(&launcher_for_labtalk);
-        Command::new(&origin_executable)
-            .arg("-slog")
-            .arg(&log_path)
-            .arg("-rs")
-            .raw_arg(origin_startup_script)
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "Could not launch OriginPro (Python) from {}: {error}",
-                    origin_executable.display()
-                )
-            })?;
+        let probe_for_labtalk = labtalk_path(&command_probe_path)?;
+        let origin_startup_script =
+            origin_startup_labtalk(&launcher_for_labtalk, &probe_for_labtalk);
+        process_id = spawn_origin_command_line_bridge(
+            &origin_executable,
+            &log_path,
+            &status_path,
+            &command_probe_path,
+            &launch_diagnostic_path,
+            &launcher_path,
+            &output_path,
+            &origin_startup_script,
+            &install_info,
+        )?;
     }
 
     Ok(Some(OriginLaunchResult {
@@ -384,8 +420,12 @@ fn create_origin_project_on_windows(
         output_format: format.extension().to_string(),
         log_path: log_path.to_string_lossy().into_owned(),
         status_path: status_path.to_string_lossy().into_owned(),
-        dataset_count: 0,
-        workbook_count: 0,
+        launch_diagnostic_path: launch_diagnostic_path.to_string_lossy().into_owned(),
+        command_probe_path: command_probe_path.to_string_lossy().into_owned(),
+        process_id,
+        dataset_count: staged_dataset_count,
+        workbook_count: staged_dataset_count,
+        sheet_count: staged_sheet_count,
         graph_count: 0,
         output_bytes: 0,
         warning_count: 0,
@@ -397,83 +437,677 @@ fn create_origin_project_on_windows(
 }
 
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn spawn_origin_command_line_bridge(
+    origin_executable: &Path,
+    log_path: &Path,
+    status_path: &Path,
+    command_probe_path: &Path,
+    launch_diagnostic_path: &Path,
+    bridge_script_path: &Path,
+    output_path: &Path,
+    origin_startup_script: &str,
+    install_info: &origin::OriginInstallationInfo,
+) -> Result<u32, String> {
+    let launch_timestamp_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Could not create an Origin launch timestamp: {error}"))?;
+    let launch_timestamp_unix_ms = u64::try_from(launch_timestamp_unix_ms.as_millis())
+        .map_err(|_| "Origin launch timestamp exceeds the supported range".to_string())?;
+    let working_directory = origin_executable.parent().ok_or_else(|| {
+        format!(
+            "The selected OriginPro executable has no parent directory: {}",
+            origin_executable.display()
+        )
+    })?;
+    let diagnostic = serde_json::json!({
+        "schema": "specflowlab.origin_launch_diagnostic.v1",
+        "state": "prepared",
+        "launchTimestampUnixMs": launch_timestamp_unix_ms,
+        "executablePath": origin_executable,
+        "workingDirectory": working_directory,
+        "originDisplayName": install_info.display_name,
+        "originVersion": install_info.product_version,
+        "bitness": install_info.bitness,
+        "backend": install_info.backend.to_string(),
+        "bridgeScriptPath": bridge_script_path,
+        "commandProbePath": command_probe_path,
+        "statusPath": status_path,
+        "startupLogPath": log_path,
+        "outputPath": output_path,
+        "commandSummary": format!(
+            "\"{}\" -slog \"{}\" -rs <{} LabTalk characters>",
+            origin_executable.display(),
+            log_path.display(),
+            origin_startup_script.len()
+        ),
+    });
+    std::fs::write(
+        launch_diagnostic_path,
+        serde_json::to_vec_pretty(&diagnostic)
+            .map_err(|error| format!("Could not serialize Origin launch diagnostics: {error}"))?,
+    )
+    .map_err(|error| {
+        format!(
+            "Could not write Origin launch diagnostics {}: {error}",
+            launch_diagnostic_path.display()
+        )
+    })?;
+
+    let child = Command::new(origin_executable)
+        .current_dir(working_directory)
+        .arg("-slog")
+        .arg(log_path)
+        .arg("-rs")
+        .raw_arg(origin_startup_script)
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "Could not spawn OriginPro from {}: {error}. Launch diagnostics: {}",
+                origin_executable.display(),
+                launch_diagnostic_path.display()
+            )
+        })?;
+    let process_id = child.id();
+    let mut launched_diagnostic = diagnostic;
+    launched_diagnostic["state"] = serde_json::json!("process-spawned");
+    launched_diagnostic["processId"] = serde_json::json!(process_id);
+    let _ = std::fs::write(
+        launch_diagnostic_path,
+        serde_json::to_vec_pretty(&launched_diagnostic).unwrap_or_default(),
+    );
+    Ok(process_id)
+}
+
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn spawn_origin_com_bridge(
+    origin_executable: &Path,
+    launcher_path: &Path,
+    manifest_path: &Path,
+    log_path: &Path,
+    status_path: &Path,
+    command_probe_path: &Path,
+    launch_diagnostic_path: &Path,
+    output_path: &Path,
+    dataset_count: usize,
+    install_info: &origin::OriginInstallationInfo,
+) -> Result<u32, String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let bitness = install_info.bitness.ok_or_else(|| {
+        format!(
+            "Could not determine whether the selected Origin executable is 32-bit or 64-bit: {}",
+            origin_executable.display()
+        )
+    })?;
+    let powershell = windows_powershell_for_bitness(bitness)?;
+    let working_directory = origin_executable.parent().ok_or_else(|| {
+        format!(
+            "The selected OriginPro executable has no parent directory: {}",
+            origin_executable.display()
+        )
+    })?;
+    let launcher_source = origin_com_launcher_source(
+        origin_executable,
+        manifest_path,
+        log_path,
+        status_path,
+        command_probe_path,
+        output_path,
+        dataset_count,
+    );
+    let mut launcher_bytes = vec![0xEF, 0xBB, 0xBF];
+    launcher_bytes.extend_from_slice(launcher_source.as_bytes());
+    std::fs::write(launcher_path, launcher_bytes).map_err(|error| {
+        format!(
+            "Could not write the Origin COM launcher {}: {error}",
+            launcher_path.display()
+        )
+    })?;
+
+    let launch_timestamp_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Could not create an Origin launch timestamp: {error}"))?;
+    let launch_timestamp_unix_ms = u64::try_from(launch_timestamp_unix_ms.as_millis())
+        .map_err(|_| "Origin launch timestamp exceeds the supported range".to_string())?;
+    let diagnostic = serde_json::json!({
+        "schema": "specflowlab.origin_launch_diagnostic.v1",
+        "state": "prepared",
+        "launchTimestampUnixMs": launch_timestamp_unix_ms,
+        "executablePath": origin_executable,
+        "workingDirectory": working_directory,
+        "originDisplayName": install_info.display_name,
+        "originVersion": install_info.product_version,
+        "bitness": bitness,
+        "backend": install_info.backend.to_string(),
+        "bridgeTransport": "com-automation",
+        "helperExecutablePath": &powershell,
+        "bridgeScriptPath": launcher_path,
+        "importManifestPath": manifest_path,
+        "commandProbePath": command_probe_path,
+        "statusPath": status_path,
+        "startupLogPath": log_path,
+        "outputPath": output_path,
+        "commandSummary": "Origin.Application CreatePage/Worksheet.SetData/Save",
+    });
+    std::fs::write(
+        launch_diagnostic_path,
+        serde_json::to_vec_pretty(&diagnostic)
+            .map_err(|error| format!("Could not serialize Origin launch diagnostics: {error}"))?,
+    )
+    .map_err(|error| {
+        format!(
+            "Could not write Origin launch diagnostics {}: {error}",
+            launch_diagnostic_path.display()
+        )
+    })?;
+
+    let child = Command::new(&powershell)
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(launcher_path)
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "Could not start the {}-bit Origin COM bridge with {}: {error}. Launch diagnostics: {}",
+                bitness,
+                powershell.display(),
+                launch_diagnostic_path.display()
+            )
+        })?;
+    let process_id = child.id();
+    let mut launched_diagnostic = diagnostic;
+    launched_diagnostic["state"] = serde_json::json!("bridge-spawned");
+    launched_diagnostic["processId"] = serde_json::json!(process_id);
+    let _ = std::fs::write(
+        launch_diagnostic_path,
+        serde_json::to_vec_pretty(&launched_diagnostic).unwrap_or_default(),
+    );
+    Ok(process_id)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_powershell_for_bitness(bitness: u32) -> Result<PathBuf, String> {
+    let windows_directory = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let system_directory = match bitness {
+        32 if windows_directory.join("SysWOW64").is_dir() => "SysWOW64",
+        32 => "System32",
+        64 if cfg!(target_pointer_width = "32") => "Sysnative",
+        64 => "System32",
+        other => return Err(format!("Unsupported Origin executable bitness: {other}")),
+    };
+    let powershell = windows_directory
+        .join(system_directory)
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if !powershell.is_file() {
+        return Err(format!(
+            "The required {}-bit Windows PowerShell COM host was not found at {}",
+            bitness,
+            powershell.display()
+        ));
+    }
+    Ok(powershell)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn origin_com_launcher_source(
+    origin_executable: &Path,
+    manifest_path: &Path,
+    log_path: &Path,
+    status_path: &Path,
+    command_probe_path: &Path,
+    output_path: &Path,
+    dataset_count: usize,
+) -> String {
+    let template = r#"$ErrorActionPreference = 'Stop'
+$expectedExecutable = @@EXPECTED_EXECUTABLE@@
+$manifestPath = @@MANIFEST_PATH@@
+$logPath = @@LOG_PATH@@
+$statusPath = @@STATUS_PATH@@
+$probePath = @@PROBE_PATH@@
+$outputPath = @@OUTPUT_PATH@@
+$datasetCount = @@DATASET_COUNT@@
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$origin = $null
+$spawnedOrigin = $null
+$warnings = New-Object System.Collections.Generic.List[string]
+$bridgeFailed = $false
+
+function Write-Utf8NoBom([string]$Path, [string]$Text) {
+    [System.IO.File]::WriteAllText($Path, $Text, $utf8NoBom)
+}
+
+function Write-BridgeLog([string]$Message) {
+    $line = ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) + [Environment]::NewLine
+    [System.IO.File]::AppendAllText($logPath, $line, $utf8NoBom)
+}
+
+function Write-FailedStatus([string]$Message, [string]$Trace) {
+    $payload = [ordered]@{
+        state = 'failed'
+        error = $Message
+        traceback = $Trace
+        warnings = @($warnings)
+    } | ConvertTo-Json -Compress
+    Write-Utf8NoBom $statusPath $payload
+}
+
+try {
+    Write-BridgeLog ('Starting Origin COM automation for ' + $expectedExecutable)
+    $beforeIds = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ProcessName -match '(?i)^origin'
+    } | ForEach-Object { $_.Id })
+
+    $origin = New-Object -ComObject Origin.Application
+    Start-Sleep -Milliseconds 300
+    $spawnedCandidates = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ProcessName -match '(?i)^origin' -and $beforeIds -notcontains $_.Id
+    })
+    $spawnedOrigin = $spawnedCandidates | Where-Object {
+        try {
+            [String]::Equals(
+                [System.IO.Path]::GetFullPath($_.Path),
+                [System.IO.Path]::GetFullPath($expectedExecutable),
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        } catch { $false }
+    } | Select-Object -First 1
+
+    if ($null -eq $spawnedOrigin) {
+        $actual = @($spawnedCandidates | ForEach-Object {
+            try { $_.Path } catch { '<unavailable>' }
+        }) -join ', '
+        if ([String]::IsNullOrWhiteSpace($actual)) { $actual = '<no new Origin process>' }
+        throw ('The {0}-bit Origin COM registration did not launch the selected executable. Selected: {1}. COM launched: {2}. Start the selected Origin once as the current Windows user, close every Origin window, and retry.' -f ([IntPtr]::Size * 8), $expectedExecutable, $actual)
+    }
+
+    Write-Utf8NoBom $probePath ('SFL_COM_OK' + [Environment]::NewLine)
+    Write-BridgeLog ('COM connected to selected Origin process ' + $spawnedOrigin.Id)
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.schema -ne 'specflowlab.origin_com_import.v2') {
+        throw ('Unsupported Origin COM import manifest: ' + $manifest.schema)
+    }
+    if (@($manifest.datasets).Count -ne $datasetCount) {
+        throw ('Origin COM import manifest dataset count does not match the staged bundle.')
+    }
+
+    $startedPayload = [ordered]@{
+        state = 'started'
+        datasetCount = $datasetCount
+        warnings = @()
+    } | ConvertTo-Json -Compress
+    Write-Utf8NoBom $statusPath $startedPayload
+
+    $datasetIndex = 0
+    $sheetCount = 0
+    foreach ($dataset in @($manifest.datasets)) {
+        $datasetIndex += 1
+        $pageName = [string]$origin.CreatePage(
+            2,
+            [string]$dataset.workbookName,
+            'Origin',
+            2
+        )
+        if ([String]::IsNullOrWhiteSpace($pageName)) {
+            throw ('Origin could not create workbook ' + $dataset.workbookName)
+        }
+        if (@($dataset.sheets).Count -lt 1) {
+            throw ('Origin COM import manifest has no worksheets for ' + $dataset.workbookName)
+        }
+
+        $sheetIndex = 0
+        foreach ($sheetSpec in @($dataset.sheets)) {
+            $sheetIndex += 1
+            $sheetName = [string]$sheetSpec.name
+            if ($sheetName -notmatch '^[A-Za-z][A-Za-z0-9_]{0,30}$') {
+                throw ('Unsafe or unsupported Origin worksheet name: ' + $sheetName)
+            }
+
+            if ($sheetIndex -eq 1) {
+                $sheet = $origin.FindWorksheet(('[' + $pageName + ']Sheet1'))
+                if ($null -eq $sheet) {
+                    throw ('Origin could not resolve [' + $pageName + ']Sheet1.')
+                }
+                if (-not [bool]$sheet.Execute(('wks.name$="' + $sheetName + '";'))) {
+                    throw ('Origin could not rename [' + $pageName + ']Sheet1 to ' + $sheetName)
+                }
+                try { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($sheet) | Out-Null } catch {}
+            } else {
+                $anchor = $origin.FindWorksheet(('[' + $pageName + ']' + [string]$dataset.sheets[0].name))
+                if ($null -eq $anchor) {
+                    throw ('Origin could not resolve the anchor worksheet in ' + $pageName)
+                }
+                if (-not [bool]$anchor.Execute(('newsheet name:=' + $sheetName + ';'))) {
+                    throw ('Origin could not add worksheet ' + $sheetName + ' to ' + $pageName)
+                }
+                try { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($anchor) | Out-Null } catch {}
+            }
+
+            $sheet = $origin.FindWorksheet(('[' + $pageName + ']' + $sheetName))
+            if ($null -eq $sheet) {
+                throw ('Origin could not resolve [' + $pageName + ']' + $sheetName)
+            }
+            $lines = [System.IO.File]::ReadAllLines([string]$sheetSpec.tablePath)
+            if ($lines.Length -lt 1) {
+                throw ('Staged worksheet is empty: ' + $sheetSpec.tablePath)
+            }
+            $headers = $lines[0].Split([char]9)
+            $rowCount = $lines.Length - 1
+            $columnCount = $headers.Length
+            if ($columnCount -lt 1) {
+                throw ('Staged worksheet has no columns: ' + $sheetSpec.tablePath)
+            }
+
+            if ($rowCount -gt 0) {
+                if ([string]$sheetSpec.valueType -eq 'text') {
+                    $data = New-Object 'string[,]' $rowCount,$columnCount
+                } elseif ([string]$sheetSpec.valueType -eq 'numeric') {
+                    $data = New-Object 'double[,]' $rowCount,$columnCount
+                } else {
+                    throw ('Unsupported worksheet value type: ' + $sheetSpec.valueType)
+                }
+                for ($row = 0; $row -lt $rowCount; $row += 1) {
+                    $fields = $lines[$row + 1].Split([char]9)
+                    if ($fields.Length -ne $columnCount) {
+                        throw ('Staged worksheet row width mismatch in ' + $sheetSpec.tablePath)
+                    }
+                    for ($column = 0; $column -lt $columnCount; $column += 1) {
+                        if ([string]$sheetSpec.valueType -eq 'text') {
+                            $data[$row,$column] = [string]$fields[$column]
+                        } elseif ($fields[$column] -eq 'NaN') {
+                            $data[$row,$column] = [double]::NaN
+                        } elseif ($fields[$column] -eq 'Infinity') {
+                            $data[$row,$column] = [double]::PositiveInfinity
+                        } elseif ($fields[$column] -eq '-Infinity') {
+                            $data[$row,$column] = [double]::NegativeInfinity
+                        } elseif ([String]::IsNullOrWhiteSpace($fields[$column])) {
+                            $data[$row,$column] = [double]::NaN
+                        } else {
+                            $data[$row,$column] = [double]::Parse(
+                                $fields[$column],
+                                [Globalization.NumberStyles]::Float,
+                                [Globalization.CultureInfo]::InvariantCulture
+                            )
+                        }
+                    }
+                }
+                if (-not [bool]$sheet.SetData($data, 0, 0)) {
+                    throw ('Origin could not transfer data into [' + $pageName + ']' + $sheetName)
+                }
+            }
+
+            try {
+                $sheet.Rows = $rowCount
+                $sheet.Cols = $columnCount
+                $sheet.LongName = [string]$sheetSpec.longName
+                $metadataCommands = New-Object System.Collections.Generic.List[string]
+                for ($column = 0; $column -lt $columnCount; $column += 1) {
+                    $columnNumber = $column + 1
+                    if ([string]$sheetSpec.valueType -eq 'numeric') {
+                        $columnType = if (@($sheetSpec.xColumns) -contains $column) { 4 } else { 1 }
+                        $metadataCommands.Add(('wks.col' + $columnNumber + '.type=' + $columnType + ';')) | Out-Null
+                    }
+                    $metadataCommands.Add(('wks.col' + $columnNumber + '.lname$="' + $headers[$column] + '";')) | Out-Null
+                }
+                foreach ($metadataCommand in $metadataCommands) {
+                    if (-not [bool]$sheet.Execute($metadataCommand)) {
+                        throw ('Origin rejected worksheet metadata command: ' + $metadataCommand)
+                    }
+                }
+                if ($sheetIndex -eq 1) {
+                    $sheet.Execute(('page.label$="' + [string]$dataset.label + '";')) | Out-Null
+                }
+            } catch {
+                $warnings.Add(('Worksheet [' + $pageName + ']' + $sheetName + ' metadata: ' + $_.Exception.Message)) | Out-Null
+            } finally {
+                try { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($sheet) | Out-Null } catch {}
+            }
+            $sheetCount += 1
+        }
+
+        Write-BridgeLog ('Imported ' + @($dataset.sheets).Count + ' worksheets into ' + $pageName)
+
+        $importingPayload = [ordered]@{
+            state = 'importing'
+            datasetCount = $datasetCount
+            importedDatasetCount = $datasetIndex
+            sheetCount = $sheetCount
+            warnings = @($warnings)
+        } | ConvertTo-Json -Compress
+        Write-Utf8NoBom $statusPath $importingPayload
+    }
+
+    if (-not [bool]$origin.Save($outputPath)) {
+        throw ('Origin.Application.Save returned false for ' + $outputPath)
+    }
+    if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $outputPath).Length -le 0) {
+        throw ('Origin returned from Save without creating a non-empty project at ' + $outputPath)
+    }
+    Write-BridgeLog 'COM worksheet import and save completed'
+} catch {
+    $message = $_.Exception.Message
+    Write-BridgeLog ('FAILED: ' + $message)
+    Write-FailedStatus $message $_.ScriptStackTrace
+    $bridgeFailed = $true
+} finally {
+    if ($null -ne $origin) {
+        try { $origin.Exit() | Out-Null } catch {}
+        try { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($origin) | Out-Null } catch {}
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+
+if ($null -ne $spawnedOrigin) {
+    try {
+        if (-not $spawnedOrigin.HasExited -and -not $spawnedOrigin.WaitForExit(10000)) {
+            $liveAutomation = Get-Process -Id $spawnedOrigin.Id -ErrorAction SilentlyContinue
+            if ($null -ne $liveAutomation -and
+                $liveAutomation.MainWindowHandle -eq 0 -and
+                [String]::Equals(
+                    [System.IO.Path]::GetFullPath($liveAutomation.Path),
+                    [System.IO.Path]::GetFullPath($expectedExecutable),
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $liveAutomation.Kill()
+                $liveAutomation.WaitForExit(5000) | Out-Null
+                Write-BridgeLog ('Forced cleanup of hidden automation process ' + $spawnedOrigin.Id)
+            }
+        }
+    } catch {
+        $warnings.Add(('Could not confirm automation process exit: ' + $_.Exception.Message)) | Out-Null
+    }
+}
+
+if ($bridgeFailed) { exit 1 }
+
+try {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $expectedExecutable
+    $startInfo.Arguments = '"' + $outputPath + '"'
+    $startInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($expectedExecutable)
+    $startInfo.UseShellExecute = $true
+    $opened = [System.Diagnostics.Process]::Start($startInfo)
+    $outputBytes = (Get-Item -LiteralPath $outputPath).Length
+    $payload = [ordered]@{
+        state = 'completed'
+        datasetCount = $datasetCount
+        workbookCount = $datasetCount
+        graphCount = 0
+        sheetCount = $sheetCount
+        outputBytes = $outputBytes
+        warnings = @($warnings)
+        openedProcessId = $opened.Id
+    } | ConvertTo-Json -Compress
+    Write-Utf8NoBom $statusPath $payload
+    Write-BridgeLog ('Opened saved project in selected Origin process ' + $opened.Id)
+} catch {
+    $message = 'The Origin project was saved, but reopening it failed: ' + $_.Exception.Message
+    Write-BridgeLog ('FAILED: ' + $message)
+    Write-FailedStatus $message $_.ScriptStackTrace
+    exit 1
+}
+"#;
+
+    template
+        .replace(
+            "@@EXPECTED_EXECUTABLE@@",
+            &powershell_single_quoted(&origin_executable.to_string_lossy()),
+        )
+        .replace(
+            "@@MANIFEST_PATH@@",
+            &powershell_single_quoted(&manifest_path.to_string_lossy()),
+        )
+        .replace(
+            "@@LOG_PATH@@",
+            &powershell_single_quoted(&log_path.to_string_lossy()),
+        )
+        .replace(
+            "@@STATUS_PATH@@",
+            &powershell_single_quoted(&status_path.to_string_lossy()),
+        )
+        .replace(
+            "@@PROBE_PATH@@",
+            &powershell_single_quoted(&command_probe_path.to_string_lossy()),
+        )
+        .replace(
+            "@@OUTPUT_PATH@@",
+            &powershell_single_quoted(&output_path.to_string_lossy()),
+        )
+        .replace("@@DATASET_COUNT@@", &dataset_count.to_string())
+}
+
+#[cfg(target_os = "windows")]
 fn wait_for_origin_result(
     status_path: &Path,
     output_path: &Path,
     log_path: &Path,
+    command_probe_path: &Path,
+    launch_diagnostic_path: &Path,
+    backend: &str,
 ) -> Result<OriginJobStatus, String> {
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
     const IMPORT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+    let is_com_adapter = backend == origin::OriginBackendKind::LabTalk.to_string();
     let started_at = Instant::now();
-    let mut observed_python = false;
+    let mut observed_bridge = false;
     loop {
         if status_path.is_file() {
-            let status_text = std::fs::read_to_string(status_path).map_err(|error| {
-                format!(
-                    "Could not read Origin status file {}: {error}",
-                    status_path.display()
-                )
-            })?;
-            let status: OriginJobStatus = serde_json::from_str(&status_text).map_err(|error| {
-                format!(
-                    "Origin wrote an invalid status file {}: {error}",
-                    status_path.display()
-                )
-            })?;
-            observed_python = true;
-            match status.state.as_str() {
-                "completed" => {
-                    let dataset_count = status.dataset_count.unwrap_or_default();
-                    let workbook_count = status.workbook_count.unwrap_or_default();
-                    let actual_bytes = output_path
-                        .metadata()
-                        .map_err(|error| {
-                            format!(
-                                "Origin reported completion, but the project {} is unavailable: {error}",
-                                output_path.display()
-                            )
-                        })?
-                        .len();
-                    if dataset_count == 0 || workbook_count != dataset_count || actual_bytes == 0 {
-                        return Err(format!(
-                            "Origin reported completion without a valid populated project (datasets: {dataset_count}, workbooks: {workbook_count}, bytes: {actual_bytes}). Status: {}. Startup log: {}.",
-                            status_path.display(),
-                            log_path.display()
-                        ));
+            // The modern Python bridge and COM launcher replace this file in
+            // one write. Origin 8.6 LabTalk writes its intermediate states
+            // directly, so polling may briefly observe an empty or partial
+            // file between `type -gbef` and `type -ge`.
+            if let Ok(status_text) = std::fs::read_to_string(status_path) {
+                if let Ok(status) = serde_json::from_str::<OriginJobStatus>(&status_text) {
+                    observed_bridge = true;
+                    match status.state.as_str() {
+                        "completed" => {
+                            let dataset_count = status.dataset_count.unwrap_or_default();
+                            let workbook_count = status.workbook_count.unwrap_or_default();
+                            let actual_bytes = output_path
+                                .metadata()
+                                .map_err(|error| {
+                                    format!(
+                                        "Origin reported completion, but the project {} is unavailable: {error}",
+                                        output_path.display()
+                                    )
+                                })?
+                                .len();
+                            if dataset_count == 0
+                                || workbook_count != dataset_count
+                                || actual_bytes == 0
+                            {
+                                return Err(format!(
+                                    "Origin reported completion without a valid populated project (datasets: {dataset_count}, workbooks: {workbook_count}, bytes: {actual_bytes}). Status: {}. Startup log: {}.",
+                                    status_path.display(),
+                                    log_path.display()
+                                ));
+                            }
+                            return Ok(status);
+                        }
+                        "failed" => {
+                            let error = status
+                                .error
+                                .as_deref()
+                                .unwrap_or("Origin reported an unspecified bridge error.");
+                            let traceback = status.traceback.as_deref().unwrap_or("");
+                            return Err(format!(
+                                "Origin import failed: {error}\n{traceback}\nStatus: {}\nStartup log: {}{}",
+                                status_path.display(),
+                                log_path.display(),
+                                origin_log_suffix(log_path)
+                            ));
+                        }
+                        _ => {}
                     }
-                    return Ok(status);
                 }
-                "failed" => {
-                    let error = status
-                        .error
-                        .as_deref()
-                        .unwrap_or("Origin's embedded Python reported an unspecified error.");
-                    let traceback = status.traceback.as_deref().unwrap_or("");
-                    return Err(format!(
-                        "Origin import failed: {error}\n{traceback}\nStatus: {}\nStartup log: {}{}",
-                        status_path.display(),
-                        log_path.display(),
-                        origin_log_suffix(log_path)
-                    ));
-                }
-                _ => {}
             }
         }
 
         let elapsed = started_at.elapsed();
-        if !observed_python && elapsed >= STARTUP_TIMEOUT {
+        if !observed_bridge && elapsed >= STARTUP_TIMEOUT {
+            if is_com_adapter {
+                if command_probe_path.is_file() {
+                    return Err(format!(
+                        "The COM bridge connected to the selected Origin executable, but worksheet import did not start within 120 seconds. Probe: {}. Status: {}. Bridge log: {}. Launch diagnostics: {}{}",
+                        command_probe_path.display(),
+                        status_path.display(),
+                        log_path.display(),
+                        launch_diagnostic_path.display(),
+                        origin_log_suffix(log_path)
+                    ));
+                }
+                return Err(format!(
+                    "The bitness-matched Origin COM bridge did not connect within 120 seconds. Start the selected Origin once as the current Windows user, close every Origin window, and retry. Status: {}. Bridge log: {}. Launch diagnostics: {}{}",
+                    status_path.display(),
+                    log_path.display(),
+                    launch_diagnostic_path.display(),
+                    origin_log_suffix(log_path)
+                ));
+            }
+            if command_probe_path.is_file() {
+                return Err(format!(
+                    "Origin accepted the command-line LabTalk probe, but the {backend} bridge did not start within 120 seconds. The failure is in the generated bridge script or its path, not process launching. Probe: {}. Status: {}. Startup log: {}. Launch diagnostics: {}{}",
+                    command_probe_path.display(),
+                    status_path.display(),
+                    log_path.display(),
+                    launch_diagnostic_path.display(),
+                    origin_log_suffix(log_path)
+                ));
+            }
             return Err(format!(
-                "OriginPro opened, but its embedded Python did not start the SpecFlowLab bridge within 120 seconds. Close all Origin windows and retry once. Status: {}. Startup log: {}{}",
+                "The Origin process was spawned, but it did not execute the minimal command-line LabTalk probe within 120 seconds. The selected executable is not accepting -rs/-slog; complete Origin licensing and User Files Folder setup, close every Origin process, and verify that this is an installed Origin copy. Probe: {}. Status: {}. Startup log: {}. Launch diagnostics: {}{}",
+                command_probe_path.display(),
                 status_path.display(),
                 log_path.display(),
+                launch_diagnostic_path.display(),
                 origin_log_suffix(log_path)
             ));
         }
-        if observed_python && elapsed >= IMPORT_TIMEOUT {
+        if observed_bridge && elapsed >= IMPORT_TIMEOUT {
             return Err(format!(
-                "Origin's embedded Python started but did not finish the import within 30 minutes. Status: {}. Startup log: {}{}",
+                "Origin's {backend} bridge started but did not finish the import within 30 minutes. Status: {}. Startup log: {}{}",
                 status_path.display(),
                 log_path.display(),
                 origin_log_suffix(log_path)
@@ -582,9 +1216,12 @@ fn unique_sidecar_path(output_path: &Path, extension: &str) -> PathBuf {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn origin_startup_labtalk(launcher_for_labtalk: &str) -> String {
+fn origin_startup_labtalk(launcher_for_labtalk: &str, probe_for_labtalk: &str) -> String {
     format!(
-        "type -a \"SpecFlowLab LabTalk handoff reached\";\
+        "type -gbef \"{probe_for_labtalk}\";\
+type \"SFL_RS_OK\";\
+type -ge;\
+type -a \"SpecFlowLab LabTalk handoff reached\";\
 run.python(\"{launcher_for_labtalk}\",2);\
 type -a \"SpecFlowLab Python call returned\";"
     )
@@ -701,15 +1338,11 @@ async fn select_origin_installation(
 ) -> Result<Option<origin::OriginInstallationInfo>, String> {
     #[cfg(target_os = "windows")]
     {
-        // First check discovered installations
-        let discovered = discover_and_inspect_installations(&app)?;
-        if !discovered.is_empty() {
-            // Return the best candidate; the frontend can show a picker
-            let best = discovered.into_iter().next().unwrap();
-            persist_installation(&app, &best)?;
-            return Ok(Some(best));
-        }
-        // No automatic discovery — ask user to browse
+        // This command is invoked by both Select and Change. Always let the
+        // user choose the exact executable: one Origin installation can ship
+        // 32-bit and 64-bit launchers whose COM registrations are independent.
+        // Auto-discovery remains available to the launch fallback, but must
+        // never override an explicit selection request.
         let selected = app
             .dialog()
             .file()
@@ -763,20 +1396,18 @@ fn inspect_origin_executable(path: &Path) -> Result<origin::OriginInstallationIn
     let (major, minor, product_version, confidence) = read_executable_version(path);
 
     // 2. Fallback to file-name heuristic
-    let (major, confidence) = if major.is_none() {
-        let (fn_major, fn_conf) = origin::version_from_file_name(path);
+    let (major, minor, confidence) = if major.is_none() {
+        let (fn_major, fn_minor, fn_conf) = origin::version_details_from_file_name(path);
         if fn_major.is_none() {
             warnings.push("Could not determine Origin version from the executable. Manual confirmation is required.".to_string());
         }
-        (fn_major, fn_conf)
+        (fn_major, fn_minor, fn_conf)
     } else {
-        (major, confidence)
+        (major, minor, confidence)
     };
 
     let major = major.unwrap_or(0);
-    // When the file name maps to major 8 (origin86), assume 8.6 since the
-    // file name alone cannot distinguish 8.5 from 8.6.
-    let resolved_minor = minor.unwrap_or(if major == 8 { 6 } else { 0 });
+    let resolved_minor = minor.unwrap_or(0);
 
     // 3. Resolve capabilities
     let capabilities = origin::resolve_capabilities(major, resolved_minor);
@@ -823,8 +1454,8 @@ fn read_executable_version(
     // For now, fall back to file-name heuristic (the windows crate dependency
     // will be added in a follow-up when the physical test matrix is performed)
     let _ = path;
-    let (major, confidence) = origin::version_from_file_name(path);
-    (major, None, None, confidence)
+    let (major, minor, confidence) = origin::version_details_from_file_name(path);
+    (major, minor, None, confidence)
 }
 
 #[cfg(target_os = "windows")]
@@ -839,13 +1470,34 @@ fn detect_bitness(path: &Path) -> Option<u32> {
     } else if lower.contains("_32") {
         Some(32)
     } else {
-        // On a 64-bit OS, check if the binary is 64-bit via PE header.
-        // For now, default to 64 on modern systems.
-        if std::env::consts::ARCH == "x86_64" {
-            Some(64)
-        } else {
-            None
-        }
+        read_pe_bitness(path)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_pe_bitness(path: &Path) -> Option<u32> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut dos_magic = [0_u8; 2];
+    file.read_exact(&mut dos_magic).ok()?;
+    if dos_magic != *b"MZ" {
+        return None;
+    }
+    file.seek(SeekFrom::Start(0x3c)).ok()?;
+    let mut pe_offset = [0_u8; 4];
+    file.read_exact(&mut pe_offset).ok()?;
+    file.seek(SeekFrom::Start(u32::from_le_bytes(pe_offset) as u64))
+        .ok()?;
+    let mut pe_header = [0_u8; 6];
+    file.read_exact(&mut pe_header).ok()?;
+    if pe_header[..4] != *b"PE\0\0" {
+        return None;
+    }
+    match u16::from_le_bytes([pe_header[4], pe_header[5]]) {
+        0x014c => Some(32),
+        0x8664 | 0x0200 => Some(64),
+        _ => None,
     }
 }
 
@@ -956,9 +1608,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::detect_bitness;
     use super::{
-        is_origin_executable_candidate, origin_candidate_score, origin_launcher_source,
-        origin_startup_labtalk, safe_default_name, OriginJobStatus,
+        is_origin_executable_candidate, origin_candidate_score, origin_com_launcher_source,
+        origin_launcher_source, origin_startup_labtalk, powershell_single_quoted,
+        safe_default_name, OriginJobStatus,
     };
     use std::path::Path;
 
@@ -977,6 +1632,27 @@ mod tests {
         assert!(!is_origin_executable_candidate(Path::new(
             "OriginUpdate.exe"
         )));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn detects_x86_from_the_pe_header_instead_of_the_host_architecture() {
+        let path = std::env::temp_dir().join(format!(
+            "specflowlab-pe-x86-{}-{}.exe",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut bytes = vec![0_u8; 0x86];
+        bytes[0..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&(0x80_u32).to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes[0x84..0x86].copy_from_slice(&(0x014c_u16).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(detect_bitness(&path), Some(32));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1014,15 +1690,60 @@ mod tests {
 
     #[test]
     fn origin_startup_script_calls_python_directly_and_records_handoff_markers() {
-        let script =
-            origin_startup_labtalk("C:/Temp/SpecFlowLab-OriginBridge/launch_specflowlab_origin.py");
-        assert!(script.starts_with("type -a \"SpecFlowLab LabTalk handoff reached\";"));
+        let script = origin_startup_labtalk(
+            "C:/Temp/SpecFlowLab-OriginBridge/launch_specflowlab_origin.py",
+            "C:/Temp/SpecFlowLab-OriginBridge/command-line-probe.txt",
+        );
+        assert!(script.starts_with(
+            "type -gbef \"C:/Temp/SpecFlowLab-OriginBridge/command-line-probe.txt\";"
+        ));
+        assert!(script.contains("type \"SFL_RS_OK\";type -ge;"));
         assert!(script.contains(
             "run.python(\"C:/Temp/SpecFlowLab-OriginBridge/launch_specflowlab_origin.py\",2);"
         ));
         assert!(script.ends_with("type -a \"SpecFlowLab Python call returned\";"));
         assert!(!script.contains('\r'));
         assert!(!script.contains('\n'));
+    }
+
+    #[test]
+    fn origin_com_launcher_validates_the_selected_executable_and_reports_failures() {
+        let source = origin_com_launcher_source(
+            Path::new("C:/Program Files/OriginLab/Origin/origin86.exe"),
+            Path::new("C:/Temp/com-import.json"),
+            Path::new("C:/Data/project.origin-startup.log"),
+            Path::new("C:/Data/project.origin-status.json"),
+            Path::new("C:/Temp/command-line-probe.txt"),
+            Path::new("C:/Data/project.opj"),
+            3,
+        );
+        assert!(source.contains("New-Object -ComObject Origin.Application"));
+        assert!(source.contains("$origin.CreatePage("));
+        assert!(source.contains("$sheet.SetData($data, 0, 0)"));
+        assert!(source.contains("newsheet name:="));
+        assert!(source.contains("specflowlab.origin_com_import.v2"));
+        assert!(source.contains("New-Object 'string[,]'"));
+        assert!(source.contains("$fields[$column] -eq 'NaN'"));
+        assert!(source.contains("$fields[$column] -eq 'Infinity'"));
+        assert!(source.contains("$fields[$column] -eq '-Infinity'"));
+        assert!(source.contains("$origin.Save($outputPath)"));
+        assert!(source.contains("$origin.FindWorksheet(('[' + $pageName + ']Sheet1'))"));
+        assert!(!source.contains("open -w"));
+        assert!(source.contains("COM registration did not launch the selected executable"));
+        assert!(source.contains("SFL_COM_OK"));
+        assert!(source.contains("state = 'failed'"));
+        assert!(source.contains("state = 'completed'"));
+        assert!(source.contains("$datasetCount = 3"));
+        assert!(source.contains("[System.Diagnostics.Process]::Start($startInfo)"));
+        assert!(source.contains("'C:/Program Files/OriginLab/Origin/origin86.exe'"));
+    }
+
+    #[test]
+    fn powershell_literal_escapes_single_quotes() {
+        assert_eq!(
+            powershell_single_quoted("C:/O'Brien/a.ps1"),
+            "'C:/O''Brien/a.ps1'"
+        );
     }
 
     #[cfg(target_os = "macos")]

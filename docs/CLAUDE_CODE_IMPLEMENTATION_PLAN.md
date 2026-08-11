@@ -333,17 +333,17 @@ Treat this as the implementation target, not proof of support:
 | --- | --- | --- | --- | --- |
 | 2023 and newer | `.opju` | existing `originpro` Python adapter | worksheets + all currently supported plots | physical smoke test for one current release; regression fixtures |
 | 2021–2022b | `.opju` default; `.opj` optional where verified | existing `originpro` Python adapter | worksheets + all currently supported plots | physical tests for 2021 and one 2022-family version |
-| 2018–2020b | `.opju` default; `.opj` compatibility option | separate legacy PyOrigin adapter | worksheets first; enable supported line plots only after physical verification | PyOrigin API spike plus one physical version test |
-| 2016–2017 | `.opj` | separate legacy PyOrigin adapter | worksheets first; basic line plots only after verification | physical test and save/reopen validation |
+| 2018–2020b | `.opj` | common LabTalk staging adapter | worksheets only until physical verification | one physical version test plus save/reopen validation |
+| 2016–2017 | `.opj` | common LabTalk staging adapter | worksheets only until physical verification | physical test and save/reopen validation |
 | 9.x–2015 | `.opj` | LabTalk staging adapter | worksheets; optionally basic 2D lines after verification | per-family experimental badge and physical test |
-| 8.6 | `.opj` | LabTalk staging adapter | worksheets plus verified basic line graphs; no promised exact heatmap | physical OriginPro 8.6 save/reopen test |
+| 8.6 | `.opj` | LabTalk staging adapter | worksheets only; no promised exact heatmap | physical OriginPro 8.6 save/reopen test |
 | older or unknown | portable `.sflorigin`/interoperable files only | none | no automatic Origin launch | explicit unsupported message |
 
 Notes:
 
 - Origin 2018 introduced `.opju`; older releases require `.opj`.
 - Origin 2018 through 2022b can provide an older `.opj` compatibility path, while newer releases should default to `.opju`.
-- The public `originpro` package path is for Origin 2021 and newer. Do not assume the same API in 2016–2020; isolate PyOrigin work.
+- The public `originpro` package path is for Origin 2021 and newer. OriginPro 8.6–2020 uses the shared conservative LabTalk worksheet path instead of an unimplemented legacy PyOrigin adapter.
 - “All currently supported plots” means treated/residual heatmaps, selected spectra/kinetics, DAS, and EAS only when the backend reports and demonstrates those capabilities.
 - Heatmaps with irregular time/wavelength axes require the existing worksheet-backed Virtual Matrix strategy. Never create a regular Origin matrix by pretending irregular coordinates are linear.
 
@@ -351,18 +351,13 @@ Before coding against a legacy API, verify these version boundaries against curr
 
 ### 5.5 Adapter boundaries
 
-Keep `.sflorigin` as the shared, versioned input. Create three isolated backend paths:
+Keep `.sflorigin` as the shared, versioned input. Create two isolated backend paths:
 
 1. `ModernOriginProBackend` (2021+)
    - reuse `integrations/origin/specflowlab_origin.py`;
    - retain current embedded-Python startup, atomic status file, log, timeout, and non-empty-output validation;
    - make output suffix and actual created/omitted graphs part of the result.
-2. `LegacyPyOriginBackend` (2016–2020)
-   - add a separate adapter module/script;
-   - map the portable bundle to the older API explicitly;
-   - begin with worksheets and basic lines; do not fork the entire parser;
-   - share the standard-library archive parser and naming helpers where possible.
-3. `LabTalkBackend` (8.6–2015)
+2. `LabTalkBackend` (8.6–2020)
    - materialize a deterministic, trusted temporary staging directory from `.sflorigin`;
    - use ASCII-safe filenames plus a manifest mapping back to full Unicode display names;
    - write axes/matrices as tab-delimited files that old Origin can import;
@@ -493,7 +488,7 @@ Minimum release matrix:
 
 - OriginPro 2021, because it is the currently demonstrated user environment;
 - one current Origin release (2023+);
-- one 2018–2020 PyOrigin-family release before marking that family verified;
+- one 2018–2020 LabTalk-family release before marking that family verified;
 - OriginPro 8.6 before advertising one-click 8.6 support.
 
 Unrun rows must remain experimental or unsupported in the UI and documentation.
@@ -543,9 +538,8 @@ Useful primary references to re-check during implementation:
 4. `feat: support within-folder dataset reordering`
 5. `refactor: add Origin installation and capability model`
 6. `feat: select Origin installation and resolve OPJ or OPJU output`
-7. `feat: add legacy PyOrigin worksheet adapter`
-8. `feat: add experimental LabTalk OPJ adapter`
-9. `docs: document verified Origin compatibility matrix`
+7. `feat: add experimental LabTalk OPJ adapter`
+8. `docs: document verified Origin compatibility matrix`
 
 Each commit must leave `npm test` and relevant language tests passing. Do not bump the public version, tag a release, or claim 8.6 support until the Definition of Done and physical gates are met.
 

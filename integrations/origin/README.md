@@ -1,7 +1,15 @@
 # SpecFlowLab OriginPro Bridge
 
 This integration imports SpecFlowLab datasets into OriginPro without mouse or
-keyboard automation. It has two intentionally separate parts:
+keyboard automation. OriginPro 8.6 is the minimum supported version.
+
+| Origin version | Backend | Output | Current validation level |
+| --- | --- | --- | --- |
+| 2021+ | embedded Python and `originpro` | `.opju` by default; `.opj` where offered | automated bridge tests; physical Windows/Origin smoke test required |
+| 8.6–2020 | bitness-matched COM | `.opj`, full data worksheets; no automatic graphs | physical Origin 8.6 eight-sheet save/close/reopen passed |
+| 8.5 and older | none | portable `.sflorigin` fallback | unsupported for direct automation |
+
+The implementation has three intentionally separate parts:
 
 - `src/lib/origin-bundle.js` is the app-side exporter. It has no DOM or Tauri
   dependency and can be called directly by the Windows app, tests, or a future
@@ -9,6 +17,9 @@ keyboard automation. It has two intentionally separate parts:
 - `specflowlab_origin.py` is the archive/parser and Origin adapter. Its parser
   uses only the Python standard library; `originpro` is imported only when an
   actual Origin import is requested.
+- `src-tauri/src/labtalk.rs` decodes the same bundle for OriginPro 8.6–2020,
+  stages the complete worksheet set for each dataset, and writes the manifest
+  consumed by the bitness-matched COM helper.
 
 The separation keeps the file contract testable on every platform and confines
 Origin-specific behavior to one small adapter.
@@ -17,15 +28,14 @@ Origin-specific behavior to one small adapter.
 
 1. In SpecFlowLab, open or prepare the project and run any required treatment
    and fitting.
-2. In the Windows app, choose **Sheets and plots** or **Only sheets**, click
-   **Create in OriginPro...**, choose the `.opju` destination, and let
+2. In the Windows app, click **Create in OriginPro...**, choose the project
+   destination, and let
    SpecFlowLab launch Origin. The app retains the exact
    `.sflorigin` input beside the Origin project and writes
    `.origin-status.json` plus `.origin-startup.log` diagnostics beside it.
-   SpecFlowLab waits for Origin's embedded Python to finish and reports success
-   only after the expected workbooks exist and the `.opju` is non-empty.
-   OriginPro 2021 is supported; its main executable is commonly
-   `Origin98_64.exe`.
+   SpecFlowLab reports success only after the expected workbooks exist and the
+   project is non-empty. OriginPro 8.6–2020 offers sheets-only `.opj` output;
+   OriginPro 2021+ also offers the modern Python plots supported by its adapter.
 
 The first use searches the normal `Program Files\OriginLab` installation
 folders. If Origin is installed elsewhere, choose its main executable once;
@@ -145,19 +155,23 @@ Each SpecFlowLab dataset becomes one Origin workbook with:
 
 - `Metadata`: source path/hash, dataset identity, selection, treatment
   metadata, and units.
-- `TreatedVM`: wavelength values across the first row, time values down the
-  first column, and the treated signal in the intersecting cells.
+- `TreatedVM`: a virtual-matrix worksheet with wavelength down the first column
+  and the exact time coordinates across the first data row, so the sheet plots
+  as a 2D heatmap directly. `NaN` values are written as the literal token
+  `NaN`.
 - `Selected`: the current selection plus five evenly distributed measured
   positions from each axis, producing five or six explicit spectral and
   kinetic XY traces without interpolation.
 - `FitSummary`: fit parameters and diagnostics when a fit exists.
-- `FittedVM` and `ResidualVM`: plot-ready virtual matrices when exported.
+- `FittedVM` and `ResidualVM`: the fitted and residual matrices in the same
+  exact-coordinate layout when a fit exists.
 - `DAS` and `EAS`: wavelength plus one Y column per component.
 
 Origin regular Matrix objects support only linear X/Y mapping, while transient
 spectroscopy time axes are commonly uneven. The bridge therefore uses an
-Origin **Virtual Matrix** worksheet and `plotvm` for heatmaps. This retains the
-actual time and wavelength coordinates without interpolation. Heatmap graph
+Origin **Virtual Matrix** worksheet and `plotvm` for heatmaps on the 2021+
+plotting path. This retains the actual time and wavelength coordinates without
+interpolation. Heatmap graph
 pages use wavelength on X and log10 time on Y, beginning at 0.1 ps and ending
 at the largest measured positive time. Pre-zero and sub-0.1 ps values remain
 unchanged in the worksheet and provenance bundle; only the displayed graph
@@ -212,13 +226,19 @@ Windows Origin installation.
 
 ## Windows app integration
 
-The one-click action embeds this Python adapter inside the SpecFlowLab
-executable, writes an isolated temporary launcher, and starts Origin with its
-documented `-RS` LabTalk startup command. Because Origin consumes the remaining
-command line as raw LabTalk rather than ordinary C-style arguments, the Windows
-launcher appends the expression without normal argv quoting. That expression
-calls `run.python(path, 2)` directly through Origin's embedded Python and writes
-LabTalk handoff markers to the startup log; no system Python or separate
-package installation is required. The Python launcher writes atomic status
-updates with a traceback on failure, and the app monitors those updates for up
-to 30 minutes rather than treating process creation as import success.
+The one-click action selects a backend from the detected Origin version:
+
+- OriginPro 2021+ embeds the Python adapter inside SpecFlowLab, writes an
+  isolated launcher, and invokes `run.python(path, 2)` through Origin's
+  embedded Python. No system Python installation is required.
+- OriginPro 8.6–2020 decodes the bundle in Rust, writes exact-precision wide
+  worksheets under an isolated temporary directory, transfers them as
+  numeric or string two-dimensional SAFEARRAYs with `Worksheet.SetData`, adds
+  sheets through `newsheet`, and saves with the COM `Application.Save` method.
+  The helper validates the exact Origin executable, closes its hidden
+  automation instance, and reopens the saved `.opj` normally.
+
+The modern route retains its command-line startup path. The legacy route uses
+COM because physical Origin 8.6 testing proved that `-RS` and `-SLOG` are
+ignored. Both routes wait up to 30 minutes and validate the expected workbook
+count plus a non-empty project instead of treating process creation as success.
