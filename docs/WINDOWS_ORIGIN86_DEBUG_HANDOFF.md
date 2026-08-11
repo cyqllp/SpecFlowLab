@@ -31,17 +31,22 @@ Physical evidence on 2026-08-11:
 - A 32-bit PowerShell call to `Origin.Application.Execute(...)` launched the
   exact installed `origin86.exe`, returned `true`, and wrote
   `ORIGIN86_COM32_OK`.
-- The exact generated COM helper then passed a physical end-to-end test:
-  `CreatePage`, a 2-by-4 `PutWorksheet` SAFEARRAY transfer, worksheet metadata,
-  `Save`, automation-instance cleanup, and normal reopen all succeeded. The
-  status was `completed`, warnings were empty, and the OPJ was 9,303 bytes.
+- The exact generated COM helper first passed a minimal physical end-to-end
+  test: `CreatePage`, numeric SAFEARRAY transfer, worksheet metadata, `Save`,
+  automation-instance cleanup, and normal reopen all succeeded.
+- The v2 production helper then passed the full-layout physical test with one
+  workbook and all eight sheets: `Metadata`, `TreatedVM`, `Selected`,
+  `FitSummary`, `FittedVM`, `ResidualVM`, `DAS`, and `EAS`. Both numeric and
+  string `Worksheet.SetData` transfers succeeded. Final status reported eight
+  sheets, 60,226 output bytes, and zero warnings.
 
 The implementation now uses a bitness-matched Windows PowerShell COM helper
 for the pre-2021 backend. It validates that COM launched the exact EXE selected
-in SpecFlowLab, transfers staged numeric tables with `PutWorksheet`, and saves
-with `Application.Save`. It does not depend on `-rs`, `newbook`, `open -w`, or
-an OGS runtime handoff. After saving, the helper closes the isolated automation
-instance and opens the project normally with the selected Origin executable.
+in SpecFlowLab, transfers staged numeric and text tables with
+`Worksheet.SetData`, and saves with `Application.Save`. It does not depend on
+`-rs`, `open -w`, or an OGS runtime handoff. After saving, the helper closes the
+isolated automation instance and opens the project normally with the selected
+Origin executable.
 
 The old command-line experiments below are retained as failure evidence; they
 are no longer the proposed transport.
@@ -118,7 +123,11 @@ origin = CreateObject("Origin.Application")
 verify newly launched process path == selected origin86.exe
 for each staged dataset:
     page = origin.CreatePage(worksheet)
-    origin.PutWorksheet(page, double[,])
+    rename Sheet1 to Metadata
+    for each remaining sheet:
+        create it with newsheet
+    for each sheet:
+        sheet.SetData(string[,] or double[,])
 origin.Save(output.opj)
 origin.Exit()
 open selected origin86.exe with the saved .opj
@@ -128,20 +137,20 @@ The COM helper:
 
 1. Writes `<output>.origin-status.json` with state `started`.
 2. Creates one Origin workbook per dataset.
-3. Parses the staged invariant-culture table into a two-dimensional `double`
-   SAFEARRAY and transfers it without opening an import dialog.
-4. Designates wavelength as X and signal columns as Y, with axis values in
-   column Long Names.
+3. Parses staged tables into two-dimensional string or invariant-culture
+   `double` SAFEARRAYs and transfers them without opening an import dialog.
+4. Creates Metadata, treated/selected, fit-summary, fitted/residual, DAS, and
+   EAS sheets when their source data exists; numeric sheets designate exact
+   coordinate columns as X and signal columns as Y.
 5. Saves the project as `.opj`, closes the hidden automation instance, and
    reopens the saved project in the selected Origin executable.
 6. Writes final state `completed` only after the normal Origin window starts.
 
-Remaining verification is limited to compiling the Rust/Tauri changes and
-running the packaged SpecFlowLab UI once with a real project bundle. Cargo is
-not installed in this local Windows environment, so Rust formatting, tests,
-Clippy, and packaging must run in the existing CI workflow or a Rust-enabled
-machine. The generated PowerShell helper itself has passed syntax parsing and
-the physical Origin 8.6 end-to-end test described above.
+Remaining verification is limited to compiling and packaging the full-layout
+Rust/Tauri changes in CI, then running that packaged SpecFlowLab build once
+with a real project bundle. Cargo is not installed in this local Windows
+environment. The generated PowerShell helper itself has passed syntax parsing
+and the physical Origin 8.6 eight-sheet end-to-end test described above.
 
 The current per-user machine configuration selects
 `C:\Program Files\OriginLab\Origin\origin86.exe` as Origin 8.6, x86. Its prior
@@ -384,14 +393,17 @@ Implement only after recording the manual test result:
 OriginPro 8.6 support should not be called verified until all of the following pass on a physical Windows system:
 
 1. The exact Origin executable is detected and reported correctly.
-2. A minimal command-line `-rs` marker-file probe succeeds.
-3. The generated OGS creates a `started` status file.
+2. The bitness-matched COM host launches the selected executable rather than a
+   different registered Origin release.
+3. The generated COM helper creates a `started` status file.
 4. Every selected dataset becomes a workbook with the correct wavelength and time orientation.
 5. Numerical values retain expected precision and missing values remain missing.
 6. The OPJ is saved successfully.
 7. The completed status JSON is parseable and reports correct counts.
-8. The saved OPJ closes and reopens in OriginPro 8.6 with the expected worksheets intact.
-9. Failure messages distinguish launch, startup, LabTalk, import, save, and timeout failures.
+8. The saved OPJ closes and reopens in OriginPro 8.6 with Metadata,
+   treated/selected, and available fit/DAS/EAS worksheets intact.
+9. Failure messages distinguish launch, COM registration/path mismatch,
+   import, save, reopen, and timeout failures.
 
 ## Evidence to capture from the next Windows session
 
@@ -410,4 +422,6 @@ Record and preserve:
 - Screenshot of any Origin dialog or LabTalk error
 - Generated OPJ and the corresponding `.sflorigin` bundle
 
-Do not merge the draft PR or claim verified OriginPro 8.6 support until this physical acceptance loop passes.
+The COM transport and eight-sheet helper have passed this physical loop. The
+packaged application still requires one real-bundle confirmation before the
+full-layout change is called release-verified.

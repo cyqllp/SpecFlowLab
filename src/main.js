@@ -2132,12 +2132,15 @@ async function createInOrigin() {
     const graphSummary = result.createPlots
       ? ` and ${result.graphCount} automatically rescaled graphs`
       : " in sheets-only mode";
+    const sheetSummary = result.sheetCount
+      ? ` containing ${result.sheetCount} worksheets`
+      : "";
     let omittedMsg = "";
     if (result.omittedGraphTypes?.length) {
       omittedMsg = ` Omitted: ${result.omittedGraphTypes.join(", ")}. ${result.omissionReasons?.join(" ") ?? ""}`;
     }
     return (
-      `${originInfo} imported ${result.datasetCount} datasets into ${result.workbookCount} workbooks${graphSummary}, `
+      `${originInfo} imported ${result.datasetCount} datasets into ${result.workbookCount} workbooks${sheetSummary}${graphSummary}, `
       + `then saved a ${formatBytes(result.outputBytes)} ${formatLabel} project at ${result.outputPath}.`
       + `${omittedMsg} `
       + `The exact bridge input remains at ${result.bundlePath}. `

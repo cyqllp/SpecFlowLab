@@ -39,6 +39,7 @@ struct OriginLaunchResult {
     process_id: u32,
     dataset_count: usize,
     workbook_count: usize,
+    sheet_count: usize,
     graph_count: usize,
     output_bytes: u64,
     warning_count: usize,
@@ -65,6 +66,8 @@ struct OriginJobStatus {
     dataset_count: Option<usize>,
     #[serde(default)]
     workbook_count: Option<usize>,
+    #[serde(default)]
+    sheet_count: Option<usize>,
     #[serde(default)]
     graph_count: Option<usize>,
     #[serde(default)]
@@ -193,6 +196,7 @@ async fn create_origin_project(
         .map_err(|error| format!("Could not monitor the OriginPro import task: {error}"))??;
         result.dataset_count = status.dataset_count.unwrap_or_default();
         result.workbook_count = status.workbook_count.unwrap_or_default();
+        result.sheet_count = status.sheet_count.unwrap_or(result.sheet_count);
         result.graph_count = status.graph_count.unwrap_or_default();
         result.output_bytes = status.output_bytes.unwrap_or_default();
         result.warning_count = status.warnings.len();
@@ -339,12 +343,14 @@ fn create_origin_project_on_windows(
     // Fork: LabTalk for Origin 8.6, Python bridge for 2021+
     let is_labtalk = install_info.backend == origin::OriginBackendKind::LabTalk;
     let mut staged_dataset_count = 0;
+    let mut staged_sheet_count = 0;
     let process_id;
 
     if is_labtalk {
         // ---- COM worksheet staging path (Origin 8.6, 2016–2020) ----
         let stage = labtalk::stage_labtalk_import(&bundle_path)?;
         staged_dataset_count = stage.dataset_count;
+        staged_sheet_count = stage.sheet_count;
         let com_launcher_path = run_directory.join("launch_origin_com.ps1");
         process_id = spawn_origin_com_bridge(
             &origin_executable,
@@ -419,6 +425,7 @@ fn create_origin_project_on_windows(
         process_id,
         dataset_count: staged_dataset_count,
         workbook_count: staged_dataset_count,
+        sheet_count: staged_sheet_count,
         graph_count: 0,
         output_bytes: 0,
         warning_count: 0,
@@ -582,7 +589,7 @@ fn spawn_origin_com_bridge(
         "statusPath": status_path,
         "startupLogPath": log_path,
         "outputPath": output_path,
-        "commandSummary": "Origin.Application CreatePage/PutWorksheet/Save",
+        "commandSummary": "Origin.Application CreatePage/Worksheet.SetData/Save",
     });
     std::fs::write(
         launch_diagnostic_path,
@@ -735,7 +742,7 @@ try {
     Write-BridgeLog ('COM connected to selected Origin process ' + $spawnedOrigin.Id)
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    if ($manifest.schema -ne 'specflowlab.origin_com_import.v1') {
+    if ($manifest.schema -ne 'specflowlab.origin_com_import.v2') {
         throw ('Unsupported Origin COM import manifest: ' + $manifest.schema)
     }
     if (@($manifest.datasets).Count -ne $datasetCount) {
@@ -750,37 +757,9 @@ try {
     Write-Utf8NoBom $statusPath $startedPayload
 
     $datasetIndex = 0
+    $sheetCount = 0
     foreach ($dataset in @($manifest.datasets)) {
         $datasetIndex += 1
-        $lines = [System.IO.File]::ReadAllLines([string]$dataset.tablePath)
-        if ($lines.Length -lt 2) {
-            throw ('Staged worksheet has no numeric rows: ' + $dataset.tablePath)
-        }
-        $headers = $lines[0].Split([char]9)
-        $rowCount = $lines.Length - 1
-        $columnCount = $headers.Length
-        if ($columnCount -lt 2) {
-            throw ('Staged worksheet has fewer than two columns: ' + $dataset.tablePath)
-        }
-        $data = New-Object 'double[,]' $rowCount,$columnCount
-        for ($row = 0; $row -lt $rowCount; $row += 1) {
-            $fields = $lines[$row + 1].Split([char]9)
-            if ($fields.Length -ne $columnCount) {
-                throw ('Staged worksheet row width mismatch in ' + $dataset.tablePath)
-            }
-            for ($column = 0; $column -lt $columnCount; $column += 1) {
-                if ([String]::IsNullOrWhiteSpace($fields[$column])) {
-                    $data[$row,$column] = [double]::NaN
-                } else {
-                    $data[$row,$column] = [double]::Parse(
-                        $fields[$column],
-                        [Globalization.NumberStyles]::Float,
-                        [Globalization.CultureInfo]::InvariantCulture
-                    )
-                }
-            }
-        }
-
         $pageName = [string]$origin.CreatePage(
             2,
             [string]$dataset.workbookName,
@@ -790,42 +769,121 @@ try {
         if ([String]::IsNullOrWhiteSpace($pageName)) {
             throw ('Origin could not create workbook ' + $dataset.workbookName)
         }
-        if (-not [bool]$origin.PutWorksheet($pageName, $data, 0, 0)) {
-            throw ('Origin could not transfer data into workbook ' + $pageName)
+        if (@($dataset.sheets).Count -lt 1) {
+            throw ('Origin COM import manifest has no worksheets for ' + $dataset.workbookName)
         }
 
-        try {
-            $sheet = $origin.FindWorksheet(('[' + $pageName + ']Sheet1'))
-            if ($null -eq $sheet) {
-                throw ('Origin could not resolve [' + $pageName + ']Sheet1 for metadata.')
+        $sheetIndex = 0
+        foreach ($sheetSpec in @($dataset.sheets)) {
+            $sheetIndex += 1
+            $sheetName = [string]$sheetSpec.name
+            if ($sheetName -notmatch '^[A-Za-z][A-Za-z0-9_]{0,30}$') {
+                throw ('Unsafe or unsupported Origin worksheet name: ' + $sheetName)
             }
-            $sheet.Rows = $rowCount
-            $sheet.Cols = $columnCount
-            $sheet.LongName = [string]$dataset.label
-            $metadataCommands = New-Object System.Collections.Generic.List[string]
-            $metadataCommands.Add('wks.col1.type=4;') | Out-Null
-            $metadataCommands.Add('wks.col1.lname$="Wavelength";') | Out-Null
-            for ($column = 0; $column -lt $columnCount; $column += 1) {
-                if ($column -gt 0) {
+
+            if ($sheetIndex -eq 1) {
+                $sheet = $origin.FindWorksheet(('[' + $pageName + ']Sheet1'))
+                if ($null -eq $sheet) {
+                    throw ('Origin could not resolve [' + $pageName + ']Sheet1.')
+                }
+                if (-not [bool]$sheet.Execute(('wks.name$="' + $sheetName + '";'))) {
+                    throw ('Origin could not rename [' + $pageName + ']Sheet1 to ' + $sheetName)
+                }
+                try { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($sheet) | Out-Null } catch {}
+            } else {
+                $anchor = $origin.FindWorksheet(('[' + $pageName + ']' + [string]$dataset.sheets[0].name))
+                if ($null -eq $anchor) {
+                    throw ('Origin could not resolve the anchor worksheet in ' + $pageName)
+                }
+                if (-not [bool]$anchor.Execute(('newsheet name:=' + $sheetName + ';'))) {
+                    throw ('Origin could not add worksheet ' + $sheetName + ' to ' + $pageName)
+                }
+                try { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($anchor) | Out-Null } catch {}
+            }
+
+            $sheet = $origin.FindWorksheet(('[' + $pageName + ']' + $sheetName))
+            if ($null -eq $sheet) {
+                throw ('Origin could not resolve [' + $pageName + ']' + $sheetName)
+            }
+            $lines = [System.IO.File]::ReadAllLines([string]$sheetSpec.tablePath)
+            if ($lines.Length -lt 1) {
+                throw ('Staged worksheet is empty: ' + $sheetSpec.tablePath)
+            }
+            $headers = $lines[0].Split([char]9)
+            $rowCount = $lines.Length - 1
+            $columnCount = $headers.Length
+            if ($columnCount -lt 1) {
+                throw ('Staged worksheet has no columns: ' + $sheetSpec.tablePath)
+            }
+
+            if ($rowCount -gt 0) {
+                if ([string]$sheetSpec.valueType -eq 'text') {
+                    $data = New-Object 'string[,]' $rowCount,$columnCount
+                } elseif ([string]$sheetSpec.valueType -eq 'numeric') {
+                    $data = New-Object 'double[,]' $rowCount,$columnCount
+                } else {
+                    throw ('Unsupported worksheet value type: ' + $sheetSpec.valueType)
+                }
+                for ($row = 0; $row -lt $rowCount; $row += 1) {
+                    $fields = $lines[$row + 1].Split([char]9)
+                    if ($fields.Length -ne $columnCount) {
+                        throw ('Staged worksheet row width mismatch in ' + $sheetSpec.tablePath)
+                    }
+                    for ($column = 0; $column -lt $columnCount; $column += 1) {
+                        if ([string]$sheetSpec.valueType -eq 'text') {
+                            $data[$row,$column] = [string]$fields[$column]
+                        } elseif ([String]::IsNullOrWhiteSpace($fields[$column])) {
+                            $data[$row,$column] = [double]::NaN
+                        } else {
+                            $data[$row,$column] = [double]::Parse(
+                                $fields[$column],
+                                [Globalization.NumberStyles]::Float,
+                                [Globalization.CultureInfo]::InvariantCulture
+                            )
+                        }
+                    }
+                }
+                if (-not [bool]$sheet.SetData($data, 0, 0)) {
+                    throw ('Origin could not transfer data into [' + $pageName + ']' + $sheetName)
+                }
+            }
+
+            try {
+                $sheet.Rows = $rowCount
+                $sheet.Cols = $columnCount
+                $sheet.LongName = [string]$sheetSpec.longName
+                $metadataCommands = New-Object System.Collections.Generic.List[string]
+                for ($column = 0; $column -lt $columnCount; $column += 1) {
                     $columnNumber = $column + 1
-                    $metadataCommands.Add(('wks.col' + $columnNumber + '.type=1;')) | Out-Null
+                    if ([string]$sheetSpec.valueType -eq 'numeric') {
+                        $columnType = if (@($sheetSpec.xColumns) -contains $column) { 4 } else { 1 }
+                        $metadataCommands.Add(('wks.col' + $columnNumber + '.type=' + $columnType + ';')) | Out-Null
+                    }
                     $metadataCommands.Add(('wks.col' + $columnNumber + '.lname$="' + $headers[$column] + '";')) | Out-Null
                 }
-            }
-            foreach ($metadataCommand in $metadataCommands) {
-                if (-not [bool]$sheet.Execute($metadataCommand)) {
-                    throw ('Origin rejected worksheet metadata command: ' + $metadataCommand)
+                foreach ($metadataCommand in $metadataCommands) {
+                    if (-not [bool]$sheet.Execute($metadataCommand)) {
+                        throw ('Origin rejected worksheet metadata command: ' + $metadataCommand)
+                    }
                 }
+                if ($sheetIndex -eq 1) {
+                    $sheet.Execute(('page.label$="' + [string]$dataset.label + '";')) | Out-Null
+                }
+            } catch {
+                $warnings.Add(('Worksheet [' + $pageName + ']' + $sheetName + ' metadata: ' + $_.Exception.Message)) | Out-Null
+            } finally {
+                try { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($sheet) | Out-Null } catch {}
             }
-            [Runtime.InteropServices.Marshal]::FinalReleaseComObject($sheet) | Out-Null
-        } catch {
-            $warnings.Add(('Workbook ' + $pageName + ' metadata: ' + $_.Exception.Message)) | Out-Null
+            $sheetCount += 1
         }
+
+        Write-BridgeLog ('Imported ' + @($dataset.sheets).Count + ' worksheets into ' + $pageName)
 
         $importingPayload = [ordered]@{
             state = 'importing'
             datasetCount = $datasetCount
             importedDatasetCount = $datasetIndex
+            sheetCount = $sheetCount
             warnings = @($warnings)
         } | ConvertTo-Json -Compress
         Write-Utf8NoBom $statusPath $importingPayload
@@ -889,6 +947,7 @@ try {
         datasetCount = $datasetCount
         workbookCount = $datasetCount
         graphCount = 0
+        sheetCount = $sheetCount
         outputBytes = $outputBytes
         warnings = @($warnings)
         openedProcessId = $opened.Id
@@ -1654,7 +1713,10 @@ mod tests {
         );
         assert!(source.contains("New-Object -ComObject Origin.Application"));
         assert!(source.contains("$origin.CreatePage("));
-        assert!(source.contains("$origin.PutWorksheet($pageName, $data, 0, 0)"));
+        assert!(source.contains("$sheet.SetData($data, 0, 0)"));
+        assert!(source.contains("newsheet name:="));
+        assert!(source.contains("specflowlab.origin_com_import.v2"));
+        assert!(source.contains("New-Object 'string[,]'"));
         assert!(source.contains("$origin.Save($outputPath)"));
         assert!(source.contains("$origin.FindWorksheet(('[' + $pageName + ']Sheet1'))"));
         assert!(!source.contains("open -w"));

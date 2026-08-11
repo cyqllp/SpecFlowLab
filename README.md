@@ -80,8 +80,10 @@ Implemented version 1.0 scope:
   fitted/residual/DAS/EAS results for the standalone OriginPro Python bridge;
 - the Windows app can create an Origin project directly while retaining the
   `.sflorigin` provenance bundle beside it: OriginPro 8.6–2020 uses an
-  experimental COM worksheet adapter and saves `.opj`, while OriginPro
-  2021+ uses the embedded Python adapter and defaults to `.opju`; both paths
+  experimental COM adapter that exports metadata, treated/selected data, and
+  available fit/DAS/EAS sheets to `.opj` without automatic graphs, while
+  OriginPro 2021+ uses the embedded Python adapter and defaults to `.opju`;
+  both paths
   require the expected workbook count and a non-empty saved project before
   reporting success, and OriginPro 8.5 or older is rejected;
 - Origin heatmaps place wavelength on the horizontal axis and log-scaled time

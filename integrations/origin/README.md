@@ -6,7 +6,7 @@ keyboard automation. OriginPro 8.6 is the minimum supported version.
 | Origin version | Backend | Output | Current validation level |
 | --- | --- | --- | --- |
 | 2021+ | embedded Python and `originpro` | `.opju` by default; `.opj` where offered | automated bridge tests; physical Windows/Origin smoke test required |
-| 8.6–2020 | bitness-matched COM | `.opj`, worksheets only | physical Origin 8.6 save/close/reopen passed |
+| 8.6–2020 | bitness-matched COM | `.opj`, full data worksheets; no automatic graphs | physical Origin 8.6 eight-sheet save/close/reopen passed |
 | 8.5 and older | none | portable `.sflorigin` fallback | unsupported for direct automation |
 
 The implementation has three intentionally separate parts:
@@ -18,8 +18,8 @@ The implementation has three intentionally separate parts:
   uses only the Python standard library; `originpro` is imported only when an
   actual Origin import is requested.
 - `src-tauri/src/labtalk.rs` decodes the same bundle for OriginPro 8.6–2020,
-  stages one deterministic wavelength-by-time text worksheet per dataset, and
-  writes the manifest consumed by the bitness-matched COM helper.
+  stages the complete worksheet set for each dataset, and writes the manifest
+  consumed by the bitness-matched COM helper.
 
 The separation keeps the file contract testable on every platform and confines
 Origin-specific behavior to one small adapter.
@@ -155,19 +155,21 @@ Each SpecFlowLab dataset becomes one Origin workbook with:
 
 - `Metadata`: source path/hash, dataset identity, selection, treatment
   metadata, and units.
-- `TreatedVM`: wavelength values across the first row, time values down the
-  first column, and the treated signal in the intersecting cells.
+- `TreatedVM`: wavelength in the first column and one treated-signal Y column
+  per measured time, with exact time coordinates in column Long Names.
 - `Selected`: the current selection plus five evenly distributed measured
   positions from each axis, producing five or six explicit spectral and
   kinetic XY traces without interpolation.
 - `FitSummary`: fit parameters and diagnostics when a fit exists.
-- `FittedVM` and `ResidualVM`: plot-ready virtual matrices when exported.
+- `FittedVM` and `ResidualVM`: the fitted and residual matrices in the same
+  exact-coordinate layout when a fit exists.
 - `DAS` and `EAS`: wavelength plus one Y column per component.
 
 Origin regular Matrix objects support only linear X/Y mapping, while transient
 spectroscopy time axes are commonly uneven. The bridge therefore uses an
-Origin **Virtual Matrix** worksheet and `plotvm` for heatmaps. This retains the
-actual time and wavelength coordinates without interpolation. Heatmap graph
+Origin **Virtual Matrix** worksheet and `plotvm` for heatmaps on the 2021+
+plotting path. This retains the actual time and wavelength coordinates without
+interpolation. Heatmap graph
 pages use wavelength on X and log10 time on Y, beginning at 0.1 ps and ending
 at the largest measured positive time. Pre-zero and sub-0.1 ps values remain
 unchanged in the worksheet and provenance bundle; only the displayed graph
@@ -229,9 +231,10 @@ The one-click action selects a backend from the detected Origin version:
   embedded Python. No system Python installation is required.
 - OriginPro 8.6–2020 decodes the bundle in Rust, writes exact-precision wide
   worksheets under an isolated temporary directory, transfers them as
-  two-dimensional SAFEARRAYs with `PutWorksheet`, and saves with the COM
-  `Application.Save` method. The helper validates the exact Origin executable,
-  closes its hidden automation instance, and reopens the saved `.opj` normally.
+  numeric or string two-dimensional SAFEARRAYs with `Worksheet.SetData`, adds
+  sheets through `newsheet`, and saves with the COM `Application.Save` method.
+  The helper validates the exact Origin executable, closes its hidden
+  automation instance, and reopens the saved `.opj` normally.
 
 The modern route retains its command-line startup path. The legacy route uses
 COM because physical Origin 8.6 testing proved that `-RS` and `-SLOG` are
