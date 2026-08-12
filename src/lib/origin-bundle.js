@@ -21,9 +21,7 @@ const FIT_ARRAY_KEYS = new Set([
  */
 export function createOriginBundle(project, options = {}) {
   const entries = {};
-  const hideIrfLimited = Boolean(
-    options.hideIrfLimited ?? project.state?.fitting?.hideIrfLimited,
-  );
+  const hideIrfLimited = true;
   const datasets = (project.datasets ?? []).map((dataset, index) => {
     const directory = `datasets/${String(index + 1).padStart(4, "0")}`;
     const timePath = `${directory}/treated-time.f64`;
@@ -111,10 +109,7 @@ function addFitEntries(entries, directory, fit, analysis, hideIrfLimited) {
   if (!fit) return null;
 
   const result = {
-    metadata: {
-      ...compactFitMetadata(fit),
-      originHideIrfLimited: hideIrfLimited,
-    },
+    metadata: interpretedFitMetadata(fit),
   };
 
   if (fit.fittedMatrix) {
@@ -141,16 +136,20 @@ function addFitEntries(entries, directory, fit, analysis, hideIrfLimited) {
     result.residualMatrix = matrixDescriptor(entry, fit.residualMatrix);
   }
 
-  result.das = addSpectraEntries(entries, `${directory}/das-spectra.f64`, fit.dasSpectra, analysis.spectralAxis, "DAS");
-  result.eas = addSpectraEntries(entries, `${directory}/eas-spectra.f64`, fit.easSpectra, analysis.spectralAxis, "EAS");
+  result.das = addSpectraEntries(entries, `${directory}/das-spectra.f64`, fit.dasSpectra, analysis.spectralAxis, "DAS", fit.irfLimited);
+  result.eas = addSpectraEntries(entries, `${directory}/eas-spectra.f64`, fit.easSpectra, analysis.spectralAxis, "EAS", fit.irfLimited);
   return result;
 }
 
-function addSpectraEntries(entries, entry, spectra, spectralAxis = [], kind) {
+function addSpectraEntries(entries, entry, spectra, spectralAxis = [], kind, irfLimited = []) {
   if (!Array.isArray(spectra) || !spectra.length) return null;
-  const matrix = spectra.map((spectrum, index) => {
+  const retained = spectra
+    .map((spectrum, componentIndex) => ({ spectrum, componentIndex }))
+    .filter(({ componentIndex }) => !irfLimited[componentIndex]);
+  if (!retained.length) return null;
+  const matrix = retained.map(({ spectrum, componentIndex }) => {
     if (!Array.isArray(spectrum.y) || spectrum.y.length !== spectralAxis.length) {
-      throw new Error(`${kind} component ${index + 1} does not match the treated spectral axis.`);
+      throw new Error(`${kind} component ${componentIndex + 1} does not match the treated spectral axis.`);
     }
     return spectrum.y;
   });
@@ -159,8 +158,9 @@ function addSpectraEntries(entries, entry, spectra, spectralAxis = [], kind) {
     entry,
     rows: matrix.length,
     cols: spectralAxis.length,
-    labels: spectra.map((spectrum, index) => spectrum.label ?? `${kind} ${index + 1}`),
-    lifetimes: spectra.map((spectrum) => archiveNumber(spectrum.lifetime)),
+    componentIndices: retained.map(({ componentIndex }) => componentIndex),
+    labels: retained.map(({ spectrum, componentIndex }) => spectrum.label ?? `${kind} ${componentIndex + 1}`),
+    lifetimes: retained.map(({ spectrum }) => archiveNumber(spectrum.lifetime)),
   };
 }
 
@@ -235,6 +235,22 @@ function compactFitMetadata(fit) {
   return Object.fromEntries(
     Object.entries(fit).filter(([key]) => !FIT_ARRAY_KEYS.has(key)),
   );
+}
+
+function interpretedFitMetadata(fit) {
+  const metadata = compactFitMetadata(fit);
+  const retainedIndices = (fit.lifetimes ?? [])
+    .map((_, index) => index)
+    .filter((index) => !fit.irfLimited?.[index]);
+  return {
+    ...metadata,
+    componentCount: retainedIndices.length,
+    lifetimes: retainedIndices.map((index) => archiveNumber(fit.lifetimes[index])),
+    fixedLifetimes: retainedIndices.map((index) => Boolean(fit.fixedLifetimes?.[index])),
+    irfLimited: retainedIndices.map(() => false),
+    excludedIrfLimitedComponentCount: (fit.irfLimited ?? []).filter(Boolean).length,
+    originHideIrfLimited: true,
+  };
 }
 
 function stripMatrixData(value) {

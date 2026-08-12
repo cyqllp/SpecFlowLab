@@ -4,6 +4,73 @@ All notable changes to SpecFlowLab are recorded here.
 
 ## [Unreleased]
 
+- **External Evidence Workspace** — Dataset Details now combines scientific
+  identity, role, and high-value conditions in a compact upper panel and keeps
+  less-used conditions in a disclosure. The lower panel adds a project evidence
+  library for spectroscopy/characterization files, figures, manuscripts,
+  documents, and citation-only literature, with checkbox bulk connection and a
+  focused Obsidian-inspired one-hop relation map.
+- **Exact-source external evidence** — `.sflproj` archives preserve imported
+  evidence bytes, SHA-256, native non-authoritative previews, citation/figure,
+  rights status, and provenance separately from graph metadata. Connected
+  `.sflai` packages include external-evidence records and embed exact files only
+  for Full-profile raw-source opt-in when the rights state permits it.
+- **File-first evidence import** — a dedicated Evidence Import panel accepts
+  Finder selection, drag-and-drop, and clipboard paste. Literature uses the
+  same file-first route for papers, manuscripts, and figures instead of asking
+  users to type a citation before importing its source.
+- **Live fsTA Feature Monitor** — completed global analyses now produce
+  deterministic EAS/DAS sign-region candidates. Positive regions are marked as
+  possible ESA, while negative regions remain GSB/SE candidates and are refined
+  only when explicitly connected absorption or PL evidence overlaps them. The
+  monitor recomputes with current fit, treatment, and graph state and exports
+  its `suggested-not-confirmed` observations into `.sflai` packages.
+- **Integrated feature presentation** — the standalone monitor card has been
+  removed. Stable feature codes now annotate EAS and DAS plots and repeat in
+  their corresponding lifetime rows. A Feature × Time Map stores finite mean
+  DeltaOD traces over candidate wavelength regions and reports compression,
+  coverage, and reconstruction diagnostics while retaining the raw heatmap as
+  authoritative.
+- **Controllable Gaussian Feature Finder** — EAS/DAS feature discovery now
+  locates local positive and negative bands, ranks their Gaussian likeness,
+  and exposes a relative peak threshold, minimum Gaussian R-squared, and minimum
+  FWHM controls. A regression demonstrates that lowering the threshold reveals
+  a weak 16%-amplitude Gaussian band without treating shape as identity proof.
+- **Permanent IRF-limit exclusion** — IRF-limited components no longer appear
+  in interpreted lifetime tables, EAS/DAS plots, comparisons, feature labels,
+  Feature x Time maps, AI evidence summaries, or Origin component outputs.
+  They remain only in internal fit provenance and full fitted/residual matrices
+  so the numerical result stays reproducible.
+- **Simpler dataset metadata UI** — the dataset menu now opens Edit Dataset
+  Details. Project label and sample note have one focused section; IDs, role,
+  technique, and conditions use compact tag controls and a compact read-only
+  tag summary on the main workspace.
+
+- **AI Investigation Phase 2: Dataset Connections** — adds the versioned
+  `specflowlab.evidence_graph.v1` project layer, structured technique/role/
+  sample/preparation/condition metadata, proposed species/state entities, and
+  lossless migration of sample notes into stable linked annotations. Dataset
+  Details now provides auditable add/edit/remove connections with authored
+  rationale and visibly separates factual from interpretive relationships.
+- **Connected evidence packages** — investigations can start from a reviewed
+  connection or selected root datasets and traverse exactly one explicit hop.
+  `.sflai` packages include graph records, connection-specific inclusion
+  reasons, and matching/different/unknown condition comparisons without
+  declaring scientific equivalence or inferring links from filenames,
+  lifetimes, or spectral similarity. A native-shape modality registry lays the
+  foundation for later spectrum, trace, and table adapters.
+- **Question-driven AI Investigation Phase 1** — replaces the sidebar's blind
+  project-wide Markdown action with a required question, goal, explicit scope,
+  evidence profile, privacy review, and local `.sflai` ZIP export. Packages use
+  `specflowlab.ai_investigation.v1`, stable `E###` IDs, SHA-256 checksums, a
+  concise brief and provider-neutral prompt, and separate CSV/JSON evidence.
+  Exact raw sources and full little-endian Float64 matrices are opt-in only.
+- **Honest AI diagnostics boundary** — deterministic comparable physical
+  coordinates and finite-only residual RMS summaries are exported when
+  available; residual SVD, uncertainty, and fit stability are explicitly
+  listed as unavailable instead of inferred. The legacy Markdown exporter is
+  retained under Advanced for compatibility, with no provider upload or
+  automatic project mutation.
 - **Reliable Origin COM server selection** — the COM helper no longer trusts the
   ambiguous `Origin.Application` ProgID. It resolves the CLSID whose
   `LocalServer32` targets the selected executable and instantiates that server

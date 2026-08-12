@@ -1,5 +1,7 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { addSourceArchiveEntries } from "./source-data.js";
+import { migrateEvidenceGraph } from "./evidence-graph/schema.js";
+import { addEvidenceAssetsToArchive, readEvidenceAssetsFromArchive } from "./evidence-assets/archive.js";
 
 export const PROJECT_ARCHIVE_SCHEMA = "specflowlab.project_archive.v1";
 
@@ -19,6 +21,7 @@ const DERIVED_FIT_KEYS = new Set([
 
 export function createProjectArchive(project) {
   const entries = {};
+  const evidenceAssets = addEvidenceAssetsToArchive(entries, project.evidenceAssets ?? []);
   const datasets = (project.datasets ?? []).map((dataset, index) => {
     const directory = `datasets/${String(index + 1).padStart(4, "0")}`;
     const timePath = `${directory}/treated-time.f64`;
@@ -40,6 +43,7 @@ export function createProjectArchive(project) {
       kind: dataset.kind ?? "imported",
       projectLabel: dataset.projectLabel,
       sampleNote: dataset.sampleNote ?? "",
+      evidenceMetadata: dataset.evidenceMetadata ?? null,
       merge: dataset.merge ?? null,
       source,
       baseAnalysisMetadata: stripMatrixData(dataset.baseAnalysis),
@@ -62,6 +66,11 @@ export function createProjectArchive(project) {
     state: project.state,
     folders: project.folders,
     datasets,
+    evidenceAssets,
+    evidenceGraph: migrateEvidenceGraph(project.evidenceGraph, project.datasets ?? [], {
+      createdAt: project.savedAt ?? null,
+      evidenceAssets: project.evidenceAssets ?? [],
+    }),
   };
   entries["manifest.json"] = strToU8(JSON.stringify(manifest));
   return zipSync(entries, { level: 6 });
@@ -98,6 +107,46 @@ export function readProjectArchive(bytes) {
     throw new Error(`Unsupported SpecFlowLab archive schema: ${manifest.archiveSchema || "missing"}.`);
   }
 
+  const datasets = (manifest.datasets ?? []).map((dataset) => ({
+    id: dataset.id,
+    folderId: dataset.folderId,
+    kind: dataset.kind ?? "imported",
+    projectLabel: dataset.projectLabel,
+    sampleNote: dataset.sampleNote ?? "",
+    evidenceMetadata: dataset.evidenceMetadata ?? null,
+    merge: dataset.merge ?? null,
+    archivedSource: {
+      fileName: dataset.source?.fileName,
+      format: dataset.source?.format ?? "csv",
+      rawText: strFromU8(requiredEntry(entries, dataset.source?.entry)),
+      rawBytes: dataset.source?.rawEntry
+        ? requiredEntry(entries, dataset.source.rawEntry).slice()
+        : null,
+    },
+    baseAnalysisMetadata: dataset.baseAnalysisMetadata ?? {},
+    analysis: {
+      ...(dataset.analysis?.metadata ?? {}),
+      timeAxis: decodeFloat64Array(
+        requiredEntry(entries, dataset.analysis?.timeAxis?.entry),
+        dataset.analysis?.timeAxis?.length,
+      ),
+      spectralAxis: decodeFloat64Array(
+        requiredEntry(entries, dataset.analysis?.spectralAxis?.entry),
+        dataset.analysis?.spectralAxis?.length,
+      ),
+      matrix: decodeFloat64Matrix(
+        requiredEntry(entries, dataset.analysis?.matrix?.entry),
+        dataset.analysis?.matrix?.rows,
+        dataset.analysis?.matrix?.cols,
+      ),
+    },
+    archivedFit: dataset.fit ?? null,
+  }));
+  const evidenceAssets = readEvidenceAssetsFromArchive(entries, manifest.evidenceAssets ?? []);
+  const evidenceGraph = migrateEvidenceGraph(manifest.evidenceGraph, datasets, {
+    createdAt: manifest.savedAt ?? null,
+    evidenceAssets,
+  });
   return {
     schema: manifest.projectSchema ?? PROJECT_ARCHIVE_SCHEMA,
     appVersion: manifest.appVersion,
@@ -105,40 +154,9 @@ export function readProjectArchive(bytes) {
     projectContract: manifest.projectContract,
     state: manifest.state,
     folders: manifest.folders,
-    datasets: (manifest.datasets ?? []).map((dataset) => ({
-      id: dataset.id,
-      folderId: dataset.folderId,
-      kind: dataset.kind ?? "imported",
-      projectLabel: dataset.projectLabel,
-      sampleNote: dataset.sampleNote ?? "",
-      merge: dataset.merge ?? null,
-      archivedSource: {
-        fileName: dataset.source?.fileName,
-        format: dataset.source?.format ?? "csv",
-        rawText: strFromU8(requiredEntry(entries, dataset.source?.entry)),
-        rawBytes: dataset.source?.rawEntry
-          ? requiredEntry(entries, dataset.source.rawEntry).slice()
-          : null,
-      },
-      baseAnalysisMetadata: dataset.baseAnalysisMetadata ?? {},
-      analysis: {
-        ...(dataset.analysis?.metadata ?? {}),
-        timeAxis: decodeFloat64Array(
-          requiredEntry(entries, dataset.analysis?.timeAxis?.entry),
-          dataset.analysis?.timeAxis?.length,
-        ),
-        spectralAxis: decodeFloat64Array(
-          requiredEntry(entries, dataset.analysis?.spectralAxis?.entry),
-          dataset.analysis?.spectralAxis?.length,
-        ),
-        matrix: decodeFloat64Matrix(
-          requiredEntry(entries, dataset.analysis?.matrix?.entry),
-          dataset.analysis?.matrix?.rows,
-          dataset.analysis?.matrix?.cols,
-        ),
-      },
-      archivedFit: dataset.fit ?? null,
-    })),
+    datasets,
+    evidenceAssets,
+    evidenceGraph,
     archiveSchema: manifest.archiveSchema,
   };
 }
@@ -182,6 +200,7 @@ export function hydrateProjectArchive(project, parser) {
         kind: dataset.kind ?? "imported",
         projectLabel: dataset.projectLabel,
         sampleNote: dataset.sampleNote ?? "",
+        evidenceMetadata: dataset.evidenceMetadata ?? null,
         merge: dataset.merge ?? null,
         source,
         baseAnalysis,

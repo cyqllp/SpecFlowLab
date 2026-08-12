@@ -653,8 +653,14 @@
       time_ps: cleanNumber(time),
       signal: cleanNumber(analysis.matrix[selectedWavelengthIndex][colIndex]),
     }));
-    const das = summarizeSpectralSet(fit.dasSpectra ?? []);
-    const eas = summarizeSpectralSet(fit.easSpectra ?? []);
+    const retainedComponentIndices = (fit.lifetimes ?? [])
+      .map((_, index) => index)
+      .filter((index) => !fit.irfLimited?.[index]);
+    const retainedSpectra = (spectra) => (spectra ?? []).filter((spectrum, index) => (
+      retainedComponentIndices.includes(Number.isInteger(spectrum.componentIndex) ? spectrum.componentIndex : index)
+    ));
+    const das = summarizeSpectralSet(retainedSpectra(fit.dasSpectra));
+    const eas = summarizeSpectralSet(retainedSpectra(fit.easSpectra));
     const json = {
       schema: "specflowlab.ai_summary.v1",
       project: {
@@ -712,21 +718,21 @@
         prezero_model: fit.preZeroModel || "wavelength-dependent constant offset",
         timezero_artifact_model: fit.irfArtifactModel || "off",
         lifetime_basis: fit.lifetimeBasis || "nonlinear globally refined",
-        irf_limited_components: (fit.irfLimited ?? []).map((limited, index) => (limited ? `C${index + 1}` : null)).filter(Boolean),
+        excluded_irf_limited_component_count: (fit.irfLimited ?? []).filter(Boolean).length,
         caution: "Initial global analysis for AI discussion; lifetimes are nonlinear-refined but target topology is not yet proven.",
         irf_fwhm_ps: cleanNumber(fit.irfFwhm),
-        component_count: fit.componentCount,
-        lifetimes_ps: fit.lifetimes.map(cleanNumber),
+        component_count: retainedComponentIndices.length,
+        lifetimes_ps: retainedComponentIndices.map((index) => cleanNumber(fit.lifetimes[index])),
         fit_quality: {
           rmse: cleanNumber(fit.rmse),
           explained_variance: cleanNumber(fit.explainedVariance),
           fit_point_count: fit.fitPointCount,
         },
-        amplitude_ranges: fit.amplitudeRanges.map((range, index) => ({
+        amplitude_ranges: retainedComponentIndices.map((index) => ({
           component: `C${index + 1}`,
           lifetime_ps: cleanNumber(fit.lifetimes[index]),
-          min: cleanNumber(range.min),
-          max: cleanNumber(range.max),
+          min: cleanNumber(fit.amplitudeRanges[index]?.min),
+          max: cleanNumber(fit.amplitudeRanges[index]?.max),
         })),
         DAS: das,
         EAS: eas,
@@ -751,7 +757,7 @@
         ],
         uncertainty_notes: buildUncertaintyNotes(fit, analysis),
         suggested_next_tasks: [
-          "Check whether IRF-limited components are physically meaningful.",
+          "Do not interpret excluded IRF-limited components as resolved features or species.",
           "Compare DAS and EAS signs, peak regions, and decay-associated features.",
           "Propose target matrices but mark underdetermined alternatives.",
           "Ask what multi-dataset constraints would distinguish sequential, branched, and parallel models.",
@@ -789,14 +795,14 @@
           sample_name: summary.json.dataset.sample_name,
           lifetimes_ps: summary.json.global_analysis.lifetimes_ps,
           lifetime_basis: summary.json.global_analysis.lifetime_basis,
-          irf_limited_components: summary.json.global_analysis.irf_limited_components,
+          excluded_irf_limited_component_count: summary.json.global_analysis.excluded_irf_limited_component_count,
           rmse: summary.json.global_analysis.fit_quality.rmse,
           explained_variance: summary.json.global_analysis.fit_quality.explained_variance,
         })),
         notes: [
           "Shared range and preprocessing controls were applied at project level.",
           "Repeated lifetime values across datasets may indicate shared kinetics, but should be checked against residuals, DAS/EAS features, and target-model constraints.",
-          "An IRF-limited first component should be treated as unresolved around time zero.",
+          "IRF-limited components are excluded from interpreted lifetimes and component spectra.",
           "Compare lifetimes, DAS/EAS features, and selected kinetics across datasets before proposing target models.",
           "Treat near-identical target-model RMSE values as underdetermined unless additional constraints are supplied.",
         ],
@@ -888,7 +894,7 @@
       : "| None | - | - | - |";
     const lifetimeRows = fit.lifetimes_ps.map((lifetime, index) => {
       const range = fit.amplitude_ranges[index];
-      return `| C${index + 1} | ${format(lifetime)} | ${format(range?.min)} to ${format(range?.max)} |`;
+      return `| ${range?.component ?? `C${index + 1}`} | ${format(lifetime)} | ${format(range?.min)} to ${format(range?.max)} |`;
     }).join("\n");
     const dasRows = fit.DAS.map((component) => spectralFeatureMarkdownRow(component)).join("\n");
     const easRows = fit.EAS.map((component) => spectralFeatureMarkdownRow(component)).join("\n");
@@ -925,7 +931,7 @@ ${preprocessingRows}
 
 - Model: ${fit.model}
 - Lifetime basis: ${fit.lifetime_basis}
-- IRF-limited components: ${fit.irf_limited_components.length ? fit.irf_limited_components.join(", ") : "None"}
+- IRF-limited components excluded from interpreted output: ${fit.excluded_irf_limited_component_count}
 - IRF FWHM: ${format(fit.irf_fwhm_ps)} ps
 - Components: ${fit.component_count}
 - RMSE: ${format(fit.fit_quality.rmse)}
@@ -965,7 +971,7 @@ ${embeddedJsonMarkdown(summary)}
 
   function buildAiProjectSummaryMarkdown(projectSummary) {
     const rows = projectSummary.cross_dataset.lifetime_table
-      .map((item) => `| ${item.dataset_id} | ${item.sample_name} | ${item.lifetimes_ps.map(format).join(", ")} | ${item.lifetime_basis} | ${item.irf_limited_components.join(", ") || "-"} | ${format(item.rmse)} | ${Number.isFinite(item.explained_variance) ? `${(item.explained_variance * 100).toFixed(1)}%` : "-"} |`)
+      .map((item) => `| ${item.dataset_id} | ${item.sample_name} | ${item.lifetimes_ps.map(format).join(", ")} | ${item.lifetime_basis} | ${item.excluded_irf_limited_component_count} | ${format(item.rmse)} | ${Number.isFinite(item.explained_variance) ? `${(item.explained_variance * 100).toFixed(1)}%` : "-"} |`)
       .join("\n");
     const datasetSections = projectSummary.datasets.map((dataset) => {
       const fit = dataset.global_analysis;
@@ -989,7 +995,7 @@ ${embeddedJsonMarkdown(summary)}
 
 ## Cross-Dataset Lifetime Table
 
-| Dataset | Sample | Lifetimes (ps) | Basis | IRF-limited | RMSE | Explained |
+| Dataset | Sample | Lifetimes (ps) | Basis | IRF-limit excluded | RMSE | Explained |
 | --- | --- | --- | --- | --- | ---: | ---: |
 ${rows}
 

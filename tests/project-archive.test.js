@@ -11,6 +11,8 @@ import {
 } from "../src/lib/project-archive.js";
 import { buildUfsFixture } from "./ufs-fixture.js";
 import { spectroscopySourceToCsv } from "../src/lib/source-data.js";
+import { upsertEvidenceConnection } from "../src/lib/evidence-graph/connections.js";
+import { migrateEvidenceGraph } from "../src/lib/evidence-graph/schema.js";
 
 const Parser = globalThis.SpecFlowLabParser;
 
@@ -134,6 +136,96 @@ test("project archive preserves a derived merge snapshot, lineage, and wavelengt
   assert.deepEqual(restored.analysis.spectralSegments, analysis.spectralSegments);
   assert.deepEqual(restored.analysis.wavelengthBreaks, analysis.wavelengthBreaks);
   assert.deepEqual(restored.analysis.matrix, analysis.matrix);
+});
+
+test("project archive round-trips evidence graph metadata without changing numerical datasets", () => {
+  const rawText = buildCsvFixture();
+  const source = Parser.parseSpectroscopyCsv(rawText, "evidence-a.csv");
+  source.rawText = rawText;
+  const baseAnalysis = Parser.createAnalysisDataset(source);
+  const project = buildProject({ source, baseAnalysis, analysis: Parser.cloneAnalysisDataset(baseAnalysis), fit: null });
+  const second = structuredClone(project.datasets[0]);
+  second.id = "dataset-2";
+  second.projectLabel = "Evidence comparison";
+  second.source.fileName = "evidence-b.csv";
+  second.sampleNote = "参照样品 beta";
+  project.datasets.push(second);
+  project.datasets[0].evidenceMetadata = {
+    technique: { id: "fsta", label: "" },
+    measurementRole: "primary",
+    sampleId: "sample-01",
+    preparationId: "prep-01",
+    speciesStateIds: [],
+    conditions: { solvent: "toluene", temperature: "298 K" },
+  };
+  project.datasets[1].evidenceMetadata = {
+    technique: { id: "absorption", label: "" },
+    measurementRole: "reference",
+    sampleId: "sample-01",
+    preparationId: "prep-01",
+    speciesStateIds: [],
+    conditions: { solvent: "toluene", temperature: null },
+  };
+  project.evidenceGraph = upsertEvidenceConnection(
+    migrateEvidenceGraph(null, project.datasets, { createdAt: project.savedAt }),
+    {
+      fromId: "dataset-1",
+      toId: "dataset-2",
+      type: "same-sample",
+      rationale: "Recorded as aliquots from the same prepared sample",
+    },
+    project.datasets,
+    { createdAt: project.savedAt },
+  );
+  const matricesBefore = project.datasets.map((dataset) => structuredClone(dataset.analysis.matrix));
+
+  const restored = hydrateProjectArchive(readProjectArchive(createProjectArchive(project)), Parser);
+
+  assert.equal(restored.evidenceGraph.schema, "specflowlab.evidence_graph.v1");
+  assert.equal(restored.evidenceGraph.relationships[0].type, "same-sample");
+  assert.equal(restored.evidenceGraph.annotations.find((item) => item.targetId === "dataset-2").text, "参照样品 beta");
+  assert.equal(restored.datasets[0].evidenceMetadata.conditions.solvent, "toluene");
+  assert.equal(restored.datasets[1].evidenceMetadata.technique.id, "absorption");
+  assert.deepEqual(restored.datasets.map((dataset) => dataset.analysis.matrix), matricesBefore);
+});
+
+test("project archive preserves external evidence bytes, citations, and graph nodes", () => {
+  const rawText = buildCsvFixture();
+  const source = Parser.parseSpectroscopyCsv(rawText, "evidence-source.csv");
+  source.rawText = rawText;
+  const analysis = Parser.createAnalysisDataset(source);
+  const project = buildProject({ source, baseAnalysis: analysis, analysis: Parser.cloneAnalysisDataset(analysis), fit: null });
+  const figureBytes = Uint8Array.from([137, 80, 78, 71, 0, 1, 2, 255]);
+  project.evidenceAssets = [{
+    schema: "specflowlab.evidence_asset.v1",
+    id: "asset:figure",
+    kind: "figure",
+    label: "Imported heatmap",
+    techniqueId: "other",
+    measurementRole: "supporting",
+    note: "Panel linked to the processed result",
+    createdAt: project.savedAt,
+    source: { kind: "binary", fileName: "heatmap.png", mediaType: "image/png", byteLength: figureBytes.byteLength, rawBytes: figureBytes, sha256: "recorded-checksum" },
+    citation: { title: "", authors: "", year: "", doi: "", url: "", figure: "Figure 2", rightsStatus: "user-supplied-private" },
+    nativePreview: null,
+    provenance: [{ action: "import", exactSourcePreserved: true }],
+  }];
+  project.evidenceGraph = migrateEvidenceGraph(null, project.datasets, { evidenceAssets: project.evidenceAssets });
+  project.evidenceGraph = upsertEvidenceConnection(project.evidenceGraph, {
+    fromId: "dataset-1",
+    toId: "asset:figure",
+    type: "documented-by",
+    rationale: "The figure presents this processed dataset",
+  }, project.datasets, { evidenceAssets: project.evidenceAssets, createdAt: project.savedAt });
+  const matrixBefore = structuredClone(project.datasets[0].analysis.matrix);
+
+  const restored = hydrateProjectArchive(readProjectArchive(createProjectArchive(project)), Parser);
+
+  assert.deepEqual(restored.evidenceAssets[0].source.rawBytes, figureBytes);
+  assert.equal(restored.evidenceAssets[0].citation.figure, "Figure 2");
+  assert.equal(restored.evidenceGraph.entities.find((entity) => entity.id === "asset:figure").kind, "figure-evidence");
+  assert.equal(restored.evidenceGraph.relationships[0].type, "documented-by");
+  assert.deepEqual(restored.datasets[0].analysis.matrix, matrixBefore);
 });
 
 test("archive reader rejects non-archive input", () => {
