@@ -2143,7 +2143,7 @@ async function createInOrigin() {
       + `then saved a ${formatBytes(result.outputBytes)} ${formatLabel} project at ${result.outputPath}.`
       + `${omittedMsg} `
       + `The exact bridge input remains at ${result.bundlePath}. `
-      + `${result.warningCount ? `${result.warningCount} plot warning(s) were recorded. ` : ""}`
+      + `${result.warnings?.length ? `${result.warnings.length} warning(s): ${result.warnings.join(" ")} ` : ""}`
       + `Diagnostics: ${result.statusPath}, ${result.logPath}, and ${result.launchDiagnosticPath}.`
     );
   });

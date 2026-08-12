@@ -2,6 +2,19 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [Unreleased]
+
+- **Reliable Origin COM server selection** — the COM helper no longer trusts the
+  ambiguous `Origin.Application` ProgID. It resolves the CLSID whose
+  `LocalServer32` targets the selected executable and instantiates that server
+  directly. Selecting a 64-bit pre-2021 Origin (for example `origin86_64.exe`,
+  whose build never registers a COM automation server) now falls back to the
+  32-bit sibling in the same folder for the hidden worksheet import, records a
+  clear warning, and still opens the saved project in the selected executable.
+- **Import warnings surface to the user** — worksheet/COM bridge warnings from
+  the Origin job status are included in the completion message instead of only
+  reporting a count.
+
 ## [1.0.5] - 2026-08-11
 
 - **OriginPro 8.6 direct automation** — a bitness-matched Windows PowerShell COM
