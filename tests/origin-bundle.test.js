@@ -75,7 +75,7 @@ test("Origin bundle preserves UFS raw bytes and provides a CSV compatibility mat
   assert.match(manifest.datasets[0].sampleNote, /Operator: SpecFlowLab test/);
 });
 
-test("Origin intent hides IRF-limited output components without discarding source arrays", () => {
+test("Origin output completely excludes IRF-limited component spectra and lifetimes", () => {
   const project = buildProject();
   project.state.fitting.hideIrfLimited = true;
   project.datasets[0].fit.irfLimited = [true, false];
@@ -87,10 +87,14 @@ test("Origin intent hides IRF-limited output components without discarding sourc
   const dataset = manifest.datasets[0];
 
   assert.equal(dataset.fit.metadata.originHideIrfLimited, true);
-  assert.equal(dataset.fit.das.rows, 2);
+  assert.equal(dataset.fit.metadata.componentCount, 1);
+  assert.deepEqual(dataset.fit.metadata.lifetimes, [12]);
+  assert.equal(dataset.fit.metadata.excludedIrfLimitedComponentCount, 1);
+  assert.equal(dataset.fit.das.rows, 1);
+  assert.deepEqual(dataset.fit.das.componentIndices, [1]);
   assert.deepEqual(
     decodeFloat64(entries[dataset.fit.das.entry]),
-    [-0.01, -0.02, 0.003, 0.004],
+    [0.003, 0.004],
   );
   assert.equal(
     dataset.plotPlan.find((plot) => plot.id === "das").componentFilter,

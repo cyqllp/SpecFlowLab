@@ -15,6 +15,36 @@ import {
   prepareMergePlan,
 } from "./lib/dataset-merge.js";
 import { spectroscopySourceToCsv } from "./lib/source-data.js";
+import { AI_INVESTIGATION_GOALS } from "./lib/ai-investigation/goals.js";
+import { createAiInvestigationPackage, inspectAiInvestigation } from "./lib/ai-investigation/package.js";
+import { AI_INVESTIGATION_SPEC_SCHEMA } from "./lib/ai-investigation/schema.js";
+import { defaultAiScope } from "./lib/ai-investigation/scope.js";
+import {
+  CONDITION_FIELDS,
+  RELATIONSHIP_DEFINITIONS,
+  createEmptyEvidenceGraph,
+  migrateEvidenceGraph,
+  normalizeDatasetEvidence,
+} from "./lib/evidence-graph/schema.js";
+import {
+  connectionsForEntity,
+  removeDatasetFromEvidenceGraph,
+  removeEvidenceConnection,
+  upsertEvidenceConnection,
+} from "./lib/evidence-graph/connections.js";
+import { updateDatasetEvidenceEntities } from "./lib/evidence-graph/entities.js";
+import { compareDatasetConditions } from "./lib/evidence-graph/comparability.js";
+import {
+  EVIDENCE_ASSET_KINDS,
+  LITERATURE_RIGHTS_STATUSES,
+  createEvidenceAssetFromFile,
+  evidenceImportOptions,
+  normalizeEvidenceAsset,
+} from "./lib/evidence-assets/schema.js";
+import { getTechnique, listTechniques } from "./lib/modalities/registry.js";
+import { detectFstaFeatureCandidates } from "./lib/feature-monitor/detector.js";
+import { buildFeatureTimeMap } from "./lib/feature-monitor/compression.js";
+import { createChartCapture } from "./lib/chart-capture/schema.js";
 import {
   SUPPORTED_LOCALES,
   localizeDom,
@@ -28,7 +58,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.5";
+const APP_VERSION = "1.0.6";
 const plotGeometry = new WeakMap();
 
 const state = {
@@ -48,7 +78,7 @@ const state = {
     lineWidth: 2.2,
     lineStyle: "solid",
     componentMode: "EAS",
-    hideIrfLimited: false,
+    hideIrfLimited: true,
     styles: {},
   },
   merge: {
@@ -59,12 +89,27 @@ const state = {
   fitting: {
     components: 3,
     irfFwhm: 0.25,
+    preZeroModel: "smooth",
+    coherentArtifactOrder: 1,
+    weighting: "robust-noise",
+    optimizerStarts: 3,
+    maximumIterations: 55,
+    rangeSensitivity: true,
     spectrumMode: "EAS",
     normalize: "none",
-    hideIrfLimited: false,
+    hideIrfLimited: true,
     editorDatasetId: null,
     lifetimeValues: [],
     fixedLifetimes: [],
+  },
+  featureFinding: {
+    method: "multi-gaussian",
+    minimumSnr: 4,
+    maximumPeaksPerComponent: 6,
+    minimumBicImprovement: 6,
+    relativeThreshold: 0.12,
+    minimumGaussianR2: 0.45,
+    minimumFwhmNm: 6,
   },
   project: {
     dirty: false,
@@ -76,6 +121,16 @@ const state = {
     installation: null,
     outputFormat: null,
   },
+  aiInvestigation: {
+    stage: "builder",
+    draft: null,
+    preview: null,
+    lastExport: null,
+  },
+  evidenceGraph: createEmptyEvidenceGraph(),
+  evidenceAssets: [],
+  evidenceSelectionIds: [],
+  evidenceViewMode: "list",
   modal: null,
   expandedPlot: null,
   plotZooms: {},
@@ -83,6 +138,15 @@ const state = {
   zoomDrag: null,
   pendingDeleteId: null,
   pendingDatasetId: null,
+  pendingConnectionId: null,
+  pendingConnectionTargetIds: [],
+  pendingEvidenceAssetId: null,
+  pendingEvidenceAssetDraft: null,
+  evidenceImportMode: "evidence",
+  evidenceImportResultIds: [],
+  chartCaptures: [],
+  captureTrayOpen: false,
+  captureMode: false,
   datasetMenu: null,
   folderMenu: null,
   plotMenu: null,
@@ -94,6 +158,7 @@ const state = {
 
 function render() {
   pruneMergeSelection();
+  refreshChartCaptureStaleness();
   const datasetTreeScrollTop =
     document.querySelector(".dataset-tree-scroll")?.scrollTop ?? 0;
   const dataset = activeDataset();
@@ -158,9 +223,10 @@ function render() {
 
       <section class="panel sidebar-panel handoff-panel">
         <div class="section-heading">
-          <h2>AI Handoff</h2>
+          <h2>AI Investigation</h2>
         </div>
-        <button class="wide-command" data-action="export-md" ${dataset && !busy ? "" : "disabled"}>Export MD...</button>
+        <p class="ai-sidebar-status">${state.aiInvestigation.lastExport ? escapeHtml(state.aiInvestigation.lastExport.goalLabel) : "No investigation configured"}</p>
+        <button class="wide-command" data-action="new-ai-investigation" ${dataset && !busy ? "" : "disabled"}>New Investigation...</button>
       </section>
 
       <section class="panel sidebar-panel handoff-panel">
@@ -195,6 +261,7 @@ function render() {
     ${state.datasetMenu ? renderDatasetContextMenu() : ""}
     ${state.folderMenu ? renderFolderContextMenu() : ""}
     ${state.plotMenu ? renderPlotContextMenu() : ""}
+    ${renderCaptureStation()}
   `;
   localizeDom(app, state.locale);
   bindDom();
@@ -295,6 +362,7 @@ function renderOverview() {
               <span class="folder-context" data-i18n-skip>${escapeHtml(folder?.name ?? "Unfiled")}</span>
               <h2 data-i18n-skip title="${escapeHtml(datasetDisplayName(dataset))}">${escapeHtml(datasetDisplayName(dataset))}</h2>
               <p>${datasetStateLabel(dataset)} analysis dataset</p>
+              ${renderDatasetIdentityTags(dataset)}
             </div>
             <div class="active-dataset-actions">
               <span class="dataset-badge">${analysisRangeLabel(analysis)}</span>
@@ -384,15 +452,28 @@ function renderOverview() {
 function renderMainFitSummary(dataset, includeSupportingDetails = false) {
   const fit = dataset.fit;
   const limitedCount = fit.irfLimited?.filter(Boolean).length || 0;
+  const convergence = fit.convergence ?? null;
+  const uncertainty = fit.uncertainty ?? null;
+  const rangeSensitivity = fit.rangeSensitivity ?? null;
+  const convergenceLabel = convergence ? (convergence.converged ? "Converged" : "Not converged") : "Legacy fit";
+  const rangeLabel = rangeSensitivity?.status && rangeSensitivity.status !== "not-evaluated"
+    ? `${rangeSensitivity.status}${Number.isFinite(rangeSensitivity.maximumRelativeShift) ? ` (${(rangeSensitivity.maximumRelativeShift * 100).toFixed(1)}%)` : ""}`
+    : "Not evaluated";
+  const visibleLifetimes = fit.lifetimes
+    .map((lifetime, index) => ({ lifetime, index }))
+    .filter(({ index }) => !fit.irfLimited?.[index]);
+  const monitor = featureMonitorFor(dataset);
+  const showFeatures = monitor.status === "live" && monitor.candidates.length;
   return `
-    ${limitedCount ? `<div class="fit-summary-header"><span>${limitedCount} IRF-limited</span></div>` : ""}
+    ${limitedCount ? `<div class="fit-summary-header"><span>${limitedCount} IRF-limited component${limitedCount === 1 ? "" : "s"} excluded from interpreted outputs</span></div>` : ""}
     <table class="fit-table">
-      <thead><tr><th>Component</th><th>Time constant</th></tr></thead>
+      <thead><tr><th>Component</th><th>Time constant</th>${showFeatures ? "<th>Feature regions</th>" : ""}</tr></thead>
       <tbody>
-        ${fit.lifetimes.map((lifetime, index) => `
+        ${visibleLifetimes.map(({ lifetime, index }) => `
           <tr>
             <td>t${index + 1}</td>
-            <td>${format(lifetime)} ps${fit.fixedLifetimes?.[index] ? " <span class=\"fixed-text\">(fixed)</span>" : ""}${fit.irfLimited?.[index] ? " <span class=\"warning-text\">(IRF-limited)</span>" : ""}</td>
+            <td>${renderLifetimeEstimate(fit, lifetime, index)}</td>
+            ${showFeatures ? `<td><div class="lifetime-feature-tags">${monitor.candidates.filter((candidate) => candidate.componentIndex === index).map(renderFeatureTag).join("") || "<span class=\"feature-none\">None above threshold</span>"}</div></td>` : ""}
           </tr>`).join("")}
       </tbody>
     </table>
@@ -401,20 +482,37 @@ function renderMainFitSummary(dataset, includeSupportingDetails = false) {
       <div><dt>RMSE</dt><dd>${format(fit.rmse)}</dd></div>
       <div><dt>Explained</dt><dd>${Number.isFinite(fit.explainedVariance) ? `${(fit.explainedVariance * 100).toFixed(1)}%` : "-"}</dd></div>
       <div><dt>Iterations</dt><dd>${fit.lifetimeIterations ?? "-"}</dd></div>
+      <div><dt>Convergence</dt><dd class="${convergence?.converged === false ? "warning-text" : ""}">${escapeHtml(convergenceLabel)}</dd></div>
+      <div><dt>Uncertainty</dt><dd class="${["unavailable", "available-with-warnings"].includes(uncertainty?.status) ? "warning-text" : ""}">${escapeHtml(uncertainty?.status ?? "Legacy fit")}</dd></div>
+      <div><dt>Residual DoF</dt><dd>${Number.isFinite(uncertainty?.degreesOfFreedom) ? uncertainty.degreesOfFreedom : "-"}</dd></div>
+      <div><dt>Range sensitivity</dt><dd class="${["sensitive", "unstable", "indeterminate"].includes(rangeSensitivity?.status) ? "warning-text" : ""}">${escapeHtml(rangeLabel)}</dd></div>
+      <div><dt>Linear solve</dt><dd>${fit.designRank ?? "-"}/${fit.designParameterCount ?? "-"} rank</dd></div>
+      <div><dt>Condition est.</dt><dd>${Number.isFinite(fit.designConditionEstimate) ? format(fit.designConditionEstimate) : "-"}</dd></div>
     </dl>
-    ${includeSupportingDetails ? `<p class="fit-supporting-details">Model: ${escapeHtml(fit.lifetimeBasis)}. Time-zero term: ${escapeHtml(fit.irfArtifactModel ?? "off")}.</p>` : ""}
+    ${convergence?.warnings?.length ? `<ul class="fit-warning-list">${convergence.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : ""}
+    ${includeSupportingDetails ? `<p class="fit-supporting-details">Model: ${escapeHtml(fit.lifetimeBasis)}. Pre-zero: ${escapeHtml(fit.preZeroModel ?? "legacy")}. Time-zero terms: ${escapeHtml(fit.irfArtifactModel ?? "off")}. Linear solver: ${escapeHtml(fit.linearSolver ?? "legacy normal equations")}.</p>` : ""}
   `;
+}
+
+function renderLifetimeEstimate(fit, lifetime, index) {
+  if (fit.fixedLifetimes?.[index]) return `${format(lifetime)} ps <span class="fixed-text">(fixed)</span>`;
+  const estimate = fit.uncertainty?.lifetimes?.[index];
+  if (!Number.isFinite(estimate?.standardError)) return `${format(lifetime)} ps`;
+  const interval = estimate.confidenceInterval95;
+  const intervalText = Array.isArray(interval) && interval.every(Number.isFinite)
+    ? `95% CI ${format(interval[0])}–${format(interval[1])} ps`
+    : "95% CI unavailable";
+  return `${format(lifetime)} ± ${format(estimate.standardError)} ps <span class="fit-lifetime-ci">${intervalText}</span>`;
 }
 
 function renderMainComponentSpectra(dataset) {
   const limitedCount = irfLimitedCount(dataset);
-  const hiddenCount = state.fitting.hideIrfLimited ? limitedCount : 0;
   return `
     <article class="result-panel spectra-result">
       <div class="panel-head result-controls">
         <div>
           <h3>Component Spectra</h3>
-          <span id="main-component-mode-copy">${hiddenCount ? `${hiddenCount} hidden` : ""}</span>
+          <span id="main-component-mode-copy">${limitedCount ? `${limitedCount} IRF-limited excluded` : ""}</span>
         </div>
         <div class="panel-head-actions">${enlargeButton("main-components")}</div>
       </div>
@@ -427,10 +525,44 @@ function renderMainComponentSpectra(dataset) {
           <option value="none" ${state.fitting.normalize === "none" ? "selected" : ""}>Off</option>
           <option value="each" ${state.fitting.normalize === "each" ? "selected" : ""}>Each max/min</option>
         </select></label>
-        <label class="check-control ${limitedCount ? "" : "disabled-control"}"><input id="result-hide-irf" type="checkbox" ${state.fitting.hideIrfLimited && limitedCount ? "checked" : ""} ${limitedCount ? "" : "disabled"} /> ${limitedCount ? "Hide IRF-limited" : "No IRF-limited components"}</label>
       </div>
       <canvas id="main-components" data-plot-key="main-components" width="760" height="340" aria-label="${state.fitting.spectrumMode} component spectra"></canvas>
+      ${renderFeaturePlotNote(dataset, state.fitting.spectrumMode)}
     </article>`;
+}
+
+function featureMonitorFor(dataset, mode = null) {
+  return detectFstaFeatureCandidates(dataset, state.evidenceGraph, state.evidenceAssets, {
+    ...state.featureFinding,
+    ...(mode ? { spectrumMode: mode } : {}),
+  });
+}
+
+function renderFeatureTag(candidate) {
+  const range = `${formatWavelength(candidate.wavelengthMin)}–${formatWavelength(candidate.wavelengthMax)} nm`;
+  const gaussian = candidate.gaussianShape;
+  const shape = candidate.detectionMethod === "multi-gaussian"
+    ? `Fitted center ${formatWavelength(candidate.wavelengthCenter)} nm; amplitude SNR ${format(candidate.amplitudeSnr)}; FWHM ${formatWavelength(gaussian?.fwhmNm)} nm${gaussian?.qualityFlags?.length ? `; ${gaussian.qualityFlags.join(", ")}` : ""}`
+    : Number.isFinite(gaussian?.rSquared) ? `Gaussian R² ${(gaussian.rSquared * 100).toFixed(0)}%; FWHM ${formatWavelength(gaussian.fwhmNm)} nm` : "Gaussian score unavailable";
+  const score = candidate.detectionMethod === "multi-gaussian" ? `SNR ${format(candidate.amplitudeSnr)}` : `G${Number.isFinite(gaussian?.rSquared) ? Math.round(gaussian.rSquared * 100) : "-"}%`;
+  return `<span class="feature-tag ${candidate.sign}" title="${escapeHtml(`${candidate.candidateType}; ${range}; ${shape}; ${candidate.supportSummary}; suggested, not confirmed`)}"><b>${escapeHtml(candidate.featureCode)}</b>${escapeHtml(shortFeatureType(candidate.candidateType))}<small>${range} · ${escapeHtml(score)}</small></span>`;
+}
+
+function renderFeaturePlotNote(dataset, mode) {
+  const monitor = featureMonitorFor(dataset, mode);
+  if (monitor.status !== "live" || !monitor.candidates.length) return "";
+  const context = monitor.references.length
+    ? `${monitor.references.length} explicitly connected Abs/PL reference${monitor.references.length === 1 ? "" : "s"} supplies overlap context.`
+    : "No linked Abs/PL reference: negative regions remain unresolved GSB/SE candidates.";
+  const method = monitor.detectionMethod === "multi-gaussian" ? "noise-aware Gaussian-mixture" : "legacy local-threshold";
+  return `<p class="feature-plot-note"><span><i></i>Labels are live ${escapeHtml(mode)} ${escapeHtml(method)} candidate regions.</span><span>${escapeHtml(context)}</span><strong>Suggested, not confirmed</strong></p>`;
+}
+
+function shortFeatureType(candidateType) {
+  if (candidateType === "ESA candidate") return "ESA?";
+  if (candidateType === "GSB candidate") return "GSB?";
+  if (candidateType === "SE candidate") return "SE?";
+  return "GSB/SE?";
 }
 
 function enlargeButton(plotKey) {
@@ -439,10 +571,12 @@ function enlargeButton(plotKey) {
   return `
     <button class="icon-button plot-tool ${selecting ? "active" : ""}" data-action="select-plot-region" data-plot-key="${plotKey}" title="Select a plot region to magnify" aria-label="Select a plot region to magnify">&#128269;</button>
     ${zoomed ? `<button class="icon-button plot-reset" data-action="reset-plot-zoom" data-plot-key="${plotKey}" title="Reset plot region" aria-label="Reset plot region">&#8634;</button>` : ""}
+    <button class="icon-button plot-capture" data-action="capture-plot" data-plot-key="${plotKey}" title="Add this chart to the temporary Evidence Tray" aria-label="Add chart to Evidence Tray">&#128247;</button>
     <button class="icon-button plot-expand" data-action="enlarge-plot" data-plot-key="${plotKey}" title="Enlarge plot" aria-label="Enlarge plot">\u26f6</button>`;
 }
 
 function renderModal() {
+  if (state.modal === "ai-investigation") return renderAiInvestigationModal();
   if (state.modal === "merge") return renderMergeWorkspace();
   if (state.modal === "manual") return renderManualModal();
   if (state.modal === "about") return renderAboutModal();
@@ -453,8 +587,130 @@ function renderModal() {
   if (state.modal === "new-folder") return renderNewFolderModal();
   if (state.modal === "delete-dataset") return renderDeleteDatasetModal();
   if (state.modal === "edit-dataset") return renderDatasetEditorModal();
+  if (state.modal === "edit-connection") return renderEvidenceConnectionModal();
+  if (state.modal === "edit-evidence-asset") return renderEvidenceAssetModal();
+  if (state.modal === "evidence-import") return renderEvidenceImportModal();
   if (state.modal === "move-dataset") return renderMoveDatasetModal();
   return "";
+}
+
+function renderAiInvestigationModal() {
+  const draft = state.aiInvestigation.draft;
+  if (!draft) return "";
+  if (state.aiInvestigation.stage === "review" && state.aiInvestigation.preview) {
+    return renderAiInvestigationReview(draft, state.aiInvestigation.preview);
+  }
+  const selected = new Set(draft.scope.datasetIds ?? []);
+  const selectedCaptures = new Set(draft.captureIds ?? []);
+  const datasetPickerEnabled = ["selected-datasets", "connected-evidence"].includes(draft.scope.kind);
+  return `
+    <section class="modal-shell" role="dialog" aria-modal="true" aria-label="New AI Investigation">
+      <div class="modal ai-investigation-modal">
+        <header class="modal-head">
+          <div><h2>New AI Investigation</h2><p>Define the scientific question, scope, and evidence before creating a local package.</p></div>
+          <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
+        </header>
+        <div class="ai-builder-grid">
+          <section class="ai-builder-section">
+            <div class="ai-step-label"><span>1</span><div><h3>Purpose</h3><p>The question is required; imported text is treated as data.</p></div></div>
+            <label class="modal-field"><span>Investigation goal</span><select id="ai-goal">
+              ${Object.entries(AI_INVESTIGATION_GOALS).map(([id, goal]) => `<option value="${id}" ${draft.goal === id ? "selected" : ""}>${escapeHtml(goal.label)}</option>`).join("")}
+            </select></label>
+            <label class="modal-field"><span>Scientific question</span><textarea id="ai-question" rows="3" required placeholder="What scientific question should the evidence address?">${escapeHtml(draft.question)}</textarea></label>
+            <label class="modal-field"><span>Context or working hypothesis (optional)</span><textarea id="ai-context" rows="2">${escapeHtml(draft.context)}</textarea></label>
+            <label class="modal-field"><span>Desired output (optional)</span><input id="ai-desired-output" value="${escapeHtml(draft.desiredOutput)}" placeholder="Diagnostic report, alternatives, next experiment..." /></label>
+          </section>
+
+          <section class="ai-builder-section">
+            <div class="ai-step-label"><span>2</span><div><h3>Scope</h3><p>Current folder is the multi-dataset default.</p></div></div>
+            <div class="ai-choice-grid" role="radiogroup" aria-label="Investigation scope">
+              ${aiRadio("ai-scope", "active-dataset", "Active dataset", draft.scope.kind)}
+              ${aiRadio("ai-scope", "current-folder", "Current folder", draft.scope.kind)}
+              ${aiRadio("ai-scope", "selected-datasets", "Selected datasets", draft.scope.kind)}
+              ${aiRadio("ai-scope", "connected-evidence", "Connected evidence", draft.scope.kind, "One explicit relationship hop; review required")}
+              ${aiRadio("ai-scope", "project", "Entire project", draft.scope.kind)}
+            </div>
+            <div class="ai-dataset-picker ${datasetPickerEnabled ? "" : "disabled-control"}">
+              ${state.datasets.map((dataset) => `<label><input class="ai-dataset-check" type="checkbox" data-dataset-id="${escapeHtml(dataset.id)}" ${selected.has(dataset.id) ? "checked" : ""} ${datasetPickerEnabled ? "" : "disabled"} /><span data-i18n-skip>${escapeHtml(datasetDisplayName(dataset))}</span><small>${escapeHtml(state.folders.find((folder) => folder.id === dataset.folderId)?.name ?? "Unfiled")} · ${escapeHtml(getTechnique(dataset.evidenceMetadata?.technique?.id).label)} · ${escapeHtml(uiText(dataset.fit ? "fit available" : "unfitted"))}</small></label>`).join("")}
+            </div>
+          </section>
+
+          <section class="ai-builder-section">
+            <div class="ai-step-label"><span>3</span><div><h3>Evidence</h3><p>Raw sources and full matrices remain opt-in.</p></div></div>
+            <div class="ai-profile-grid">
+              ${aiRadio("ai-profile", "brief", "Brief", draft.evidenceProfile, "Metadata, provenance, fit table, limitations")}
+              ${aiRadio("ai-profile", "diagnostic", "Diagnostic", draft.evidenceProfile, "Brief plus deterministic spectra, kinetics, residual profiles")}
+              ${aiRadio("ai-profile", "full", "Full evidence", draft.evidenceProfile, "Diagnostic plus explicitly selected source or matrix files")}
+            </div>
+            <div class="ai-options-grid">
+              ${aiCheckbox("ai-include-notes", "Include sample notes", draft.include.sampleNotes)}
+              ${aiCheckbox("ai-include-filenames", "Include source filenames", draft.include.sourceFileNames)}
+              ${aiCheckbox("ai-include-metadata", "Include instrument metadata", draft.include.instrumentMetadata)}
+              ${aiCheckbox("ai-redact-paths", "Redact absolute paths", draft.privacy.redactAbsolutePaths)}
+              ${aiCheckbox("ai-redact-operators", "Redact operator names", draft.privacy.redactOperatorNames)}
+              ${aiCheckbox("ai-redact-computers", "Redact computer names", draft.privacy.redactComputerNames)}
+              ${aiCheckbox("ai-include-raw", "Include exact raw sources", draft.include.rawSources, draft.evidenceProfile !== "full")}
+              ${aiCheckbox("ai-include-matrices", "Include full treated matrices", draft.include.fullTreatedMatrices, draft.evidenceProfile !== "full")}
+            </div>
+            ${state.chartCaptures.length ? `<div class="ai-pinned-captures"><strong>Pinned chart evidence</strong><p>Selected captures are explicit evidence and retain their frozen view and displayed numerical values.</p>${state.chartCaptures.map((capture) => `<label><input class="ai-capture-check" type="checkbox" data-capture-id="${escapeHtml(capture.id)}" ${selectedCaptures.has(capture.id) ? "checked" : ""} /><img src="${escapeHtml(capture.previewUrl ?? "")}" alt="" /><span><b>${escapeHtml(capture.title)}</b><small>${escapeHtml(capture.datasetLabels.join(", "))}${capture.stale ? " · Earlier analysis state" : ""}</small></span></label>`).join("")}</div>` : `<div class="ai-pinned-captures empty"><strong>Pinned chart evidence</strong><p>No temporary chart captures are waiting in the Evidence Tray.</p></div>`}
+          </section>
+
+          <section class="ai-builder-section ai-review-callout">
+            <div class="ai-step-label"><span>4</span><div><h3>Review and export</h3><p>No provider upload occurs. Reviewing, cancelling, or exporting does not mark the project dirty.</p></div></div>
+            <button data-action="review-ai-investigation">Review Evidence Package</button>
+          </section>
+        </div>
+        <footer class="modal-footer">
+          <button data-action="legacy-export-md" class="secondary-command">Advanced: Legacy MD...</button>
+          <span>The legacy whole-project Markdown path is retained temporarily for compatibility.</span>
+          <button data-action="close-modal">Cancel</button>
+        </footer>
+      </div>
+    </section>`;
+}
+
+function renderAiInvestigationReview(draft, preview) {
+  const scopeDatasets = preview.manifest.datasets;
+  return `
+    <section class="modal-shell" role="dialog" aria-modal="true" aria-label="Review AI Investigation">
+      <div class="modal ai-investigation-modal ai-review-modal">
+        <header class="modal-head">
+          <div><h2>Review AI Investigation</h2><p>Confirm the exact evidence and limitations before local export.</p></div>
+          <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
+        </header>
+        <div class="ai-review-layout">
+          <section class="ai-review-question"><span>Scientific question</span><strong>${escapeHtml(draft.question)}</strong></section>
+          <dl class="ai-review-metrics">
+            <div><dt>Datasets</dt><dd>${scopeDatasets.length}</dd></div>
+            <div><dt>Evidence items</dt><dd>${preview.estimate.evidenceCount}</dd></div>
+            <div><dt>Files</dt><dd>${preview.estimate.fileCount}</dd></div>
+            <div><dt>Estimated expanded size</dt><dd>${formatFileSize(preview.estimate.expandedBytes)}</dd></div>
+            <div><dt>Approx. text tokens</dt><dd>${preview.estimate.approximateTextTokens.toLocaleString()}</dd></div>
+          </dl>
+          <section><h3>Scoped datasets</h3><ul class="ai-compact-list">${scopeDatasets.map((dataset) => `<li><strong data-i18n-skip>${escapeHtml(dataset.label)}</strong><span>${escapeHtml(uiText(dataset.fitState))}${preview.manifest.connectedInclusions?.[dataset.id] ? ` · ${escapeHtml(preview.manifest.connectedInclusions[dataset.id].map((reason) => reason.relationshipType || reason.kind).join(", "))}` : ""}</span></li>`).join("")}</ul></section>
+          <section><h3>Evidence index</h3><ol class="ai-evidence-list">${preview.evidence.map((item) => `<li><code>${item.id}</code><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.files.join(", "))}</small></div></li>`).join("")}</ol></section>
+          ${preview.manifest.connections?.length ? `<section><h3>Reviewed connections</h3><ul class="ai-compact-list">${preview.manifest.connections.map((connection) => `<li><strong><code>${escapeHtml(connection.id)}</code> · ${escapeHtml(connection.type)}</strong><span>${escapeHtml(connection.rationale)}</span></li>`).join("")}</ul></section>` : ""}
+          <section><h3>Known limitations and omissions</h3><ul class="ai-limitations">${[...preview.manifest.limitations, ...preview.manifest.omissions.map((item) => item.reason)].map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>
+          ${preview.estimate.warnings.length ? `<section class="ai-package-warning"><strong>Package warning</strong><ul>${preview.estimate.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul></section>` : ""}
+          <section class="ai-privacy-summary"><strong>Privacy</strong><span>${escapeHtml(uiText(draft.include.rawSources && draft.evidenceProfile === "full" ? "Exact raw sources included by explicit choice." : "Raw sources omitted."))} ${escapeHtml(uiText(draft.include.fullTreatedMatrices && draft.evidenceProfile === "full" ? "Full treated matrices included." : "Full treated matrices omitted."))} ${escapeHtml(uiText("No network upload."))}</span></section>
+        </div>
+        <footer class="modal-footer">
+          <button data-action="back-ai-investigation" class="secondary-command">Back</button>
+          <span>Package schema: ${escapeHtml(preview.manifest.schema)}</span>
+          <button data-action="copy-ai-prompt" class="secondary-command">Copy Prompt Only</button>
+          <button data-action="save-ai-brief" class="secondary-command">Save Brief MD...</button>
+          <button data-action="save-ai-investigation">Save .sflai Package...</button>
+        </footer>
+      </div>
+    </section>`;
+}
+
+function aiRadio(name, value, label, selected, detail = "") {
+  return `<label class="ai-choice"><input type="radio" name="${name}" value="${value}" ${selected === value ? "checked" : ""} /><span><strong>${escapeHtml(label)}</strong>${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</span></label>`;
+}
+
+function aiCheckbox(id, label, checked, disabled = false) {
+  return `<label class="ai-check ${disabled ? "disabled-control" : ""}"><input id="${id}" type="checkbox" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} /><span>${escapeHtml(label)}</span></label>`;
 }
 
 function renderMergeWorkspace() {
@@ -547,7 +803,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.5 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.6 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -556,12 +812,14 @@ function renderManualModal() {
         </div>
         <ol class="manual-steps">
           <li><div><strong>Start a project</strong><p>Open an existing .sflproj project, or import CSV, TXT, TSV, ASC, or UFS files. Files imported together enter one dataset folder.</p></div></li>
-          <li><div><strong>Organize datasets</strong><p>Rename datasets, add sample notes, and move datasets between VIS, NIR, IR, or other folders without changing the source files.</p></div></li>
+          <li><div><strong>Organize datasets</strong><p>Use Edit Dataset Details for the project label and sample note. Move datasets between VIS, NIR, IR, or other folders without changing source files.</p></div></li>
+          <li><div><strong>Connect scientific evidence</strong><p>Open Dataset Details to record identity and high-value conditions above the evidence workspace. Use its independent import panel to drag, paste, or choose spectra, characterization files, figures, papers, and manuscripts; select evidence, add only relationships you can justify, and inspect the focused one-hop relation map.</p></div></li>
           <li><div><strong>Treat the data</strong><p>Set the wavelength and time range for the active folder, then apply Baseline and Chirp as needed. Merge selection becomes available only after treatment.</p></div></li>
           <li><div><strong>Merge treated spectral ranges</strong><p>Select exactly two treated datasets, click Merge between Chirp and Reset, choose clean retained wavelength ranges, review the spectral preview, and create the derived dataset.</p></div></li>
           <li><div><strong>Compare datasets</strong><p>Use Compare to inspect coordinated kinetics, spectra, EAS, and DAS views with reusable sample styles.</p></div></li>
           <li><div><strong>Run global fitting</strong><p>Open Global Fitting, set component starts and IRF options, and review lifetimes, residuals, DAS, EAS, and fit diagnostics.</p></div></li>
-          <li><div><strong>Save and export</strong><p>Save the complete .sflproj archive, export an AI-ready Markdown summary, or create OriginPro output on Windows. OriginPro 8.6–2020 uses experimental COM sheets-only export; OriginPro 2021+ uses the Python adapter.</p></div></li>
+          <li><div><strong>Interpret fsTA features</strong><p>After fitting, match feature labels on EAS/DAS with their lifetime-row tags, then inspect the lossy Feature × Time Map. Abs/PL evidence can refine context, but every candidate remains suggested—not confirmed.</p></div></li>
+          <li><div><strong>Save and export</strong><p>Save the complete .sflproj archive, build a question-driven local .sflai evidence package, or create OriginPro output on Windows. AI raw sources and full matrices are opt-in; no provider upload occurs.</p></div></li>
         </ol>
         <div class="manual-integrity-note"><strong>Data integrity</strong><span>Original CSV text and UFS bytes remain unchanged. Treatments, fits, merges, warnings, and provenance are stored separately and reproducibly.</span></div>
         <footer class="modal-footer"><span>For feedback, open About.</span><button data-action="close-modal">Close</button></footer>
@@ -603,7 +861,7 @@ function renderDatasetContextMenu() {
     <button class="context-menu-dismiss" data-action="close-context-menus" aria-label="Close dataset menu"></button>
     <menu class="app-context-menu dataset-context-menu" aria-label="Dataset actions">
       <li class="context-menu-title" data-i18n-skip>${escapeHtml(datasetDisplayName(dataset))}</li>
-      <li><button data-action="edit-dataset" data-dataset-id="${escapeHtml(dataset.id)}">Rename and sample note...</button></li>
+      <li><button data-action="edit-dataset" data-dataset-id="${escapeHtml(dataset.id)}">Edit Dataset Details...</button></li>
       <li><button data-action="move-dataset" data-dataset-id="${escapeHtml(dataset.id)}">Move to...</button></li>
       <li class="context-separator"></li>
       <li><button data-action="copy-dataset" data-dataset-id="${escapeHtml(dataset.id)}">Copy</button></li>
@@ -640,10 +898,31 @@ function renderPlotContextMenu() {
     <menu class="app-context-menu plot-context-menu" aria-label="Plot actions">
       <li class="context-menu-title">${escapeHtml(meta.title)}</li>
       <li class="plot-export-actions">
+        <button data-action="capture-plot" data-plot-key="${escapeHtml(state.plotMenu.plotKey)}">Add to Evidence Tray</button>
         <button data-action="export-plot-png" data-plot-key="${escapeHtml(state.plotMenu.plotKey)}">PNG image...</button>
         <button data-action="export-plot-txt" data-plot-key="${escapeHtml(state.plotMenu.plotKey)}">TXT data...</button>
       </li>
     </menu>`;
+}
+
+function renderCaptureStation() {
+  const count = state.chartCaptures.length;
+  return `
+    <aside class="capture-station ${state.captureTrayOpen ? "open" : ""} ${state.captureMode ? "capturing" : ""}" aria-label="Temporary Evidence Tray">
+      ${state.captureTrayOpen ? `<section class="capture-tray-panel">
+        <header><div><strong>Evidence Tray</strong><span>${count} temporary chart${count === 1 ? "" : "s"}</span></div><button class="icon-button" data-action="toggle-capture-tray" aria-label="Close Evidence Tray">x</button></header>
+        <p>Captures remain in this session and can be selected in AI Investigation. They do not modify the project.</p>
+        <div class="capture-tray-list">${count ? state.chartCaptures.map((capture) => `
+          <article class="capture-tray-item ${capture.stale ? "stale" : ""}">
+            <img src="${escapeHtml(capture.previewUrl ?? "")}" alt="" />
+            <div><strong>${escapeHtml(capture.title)}</strong><span>${escapeHtml(capture.datasetLabels.join(", "))}</span><small>${escapeHtml(new Date(capture.createdAt).toLocaleString())}${capture.stale ? " · Earlier analysis state" : ""}</small></div>
+            <button class="icon-button" data-action="remove-chart-capture" data-capture-id="${escapeHtml(capture.id)}" title="Remove capture" aria-label="Remove capture">x</button>
+          </article>`).join("") : `<div class="capture-tray-empty">Capture a chart to hold its image, displayed values, and view state here.</div>`}</div>
+        <footer><button class="secondary-command" data-action="clear-chart-captures" ${count ? "" : "disabled"}>Clear all</button><button data-action="start-capture-mode">${state.captureMode ? "Cancel capture" : "Capture a chart"}</button></footer>
+      </section>` : ""}
+      <button class="capture-station-button" data-action="toggle-capture-tray" title="Open temporary Evidence Tray" aria-label="Open temporary Evidence Tray"><span aria-hidden="true">&#128247;</span>${count ? `<b>${count}</b>` : ""}</button>
+      ${state.captureMode ? `<div class="capture-mode-hint">Select a highlighted chart · Esc to cancel</div>` : ""}
+    </aside>`;
 }
 
 function renderDatasetSelection(mode) {
@@ -717,7 +996,6 @@ function renderCompareWorkspace() {
   const reference = activeDataset()?.analysis;
   const referenceTime = reference?.timeAxis[clamp(state.compare.timeIndex, 0, reference.timeAxis.length - 1)] ?? 0;
   const referenceWavelength = reference?.spectralAxis[clamp(state.compare.wavelengthIndex, 0, reference.spectralAxis.length - 1)] ?? 0;
-  const limitedCount = compareDatasets().reduce((count, dataset) => count + irfLimitedCount(dataset), 0);
   return `
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="Dataset comparison">
       <div class="modal comparison-modal">
@@ -747,7 +1025,6 @@ function renderCompareWorkspace() {
             <option value="none" ${state.compare.normalize === "none" ? "selected" : ""}>Off</option>
             <option value="each" ${state.compare.normalize === "each" ? "selected" : ""}>Each max/min</option>
           </select></label>
-          <label class="check-control compare-check-control ${limitedCount ? "" : "disabled-control"}"><input id="compare-hide-irf" type="checkbox" ${state.compare.hideIrfLimited && limitedCount ? "checked" : ""} ${limitedCount ? "" : "disabled"} /> ${limitedCount ? "Hide IRF-limited" : "No IRF-limited components"}</label>
         </section>
 
         <section class="comparison-grid">
@@ -816,9 +1093,10 @@ function renderFitModal() {
           <label><span>IRF FWHM (ps)</span><input id="fit-irf" type="number" min="0" step="0.01" value="${state.fitting.irfFwhm}" /></label>
           <button data-action="run-fit" ${state.job ? "disabled" : ""}>${state.job?.kind === "fit" ? "Processing..." : "Fit Active Dataset"}</button>
           <button data-action="batch-fit" ${state.job || !unfittedCount ? "disabled" : ""} title="${escapeHtml(folderContext)}">${state.job?.kind === "batch-fit" ? "Processing..." : unfittedCount ? `Batch Global Fitting (${unfittedCount})` : "Current Folder Fitted"}</button>
-          <label class="check-control fit-hide-control ${limitedCount ? "" : "disabled-control"}"><input id="fit-hide-irf" type="checkbox" ${state.fitting.hideIrfLimited && limitedCount ? "checked" : ""} ${limitedCount ? "" : "disabled"} /> ${limitedCount ? "Hide IRF-limited spectra" : "No IRF-limited components"}</label>
+          ${limitedCount ? `<span class="irf-exclusion-note">${limitedCount} IRF-limited component${limitedCount === 1 ? "" : "s"} excluded from all interpreted outputs</span>` : ""}
         </section>
         ${renderLifetimeControls()}
+        ${dataset?.fit ? renderFeatureFindingControls() : ""}
         ${dataset?.fit ? renderFitDiagnostics(dataset) : "<section class=\"empty compact\"><h3>No fit yet</h3><p>Run a fit to create lifetime, DAS, EAS-preview, overlay, and residual results.</p></section>"}
       </div>
     </section>
@@ -841,31 +1119,78 @@ function renderLifetimeControls() {
             <span class="fix-control"><input class="lifetime-fixed" data-lifetime-index="${index}" type="checkbox" ${state.fitting.fixedLifetimes[index] ? "checked" : ""} /> Fix</span>
           </label>`).join("")}
       </div>
+      <details class="fit-numerical-model">
+        <summary>Numerical model and convergence</summary>
+        <div class="fit-numerical-grid">
+          <label><span>Pre-zero model</span><select id="fit-prezero"><option value="smooth" ${state.fitting.preZeroModel !== "off" ? "selected" : ""}>Smooth envelope + slope</option><option value="off" ${state.fitting.preZeroModel === "off" ? "selected" : ""}>Off</option></select></label>
+          <label><span>Time-zero terms</span><select id="fit-artifact-order"><option value="0" ${state.fitting.coherentArtifactOrder === 0 ? "selected" : ""}>Gaussian</option><option value="1" ${state.fitting.coherentArtifactOrder === 1 ? "selected" : ""}>Gaussian + derivative</option><option value="2" ${state.fitting.coherentArtifactOrder === 2 ? "selected" : ""}>Gaussian + 2 derivatives</option></select></label>
+          <label><span>Spectral weighting</span><select id="fit-weighting"><option value="robust-noise" ${state.fitting.weighting !== "uniform" ? "selected" : ""}>Robust noise</option><option value="uniform" ${state.fitting.weighting === "uniform" ? "selected" : ""}>Uniform</option></select></label>
+          <label><span>Optimizer starts</span><input id="fit-optimizer-starts" type="number" min="1" max="5" step="1" value="${state.fitting.optimizerStarts}" /></label>
+          <label><span>Maximum iterations</span><input id="fit-maximum-iterations" type="number" min="8" max="120" step="1" value="${state.fitting.maximumIterations}" /></label>
+          <label class="fit-range-check"><input id="fit-range-sensitivity" type="checkbox" ${state.fitting.rangeSensitivity !== false ? "checked" : ""} /><span>Run range-sensitivity refits</span></label>
+        </div>
+        <p>The smooth pre-zero envelope and Gaussian derivative terms allow structured signal on both sides of time zero. Range checks refit after modest edge omissions and warn when lifetimes move materially.</p>
+      </details>
     </section>`;
+}
+
+function renderFeatureFindingControls() {
+  const finder = state.featureFinding;
+  return `<section class="feature-finder-controls" aria-label="Feature finding controls">
+    <div><strong>Gaussian Lineshape Finder</strong><span>Fit signed Gaussian mixtures to each EAS/DAS component</span></div>
+    <label><span>Method</span><select id="feature-method"><option value="multi-gaussian" ${finder.method !== "local-threshold" ? "selected" : ""}>Noise-aware multi-Gaussian</option><option value="local-threshold" ${finder.method === "local-threshold" ? "selected" : ""}>Legacy local threshold</option></select></label>
+    ${finder.method === "local-threshold"
+      ? `<label><span>Relative peak threshold</span><input id="feature-relative-threshold" type="number" min="1" max="80" step="1" value="${Math.round(finder.relativeThreshold * 100)}" /><small>% of component maximum</small></label><label><span>Minimum Gaussian R²</span><input id="feature-gaussian-r2" type="number" min="0" max="0.99" step="0.05" value="${finder.minimumGaussianR2}" /></label>`
+      : `<label><span>Minimum amplitude SNR</span><input id="feature-minimum-snr" type="number" min="1" max="50" step="0.5" value="${finder.minimumSnr}" /><small>relative to robust local noise</small></label><label><span>Maximum peaks</span><input id="feature-maximum-peaks" type="number" min="1" max="12" step="1" value="${finder.maximumPeaksPerComponent}" /><small>per component spectrum</small></label>`}
+    <label><span>Minimum FWHM</span><input id="feature-minimum-fwhm" type="number" min="0" max="500" step="1" value="${finder.minimumFwhmNm}" /><small>nm</small></label>
+    <button data-action="reset-feature-finder" class="secondary-command">Reset finder</button>
+    <p>${finder.method === "local-threshold" ? "A lower threshold finds weaker peaks but a dominant band can suppress minor bands." : "Model order is selected from local noise and residual improvement rather than the strongest peak."} Neither method confirms ESA, GSB, SE, or species identity.</p>
+  </section>`;
 }
 
 function renderFitDiagnostics(dataset) {
   const fit = dataset.fit;
+  const interpretedCount = fit.lifetimes.filter((_, index) => !fit.irfLimited?.[index]).length;
   return `
     <section class="fit-diagnostic-grid">
       <article class="result-panel fit-summary-diagnostic">
-        <div class="panel-head"><h3>Global Fit Summary</h3><span>${fit.componentCount} components</span></div>
+        <div class="panel-head"><h3>Global Fit Summary</h3><span>${interpretedCount} interpreted component${interpretedCount === 1 ? "" : "s"}</span></div>
         ${renderMainFitSummary(dataset)}
       </article>
-      <article class="plot-panel">
+      <article class="plot-panel fit-residual">
         <div class="panel-head"><h3>Fit Residual Map</h3><div class="panel-head-actions"><span>Measured minus fitted</span>${enlargeButton("fit-residual")}</div></div>
         <canvas id="fit-residual" data-plot-key="fit-residual" width="1180" height="420"></canvas>
       </article>
       <article class="plot-panel">
         <div class="panel-head"><h3>EAS Preview</h3><div class="panel-head-actions">${enlargeButton("modal-eas")}</div></div>
         <canvas id="modal-eas" data-plot-key="modal-eas" width="760" height="310"></canvas>
+        ${renderFeaturePlotNote(dataset, "EAS")}
       </article>
       <article class="plot-panel">
         <div class="panel-head"><h3>DAS</h3><div class="panel-head-actions">${enlargeButton("modal-das")}</div></div>
         <canvas id="modal-das" data-plot-key="modal-das" width="760" height="310"></canvas>
+        ${renderFeaturePlotNote(dataset, "DAS")}
+      </article>
+      <article class="plot-panel feature-time-panel">
+        <div class="panel-head"><div><h3>Feature × Time Map</h3><span>Lossy regional compression of the treated fsTA heatmap</span></div><div class="panel-head-actions">${enlargeButton("feature-time")}</div></div>
+        <canvas id="feature-time" data-plot-key="feature-time" width="1180" height="390" aria-label="Feature by time compressed fsTA map"></canvas>
+        ${renderFeatureTimeSummary(dataset)}
       </article>
     </section>
   `;
+}
+
+function renderFeatureTimeSummary(dataset) {
+  const compressed = buildFeatureTimeMap(dataset, featureMonitorFor(dataset));
+  if (compressed.status !== "live") return `<p class="feature-time-unavailable">${escapeHtml(compressed.limitations[0])}</p>`;
+  const score = compressed.compression.reconstructionScore;
+  return `<div class="feature-time-summary">
+    <span><strong>${compressed.features.length}</strong> feature traces</span>
+    <span><strong>${format(compressed.compression.cellReductionFactor)}×</strong> fewer signal cells</span>
+    <span><strong>${(compressed.compression.coveredWavelengthFraction * 100).toFixed(1)}%</strong> wavelength coverage</span>
+    <span><strong>${Number.isFinite(score) ? `${(score * 100).toFixed(1)}%` : "-"}</strong> reconstruction score</span>
+    <em>Derived summary only; raw heatmap remains authoritative.</em>
+  </div>`;
 }
 
 function renderNewFolderModal() {
@@ -905,24 +1230,245 @@ function renderDeleteDatasetModal() {
 
 function renderDatasetEditorModal() {
   const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
+  const metadata = normalizeDatasetEvidence(dataset?.evidenceMetadata, "fsta");
+  const connections = connectionsForEntity(state.evidenceGraph, dataset?.id);
+  const primaryConditions = primaryConditionFields(metadata.technique.id);
+  const additionalConditions = CONDITION_FIELDS.filter((field) => !primaryConditions.includes(field));
+  const speciesLabels = metadata.speciesStateIds
+    .map((id) => state.evidenceGraph.entities.find((entity) => entity.id === id)?.label)
+    .filter(Boolean)
+    .join(", ");
   return `
-    <section class="modal-shell" role="dialog" aria-modal="true" aria-label="Dataset details">
-      <div class="modal compact-modal">
+    <section class="modal-shell" role="dialog" aria-modal="true" aria-label="Edit dataset details">
+      <div class="modal dataset-details-modal">
         <header class="modal-head">
-          <div><h2>Dataset Details</h2><p>Project metadata for AI handoff and comparison labels.</p></div>
+          <div><h2>Edit Dataset Details</h2><p>Edit the dataset label and note, then keep identity and conditions as compact scientific tags.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="dataset-detail-fields">
-          <label class="modal-field"><span>Display name</span><input id="dataset-display-name" type="text" value="${escapeHtml(datasetDisplayName(dataset))}" /></label>
-          <label class="modal-field"><span>Sample note</span><textarea id="dataset-sample-note" rows="5" placeholder="Sample identity, environment, excitation conditions, or interpretation context">${escapeHtml(dataset?.sampleNote ?? "")}</textarea></label>
+          <section class="dataset-detail-section">
+            <div class="dataset-detail-section-head"><div><h3>Dataset label and note</h3><p>The project label does not rename or alter the imported source file.</p></div></div>
+            <label class="modal-field"><span>Dataset label</span><input id="dataset-display-name" type="text" value="${escapeHtml(datasetDisplayName(dataset))}" /></label>
+            <label class="modal-field"><span>Sample note</span><textarea id="dataset-sample-note" rows="3" placeholder="Sample identity, environment, excitation conditions, or interpretation context">${escapeHtml(dataset?.sampleNote ?? "")}</textarea></label>
+          </section>
+          <section class="dataset-detail-section dataset-tag-section">
+            <div class="dataset-detail-section-head"><div><h3>Identity and conditions</h3><p>Compact labels only. Blank values remain unknown and stay out of the summary.</p></div></div>
+            <div class="dataset-tag-editor">
+              <label class="dataset-tag-field"><span>Technique</span><select id="dataset-technique">${listTechniques().map((item) => `<option value="${escapeHtml(item.id)}" ${metadata.technique.id === item.id ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
+              <label class="dataset-tag-field"><span>Role</span><select id="dataset-measurement-role">
+                ${["unknown", "primary", "reference", "control", "supporting"].map((role) => `<option value="${role}" ${metadata.measurementRole === role ? "selected" : ""}>${escapeHtml(titleCase(role))}</option>`).join("")}
+              </select></label>
+              <label class="dataset-tag-field"><span>Sample ID</span><input id="dataset-sample-id" value="${escapeHtml(metadata.sampleId)}" placeholder="Unknown" /></label>
+              <label class="dataset-tag-field"><span>Preparation ID</span><input id="dataset-preparation-id" value="${escapeHtml(metadata.preparationId)}" placeholder="Unknown" /></label>
+              ${primaryConditions.map((field) => renderConditionField(field, metadata, true)).join("")}
+            </div>
+            <label class="modal-field"><span>Candidate species or states</span><input id="dataset-species-states" value="${escapeHtml(speciesLabels)}" placeholder="Comma-separated; stored as proposed hypotheses" /></label>
+            <details class="dataset-conditions-disclosure">
+              <summary>More condition tags <span>${additionalConditions.filter((field) => metadata.conditions[field] != null).length} filled</span></summary>
+              <div class="dataset-tag-editor additional-condition-tags">${additionalConditions.map((field) => renderConditionField(field, metadata, true)).join("")}</div>
+            </details>
+          </section>
+          <section class="dataset-detail-section connected-evidence-section">
+            <div class="dataset-detail-section-head"><div><h3>Connected Evidence</h3><p>Select project evidence, create typed connections, and inspect the local relation map.</p></div><div class="evidence-toolbar"><button data-action="toggle-evidence-view">${state.evidenceViewMode === "map" ? "List view" : "Relation map"}</button><button data-action="open-evidence-import">Import evidence...</button><button data-action="open-literature-import">Import literature...</button></div></div>
+            ${state.evidenceViewMode === "map" ? renderFocusedEvidenceMap(dataset, connections) : (connections.length ? `<div class="evidence-connection-list">${connections.map((connection) => renderEvidenceConnectionRow(dataset, connection)).join("")}</div>` : `<p class="empty-evidence-state">No explicit connections. Similar filenames, lifetimes, or spectra will not create one automatically.</p>`)}
+            ${renderEvidenceLibrary(dataset)}
+          </section>
           <p class="source-readonly">Source file: <strong data-i18n-skip>${escapeHtml(dataset?.source.fileName ?? "-")}</strong></p>
         </div>
         <footer class="modal-footer">
-          <span>The source filename and original CSV or UFS data remain unchanged.</span>
+          <span>Metadata and graph records never duplicate or modify numerical source data.</span>
           <button data-action="save-dataset-details">Save Details</button>
         </footer>
       </div>
     </section>`;
+}
+
+function renderConditionField(field, metadata, compact = false) {
+  return `<label class="${compact ? "dataset-tag-field" : "modal-field"}"><span>${escapeHtml(conditionLabel(field))}</span><input id="dataset-condition-${escapeHtml(field)}" value="${escapeHtml(metadata.conditions[field] ?? "")}" placeholder="Unknown" /></label>`;
+}
+
+function renderDatasetIdentityTags(dataset) {
+  const metadata = normalizeDatasetEvidence(dataset?.evidenceMetadata, "fsta");
+  const tags = [
+    getTechnique(metadata.technique.id).label,
+    titleCase(metadata.measurementRole),
+    metadata.sampleId ? `ID ${metadata.sampleId}` : null,
+    metadata.preparationId ? `Prep ${metadata.preparationId}` : null,
+    ...primaryConditionFields(metadata.technique.id)
+      .map((field) => metadata.conditions[field] ? `${conditionLabel(field)} ${metadata.conditions[field]}` : null),
+  ].filter(Boolean);
+  return `<div class="dataset-context-tags">${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`;
+}
+
+function primaryConditionFields(techniqueId) {
+  if (["fsta", "psta", "nsta"].includes(techniqueId)) return ["solvent", "excitationWavelength", "fluence", "atmosphere"];
+  if (techniqueId === "absorption") return ["solvent", "concentration", "temperature"];
+  if (["pl", "trpl"].includes(techniqueId)) return ["solvent", "excitationWavelength", "temperature"];
+  return ["solvent", "temperature", "instrument"];
+}
+
+function renderEvidenceLibrary(dataset) {
+  const choices = state.evidenceGraph.entities
+    .filter((entity) => entity.id !== dataset.id)
+    .sort((left, right) => left.label.localeCompare(right.label));
+  return `<div class="evidence-library">
+    <div class="evidence-library-head"><div><strong>Project evidence library</strong><span>${state.evidenceSelectionIds.length} selected</span></div><button data-action="connect-selected-evidence" ${state.evidenceSelectionIds.length ? "" : "disabled"}>Connect selected...</button></div>
+    ${choices.length ? `<div class="evidence-library-grid">${choices.map((entity) => {
+      const asset = state.evidenceAssets.find((item) => item.id === entity.assetId);
+      return `<div class="evidence-library-item"><label><input class="evidence-library-check" type="checkbox" value="${escapeHtml(entity.id)}" ${state.evidenceSelectionIds.includes(entity.id) ? "checked" : ""} /><span><strong data-i18n-skip>${escapeHtml(entity.label)}</strong><small>${escapeHtml(titleCase(entity.kind))}${asset?.techniqueId ? ` · ${escapeHtml(getTechnique(asset.techniqueId).label)}` : ""}</small></span></label>${asset ? `<button type="button" data-action="open-evidence-asset" data-asset-id="${escapeHtml(asset.id)}">Details</button>` : ""}</div>`;
+    }).join("")}</div>` : `<p class="empty-evidence-state">Import an external spectrum, characterization, figure, manuscript, or literature citation to start the library.</p>`}
+  </div>`;
+}
+
+function renderFocusedEvidenceMap(dataset, connections) {
+  const neighbors = connections.map((connection) => {
+    const id = connection.fromId === dataset.id ? connection.toId : connection.fromId;
+    return { connection, entity: state.evidenceGraph.entities.find((item) => item.id === id) };
+  }).filter((item) => item.entity).slice(0, 12);
+  if (!neighbors.length) return `<div class="evidence-map evidence-map-empty"><strong>${escapeHtml(datasetDisplayName(dataset))}</strong><span>No connected evidence yet</span></div>`;
+  const cx = 400;
+  const cy = 190;
+  return `<div class="evidence-map"><svg viewBox="0 0 800 380" role="img" aria-label="Focused evidence relation map">
+    ${neighbors.map(({ connection }, index) => {
+      const angle = (Math.PI * 2 * index / neighbors.length) - Math.PI / 2;
+      const x = cx + Math.cos(angle) * 285;
+      const y = cy + Math.sin(angle) * 130;
+      return `<g><line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/><text class="evidence-map-edge" x="${(cx + x) / 2}" y="${(cy + y) / 2 - 5}">${escapeHtml(shortLabel(connection.type, 22))}</text></g>`;
+    }).join("")}
+    <g class="evidence-map-node evidence-map-center"><rect x="310" y="156" width="180" height="68" rx="18"/><text x="400" y="186">${escapeHtml(shortLabel(datasetDisplayName(dataset), 25))}</text><text class="evidence-map-kind" x="400" y="206">Dataset</text></g>
+    ${neighbors.map(({ entity }, index) => {
+      const angle = (Math.PI * 2 * index / neighbors.length) - Math.PI / 2;
+      const x = cx + Math.cos(angle) * 285;
+      const y = cy + Math.sin(angle) * 130;
+      return `<g class="evidence-map-node" data-action="open-evidence-entity" data-entity-id="${escapeHtml(entity.id)}"><rect x="${x - 82}" y="${y - 29}" width="164" height="58" rx="15"/><text x="${x}" y="${y - 2}">${escapeHtml(shortLabel(entity.label, 22))}</text><text class="evidence-map-kind" x="${x}" y="${y + 17}">${escapeHtml(titleCase(entity.kind))}</text></g>`;
+    }).join("")}
+  </svg></div>`;
+}
+
+function shortLabel(value, length) {
+  const text = String(value ?? "");
+  return text.length > length ? `${text.slice(0, length - 1)}…` : text;
+}
+
+function renderEvidenceConnectionRow(dataset, connection) {
+  const otherId = connection.fromId === dataset.id ? connection.toId : connection.fromId;
+  const other = state.evidenceGraph.entities.find((entity) => entity.id === otherId);
+  const otherDataset = state.datasets.find((item) => item.id === otherId);
+  const comparison = otherDataset ? compareDatasetConditions(dataset, otherDataset) : null;
+  const technique = otherDataset ? getTechnique(otherDataset.evidenceMetadata?.technique?.id).label : titleCase(other?.kind ?? "entity");
+  const warning = comparison
+    ? `${comparison.matching.length} matching · ${comparison.different.length} different · ${comparison.unknown.length} unknown conditions`
+    : "Condition comparison not applicable";
+  return `<article class="evidence-connection-row">
+    <div><strong data-i18n-skip>${escapeHtml(other?.label ?? otherId)}</strong><span>${escapeHtml(technique)} · ${escapeHtml(connection.type)} · ${escapeHtml(connection.category)}</span><small>${escapeHtml(warning)}</small><p>${escapeHtml(connection.rationale)}</p></div>
+    <div class="evidence-connection-actions"><button data-action="start-ai-from-connection" data-connection-id="${escapeHtml(connection.id)}">Investigate...</button><button data-action="edit-evidence-connection" data-connection-id="${escapeHtml(connection.id)}">Edit rationale...</button><button class="danger-button" data-action="remove-evidence-connection" data-connection-id="${escapeHtml(connection.id)}">Remove</button></div>
+  </article>`;
+}
+
+function renderEvidenceConnectionModal() {
+  const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
+  const existing = state.evidenceGraph.relationships.find((item) => item.id === state.pendingConnectionId);
+  const sourceId = existing?.fromId ?? dataset?.id;
+  const source = state.evidenceGraph.entities.find((entity) => entity.id === sourceId);
+  const targets = state.evidenceGraph.entities.filter((entity) => entity.id !== sourceId);
+  const selectedTargetIds = existing ? [existing.toId] : state.pendingConnectionTargetIds.length
+    ? state.pendingConnectionTargetIds
+    : [targets[0]?.id].filter(Boolean);
+  const compatibleTypes = compatibleRelationshipTypes(sourceId, selectedTargetIds);
+  const selectedTarget = selectedTargetIds[0] ?? "";
+  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Evidence connection">
+    <div class="modal compact-modal evidence-connection-modal">
+      <header class="modal-head">
+        <div><h2>${existing ? "Edit Evidence Connection" : "Add Evidence Connection"}</h2><p>Record the relationship as authored metadata; no relationship is inferred automatically.</p></div>
+        <button data-action="back-dataset-details" class="icon-button" aria-label="Close">x</button>
+      </header>
+      <div class="dataset-detail-fields">
+        <label class="modal-field"><span>From</span><input value="${escapeHtml(source?.label ?? sourceId ?? "")}" disabled /></label>
+        ${selectedTargetIds.length > 1 ? `<div class="modal-field"><span>To selected evidence (${selectedTargetIds.length})</span><div class="connection-target-chips">${selectedTargetIds.map((id) => `<span>${escapeHtml(state.evidenceGraph.entities.find((entity) => entity.id === id)?.label ?? id)}</span>`).join("")}</div></div>` : `<label class="modal-field"><span>To evidence</span><select id="connection-target" ${existing || state.pendingConnectionTargetIds.length ? "disabled" : ""}>${targets.map((entity) => `<option value="${escapeHtml(entity.id)}" ${entity.id === selectedTarget ? "selected" : ""}>${escapeHtml(entity.label)} · ${escapeHtml(titleCase(entity.kind))}</option>`).join("")}</select></label>`}
+        <label class="modal-field"><span>Relationship type</span><select id="connection-type">${compatibleTypes.map(([type, definition]) => `<option value="${type}" ${existing?.type === type ? "selected" : ""}>${escapeHtml(type)} · ${escapeHtml(definition.category)}</option>`).join("")}</select></label>
+        <label class="modal-field"><span>Assertion status</span><select id="connection-status">${["recorded", "proposed", "contested"].map((status) => `<option value="${status}" ${existing?.assertionStatus === status ? "selected" : ""}>${escapeHtml(titleCase(status))}</option>`).join("")}</select></label>
+        <label class="modal-field"><span>Authored rationale</span><textarea id="connection-rationale" rows="4" required placeholder="Why is this relationship scientifically relevant?">${escapeHtml(existing?.rationale ?? "")}</textarea></label>
+        <label class="modal-field"><span>Author</span><input id="connection-author" value="${escapeHtml(existing?.author ?? "project-user")}" /></label>
+        <p class="scientific-note">Interpretive connections remain proposals or contested assertions. Adding one never changes a species-hypothesis status.</p>
+      </div>
+      <footer class="modal-footer"><button data-action="back-dataset-details">Back</button><span>${compatibleTypes.length ? "One authored relationship will be applied to every selected item." : "The selected evidence types have no shared valid relationship."}</span><button data-action="save-evidence-connection" ${compatibleTypes.length ? "" : "disabled"}>${existing ? "Save Connection" : selectedTargetIds.length > 1 ? `Add ${selectedTargetIds.length} Connections` : "Add Connection"}</button></footer>
+    </div>
+  </section>`;
+}
+
+function compatibleRelationshipTypes(sourceId, targetIds) {
+  const source = state.evidenceGraph.entities.find((entity) => entity.id === sourceId);
+  const targets = targetIds.map((id) => state.evidenceGraph.entities.find((entity) => entity.id === id)).filter(Boolean);
+  return Object.entries(RELATIONSHIP_DEFINITIONS).filter(([, definition]) => source && targets.length && targets.every((target) => (
+    definition.pairs.some(([fromKind, toKind]) => fromKind === source.kind && toKind === target.kind)
+  )));
+}
+
+function renderEvidenceImportModal() {
+  const literatureMode = state.evidenceImportMode === "literature";
+  const imported = state.evidenceImportResultIds
+    .map((id) => state.evidenceAssets.find((asset) => asset.id === id))
+    .filter(Boolean);
+  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="${literatureMode ? "Import literature" : "Import evidence"}">
+    <div class="modal evidence-import-modal">
+      <header class="modal-head">
+        <div><h2>${literatureMode ? "Import Literature" : "Import External Evidence"}</h2><p>${literatureMode ? "Bring in a paper, supporting document, or published figure as a real file first." : "Bring project evidence in through one file-first workspace."}</p></div>
+        <button data-action="close-evidence-import" class="icon-button" aria-label="Close">x</button>
+      </header>
+      <div class="evidence-import-layout">
+        <div id="evidence-import-dropzone" class="evidence-import-dropzone" tabindex="0" role="button" aria-label="Drop or paste evidence files here">
+          <div class="evidence-import-symbol" aria-hidden="true">+</div>
+          <strong>${literatureMode ? "Drop or paste literature files and figures" : "Drop or paste files and pictures"}</strong>
+          <p>Drag files here, copy an image or file and press <kbd>⌘V</kbd>, or choose from Finder.</p>
+          <label class="evidence-import-choose">Choose files from Finder<input id="evidence-asset-input" type="file" multiple accept=".csv,.tsv,.txt,.asc,.dat,.xy,.png,.jpg,.jpeg,.webp,.gif,.svg,.tif,.tiff,.pdf,.doc,.docx,.odt,.rtf,.tex,.md" /></label>
+          <small>${literatureMode ? "PDF, image, manuscript, text, or supporting files" : "Spectroscopy, characterization, images, PDF, documents, manuscripts, and text files"}</small>
+        </div>
+        <aside class="evidence-import-guidance">
+          <h3>${literatureMode ? "Literature import" : "Evidence import"}</h3>
+          <ul>
+            <li>The exact pasted or imported bytes are preserved.</li>
+            <li>Files are automatically classified; you can refine Details later.</li>
+            <li>No scientific connection is created until you select and author one.</li>
+            ${literatureMode ? "<li>Publication metadata is optional after import; the file is never replaced by typed text.</li>" : ""}
+          </ul>
+        </aside>
+      </div>
+      ${imported.length ? `<section class="evidence-import-results"><div><h3>Imported and selected</h3><span>${imported.length} item${imported.length === 1 ? "" : "s"}</span></div><div>${imported.map((asset) => `<button data-action="open-evidence-asset" data-asset-id="${escapeHtml(asset.id)}"><strong data-i18n-skip>${escapeHtml(asset.label)}</strong><small>${escapeHtml(titleCase(asset.kind))}</small></button>`).join("")}</div></section>` : ""}
+      <footer class="modal-footer"><button data-action="close-evidence-import">Back to Dataset Details</button><span>Imported items are selected for connection automatically.</span></footer>
+    </div>
+  </section>`;
+}
+
+function renderEvidenceAssetModal() {
+  const asset = state.pendingEvidenceAssetDraft
+    ?? state.evidenceAssets.find((item) => item.id === state.pendingEvidenceAssetId);
+  if (!asset) return "";
+  const isNew = Boolean(state.pendingEvidenceAssetDraft);
+  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="External evidence details">
+    <div class="modal compact-modal evidence-asset-modal">
+      <header class="modal-head"><div><h2>${isNew ? "Add Literature Evidence" : "External Evidence Details"}</h2><p>Describe the evidence without changing its exact imported source.</p></div><button data-action="back-dataset-details" class="icon-button" aria-label="Close">x</button></header>
+      <div class="dataset-detail-fields">
+        <label class="modal-field"><span>Label</span><input id="evidence-asset-label" value="${escapeHtml(asset.label)}" /></label>
+        <div class="dataset-detail-grid">
+          <label class="modal-field"><span>Evidence kind</span><select id="evidence-asset-kind">${EVIDENCE_ASSET_KINDS.map((kind) => `<option value="${kind}" ${asset.kind === kind ? "selected" : ""}>${escapeHtml(titleCase(kind))}</option>`).join("")}</select></label>
+          <label class="modal-field"><span>Technique</span><select id="evidence-asset-technique">${listTechniques().map((item) => `<option value="${escapeHtml(item.id)}" ${asset.techniqueId === item.id ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
+          <label class="modal-field"><span>Measurement role</span><select id="evidence-asset-role">${["unknown", "primary", "reference", "control", "supporting"].map((role) => `<option value="${role}" ${asset.measurementRole === role ? "selected" : ""}>${escapeHtml(titleCase(role))}</option>`).join("")}</select></label>
+          <label class="modal-field"><span>Rights / sharing status</span><select id="evidence-asset-rights">${LITERATURE_RIGHTS_STATUSES.map((status) => `<option value="${status}" ${asset.citation.rightsStatus === status ? "selected" : ""}>${escapeHtml(titleCase(status))}</option>`).join("")}</select></label>
+        </div>
+        <label class="modal-field"><span>Note</span><textarea id="evidence-asset-note" rows="3">${escapeHtml(asset.note)}</textarea></label>
+        <label class="modal-field"><span>Title / citation</span><input id="evidence-citation-title" value="${escapeHtml(asset.citation.title)}" placeholder="Article, manuscript, or figure title" /></label>
+        <div class="dataset-detail-grid">
+          <label class="modal-field"><span>Authors</span><input id="evidence-citation-authors" value="${escapeHtml(asset.citation.authors)}" /></label>
+          <label class="modal-field"><span>Year</span><input id="evidence-citation-year" value="${escapeHtml(asset.citation.year)}" /></label>
+          <label class="modal-field"><span>DOI</span><input id="evidence-citation-doi" value="${escapeHtml(asset.citation.doi)}" /></label>
+          <label class="modal-field"><span>URL</span><input id="evidence-citation-url" value="${escapeHtml(asset.citation.url)}" /></label>
+          <label class="modal-field"><span>Figure / location</span><input id="evidence-citation-figure" value="${escapeHtml(asset.citation.figure)}" /></label>
+        </div>
+        <p class="source-readonly">Source: <strong data-i18n-skip>${escapeHtml(asset.source.fileName || "Citation only")}</strong> · ${asset.source.byteLength || 0} bytes${asset.source.sha256 ? ` · SHA-256 ${escapeHtml(asset.source.sha256)}` : ""}</p>
+      </div>
+      <footer class="modal-footer"><button data-action="back-dataset-details">Back</button><span>Imported bytes remain authoritative and untouched.</span><button data-action="save-evidence-asset">Save Evidence</button></footer>
+    </div>
+  </section>`;
 }
 
 function renderMoveDatasetModal() {
@@ -976,17 +1522,13 @@ function renderExpandedPlot() {
   const meta = expandedPlotMeta(state.expandedPlot);
   const coordinateControl = renderExpandedCoordinateControl(state.expandedPlot);
   const componentPlot = ["main-components", "modal-eas", "modal-das", "compare-components"].includes(state.expandedPlot);
-  const compareComponentPlot = state.expandedPlot === "compare-components";
-  const limitedCount = compareComponentPlot
-    ? compareDatasets().reduce((count, dataset) => count + irfLimitedCount(dataset), 0)
-    : irfLimitedCount(activeDataset());
   return `
     <section class="modal-shell expanded-shell" role="dialog" aria-modal="true" aria-label="${escapeHtml(meta.title)} enlarged">
       <div class="modal expanded-plot-modal">
         <header class="modal-head expanded-head">
           <div><h2>${escapeHtml(meta.title)}</h2>${meta.subtitle && !coordinateControl ? `<p>${escapeHtml(meta.subtitle)}</p>` : ""}</div>
           <div class="expanded-tools">
-            ${componentPlot ? `<label class="check-control ${limitedCount ? "" : "disabled-control"}"><input id="expanded-hide-irf" type="checkbox" ${(compareComponentPlot ? state.compare.hideIrfLimited : state.fitting.hideIrfLimited) && limitedCount ? "checked" : ""} ${limitedCount ? "" : "disabled"} /> ${limitedCount ? "Hide IRF-limited" : "No IRF-limited components"}</label>` : ""}
+            ${componentPlot && (state.expandedPlot === "compare-components" ? compareDatasets().some((dataset) => irfLimitedCount(dataset)) : irfLimitedCount(activeDataset())) ? `<span class="irf-exclusion-note">IRF-limited components excluded</span>` : ""}
             ${enlargeButton(state.expandedPlot).replace(/<button[^>]*data-action="enlarge-plot"[\s\S]*?<\/button>/, "")}
             <button data-action="close-expanded-plot" class="icon-button" aria-label="Close enlarged plot">x</button>
           </div>
@@ -1010,6 +1552,35 @@ function bindDom() {
   document.getElementById("file-input")?.addEventListener("change", (event) => importDataFiles(event, null));
   document.getElementById("folder-file-input")?.addEventListener("change", (event) => importDataFiles(event, state.importTargetFolderId));
   document.getElementById("project-input")?.addEventListener("change", openProjectFile);
+  document.getElementById("evidence-asset-input")?.addEventListener("change", (event) => importEvidenceFiles(event).catch(showError));
+  const evidenceDropzone = document.getElementById("evidence-import-dropzone");
+  evidenceDropzone?.addEventListener("dragenter", handleEvidenceDragEnter);
+  evidenceDropzone?.addEventListener("dragover", handleEvidenceDragOver);
+  evidenceDropzone?.addEventListener("dragleave", handleEvidenceDragLeave);
+  evidenceDropzone?.addEventListener("drop", (event) => handleEvidenceDrop(event).catch(showError));
+  evidenceDropzone?.addEventListener("keydown", (event) => {
+    if (["Enter", " "].includes(event.key) && event.target === evidenceDropzone) {
+      event.preventDefault();
+      document.getElementById("evidence-asset-input")?.click();
+    }
+  });
+  document.querySelector(".evidence-import-modal")?.addEventListener("paste", (event) => handleEvidencePaste(event).catch(showError));
+  document.querySelectorAll(".evidence-library-check").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const ids = new Set(state.evidenceSelectionIds);
+      if (event.target.checked) ids.add(event.target.value);
+      else ids.delete(event.target.value);
+      state.evidenceSelectionIds = [...ids];
+      render();
+    });
+  });
+  document.getElementById("connection-target")?.addEventListener("change", (event) => {
+    const sourceId = state.evidenceGraph.relationships.find((item) => item.id === state.pendingConnectionId)?.fromId
+      ?? state.pendingDatasetId;
+    const entries = compatibleRelationshipTypes(sourceId, [event.target.value]);
+    const select = document.getElementById("connection-type");
+    if (select) select.innerHTML = entries.map(([type, definition]) => `<option value="${type}">${escapeHtml(type)} · ${escapeHtml(definition.category)}</option>`).join("");
+  });
   document.getElementById("origin-output-mode")?.addEventListener("change", (event) => {
     state.origin.outputMode = event.target.value === "sheets-only"
       ? "sheets-only"
@@ -1018,6 +1589,53 @@ function bindDom() {
   document.getElementById("origin-format")?.addEventListener("change", (event) => {
     state.origin.outputFormat = event.target.value;
   });
+  ["ai-question", "ai-context", "ai-desired-output"].forEach((id) => {
+    document.getElementById(id)?.addEventListener("input", syncAiDraftFromDom);
+  });
+  document.getElementById("ai-goal")?.addEventListener("change", (event) => {
+    syncAiDraftFromDom();
+    const goal = AI_INVESTIGATION_GOALS[event.target.value];
+    state.aiInvestigation.draft.goal = event.target.value;
+    if (!state.aiInvestigation.draft.question.trim() && goal?.scaffold) state.aiInvestigation.draft.question = goal.scaffold;
+    state.aiInvestigation.preview = null;
+    render();
+  });
+  document.querySelectorAll('input[name="ai-scope"]').forEach((input) => {
+    input.addEventListener("change", (event) => {
+      syncAiDraftFromDom();
+      state.aiInvestigation.draft.scope.kind = event.target.value;
+      if (event.target.value === "connected-evidence") {
+        state.aiInvestigation.draft.scope.datasetIds = activeDataset() ? [activeDataset().id] : [];
+      }
+      state.aiInvestigation.preview = null;
+      render();
+    });
+  });
+  document.querySelectorAll('input[name="ai-profile"]').forEach((input) => {
+    input.addEventListener("change", (event) => {
+      syncAiDraftFromDom();
+      state.aiInvestigation.draft.evidenceProfile = event.target.value;
+      if (event.target.value !== "full") {
+        state.aiInvestigation.draft.include.rawSources = false;
+        state.aiInvestigation.draft.include.fullTreatedMatrices = false;
+      }
+      state.aiInvestigation.preview = null;
+      render();
+    });
+  });
+  document.querySelectorAll(".ai-dataset-check").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const ids = new Set(state.aiInvestigation.draft.scope.datasetIds ?? []);
+      if (event.target.checked) ids.add(event.currentTarget.dataset.datasetId);
+      else ids.delete(event.currentTarget.dataset.datasetId);
+      state.aiInvestigation.draft.scope.datasetIds = state.datasets.filter((dataset) => ids.has(dataset.id)).map((dataset) => dataset.id);
+      state.aiInvestigation.preview = null;
+    });
+  });
+  [
+    "ai-include-notes", "ai-include-filenames", "ai-include-metadata", "ai-redact-paths",
+    "ai-redact-operators", "ai-redact-computers", "ai-include-raw", "ai-include-matrices",
+  ].forEach((id) => document.getElementById(id)?.addEventListener("change", syncAiDraftFromDom));
 
   // Shared selection-modal listeners (compare and merge)
   document.querySelectorAll(".selection-check").forEach((checkbox) => {
@@ -1099,10 +1717,6 @@ function bindDom() {
     state.fitting.normalize = event.target.value;
     paintCanvases();
   });
-  document.getElementById("result-hide-irf")?.addEventListener("change", (event) => {
-    state.fitting.hideIrfLimited = event.target.checked;
-    updateComponentViewUi();
-  });
   document.getElementById("fit-components")?.addEventListener("change", (event) => {
     state.fitting.components = Number(event.target.value) || 3;
     resetLifetimeEditor();
@@ -1111,18 +1725,59 @@ function bindDom() {
   document.getElementById("fit-irf")?.addEventListener("input", (event) => {
     state.fitting.irfFwhm = Number(event.target.value) || 0.25;
   });
-  document.getElementById("fit-hide-irf")?.addEventListener("change", (event) => {
-    state.fitting.hideIrfLimited = event.target.checked;
-    updateComponentViewUi();
+  document.getElementById("fit-prezero")?.addEventListener("change", (event) => {
+    state.fitting.preZeroModel = event.target.value === "off" ? "off" : "smooth";
   });
-  document.getElementById("expanded-hide-irf")?.addEventListener("change", (event) => {
-    if (state.expandedPlot === "compare-components") {
-      state.compare.hideIrfLimited = event.target.checked;
-      updateComparisonComponentUi();
-    } else {
-      state.fitting.hideIrfLimited = event.target.checked;
-      updateComponentViewUi();
-    }
+  document.getElementById("fit-artifact-order")?.addEventListener("change", (event) => {
+    state.fitting.coherentArtifactOrder = Math.round(clamp(Number(event.target.value) || 0, 0, 2));
+  });
+  document.getElementById("fit-weighting")?.addEventListener("change", (event) => {
+    state.fitting.weighting = event.target.value === "uniform" ? "uniform" : "robust-noise";
+  });
+  document.getElementById("fit-optimizer-starts")?.addEventListener("change", (event) => {
+    state.fitting.optimizerStarts = Math.round(clamp(Number(event.target.value) || 3, 1, 5));
+  });
+  document.getElementById("fit-maximum-iterations")?.addEventListener("change", (event) => {
+    state.fitting.maximumIterations = Math.round(clamp(Number(event.target.value) || 55, 8, 120));
+  });
+  document.getElementById("fit-range-sensitivity")?.addEventListener("change", (event) => {
+    state.fitting.rangeSensitivity = event.target.checked;
+  });
+  document.getElementById("feature-method")?.addEventListener("change", (event) => {
+    state.featureFinding.method = event.target.value === "local-threshold" ? "local-threshold" : "multi-gaussian";
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
+  document.getElementById("feature-minimum-snr")?.addEventListener("change", (event) => {
+    state.featureFinding.minimumSnr = clamp(Number(event.target.value) || 4, 1, 50);
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
+  document.getElementById("feature-maximum-peaks")?.addEventListener("change", (event) => {
+    state.featureFinding.maximumPeaksPerComponent = Math.round(clamp(Number(event.target.value) || 6, 1, 12));
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
+  document.getElementById("feature-relative-threshold")?.addEventListener("change", (event) => {
+    state.featureFinding.relativeThreshold = clamp((Number(event.target.value) || 12) / 100, 0.01, 0.8);
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
+  document.getElementById("feature-gaussian-r2")?.addEventListener("change", (event) => {
+    state.featureFinding.minimumGaussianR2 = clamp(Number(event.target.value) || 0, 0, 0.99);
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
+  document.getElementById("feature-minimum-fwhm")?.addEventListener("change", (event) => {
+    state.featureFinding.minimumFwhmNm = clamp(Number(event.target.value) || 0, 0, 500);
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
   });
   document.querySelectorAll(".lifetime-value").forEach((input) => {
     input.addEventListener("input", (event) => {
@@ -1155,10 +1810,6 @@ function bindDom() {
     state.compare.normalize = event.target.value;
     clearPlotZooms(["compare-kinetics", "compare-spectrum", "compare-components"]);
     paintCanvases();
-  });
-  document.getElementById("compare-hide-irf")?.addEventListener("change", (event) => {
-    state.compare.hideIrfLimited = event.target.checked;
-    updateComparisonComponentUi();
   });
   document.querySelectorAll("[data-style-id]").forEach((row) => {
     const id = row.dataset.styleId;
@@ -1354,6 +2005,14 @@ function bindPlotInteractions() {
   document.querySelectorAll("canvas[data-plot-key]").forEach((canvas) => {
     const plotKey = canvas.dataset.plotKey;
     canvas.classList.toggle("zoom-selecting", state.zoomSelectionKey === plotKey);
+    canvas.classList.toggle("capture-target", state.captureMode);
+    canvas.addEventListener("click", (event) => {
+      if (!state.captureMode || state.zoomSelectionKey === plotKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      state.captureMode = false;
+      capturePlotToTray(plotKey).catch(showError);
+    });
     canvas.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1497,6 +2156,22 @@ async function handleAction(event) {
     } else if (action === "open-about") {
       state.modal = "about";
       render();
+    } else if (action === "new-ai-investigation") {
+      openAiInvestigation();
+    } else if (action === "review-ai-investigation") {
+      await reviewAiInvestigation();
+    } else if (action === "back-ai-investigation") {
+      state.aiInvestigation.stage = "builder";
+      state.aiInvestigation.preview = null;
+      render();
+    } else if (action === "save-ai-investigation") {
+      await exportAiInvestigationPackage();
+    } else if (action === "copy-ai-prompt") {
+      await copyAiInvestigationPrompt();
+    } else if (action === "save-ai-brief") {
+      await saveAiInvestigationBrief();
+    } else if (action === "legacy-export-md") {
+      await exportMarkdown();
     } else if (action === "open-merge-selection") {
       state.merge.stage = "select";
       state.modal = "merge-select";
@@ -1550,9 +2225,18 @@ async function handleAction(event) {
       state.modal = null;
       state.pendingDeleteId = null;
       state.pendingDatasetId = null;
+      state.pendingConnectionId = null;
+      state.pendingConnectionTargetIds = [];
+      state.pendingEvidenceAssetId = null;
+      state.pendingEvidenceAssetDraft = null;
       render();
     } else if (action === "run-fit") {
       await runFitActive();
+    } else if (action === "reset-feature-finder") {
+      state.featureFinding = { method: "multi-gaussian", minimumSnr: 4, maximumPeaksPerComponent: 6, minimumBicImprovement: 6, relativeThreshold: 0.12, minimumGaussianR2: 0.45, minimumFwhmNm: 6 };
+      clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+      markDirty();
+      render();
     } else if (action === "batch-fit") {
       await runBatchFit();
     } else if (action === "save-project") {
@@ -1563,6 +2247,24 @@ async function handleAction(event) {
       await selectOriginInstallation();
     } else if (action === "create-origin") {
       await createInOrigin();
+    } else if (action === "toggle-capture-tray") {
+      state.captureTrayOpen = !state.captureTrayOpen;
+      if (!state.captureTrayOpen) state.captureMode = false;
+      render();
+    } else if (action === "start-capture-mode") {
+      state.captureMode = !state.captureMode;
+      state.captureTrayOpen = true;
+      render();
+    } else if (action === "capture-plot") {
+      const plotKey = event.currentTarget.dataset.plotKey;
+      closeContextMenus();
+      await capturePlotToTray(plotKey);
+    } else if (action === "remove-chart-capture") {
+      removeChartCapture(event.currentTarget.dataset.captureId);
+      render();
+    } else if (action === "clear-chart-captures") {
+      clearChartCaptures();
+      render();
     } else if (action === "export-plot-png") {
       const plotKey = event.currentTarget.dataset.plotKey;
       closeContextMenus();
@@ -1574,7 +2276,7 @@ async function handleAction(event) {
     } else if (action === "result-mode") {
       state.fitting.spectrumMode = event.currentTarget.dataset.mode;
       clearPlotZooms(["main-components"]);
-      updateComponentViewUi();
+      render();
     } else if (action === "new-folder") {
       state.modal = "new-folder";
       render();
@@ -1615,11 +2317,91 @@ async function handleAction(event) {
       render();
     } else if (action === "edit-dataset") {
       state.pendingDatasetId = event.currentTarget.dataset.datasetId;
+      state.evidenceSelectionIds = [];
       state.datasetMenu = null;
       state.modal = "edit-dataset";
       render();
     } else if (action === "save-dataset-details") {
       saveDatasetDetails();
+    } else if (action === "toggle-evidence-view") {
+      persistDatasetDetails({ close: false, notify: false });
+      state.evidenceViewMode = state.evidenceViewMode === "map" ? "list" : "map";
+      render();
+    } else if (action === "connect-selected-evidence") {
+      persistDatasetDetails({ close: false, notify: false });
+      state.pendingConnectionId = null;
+      state.pendingConnectionTargetIds = state.evidenceSelectionIds.slice();
+      state.modal = "edit-connection";
+      render();
+    } else if (action === "open-evidence-import" || action === "open-literature-import") {
+      persistDatasetDetails({ close: false, notify: false });
+      state.evidenceImportMode = action === "open-literature-import" ? "literature" : "evidence";
+      state.evidenceImportResultIds = [];
+      state.modal = "evidence-import";
+      render();
+      await nextFrame();
+      document.getElementById("evidence-import-dropzone")?.focus();
+    } else if (action === "close-evidence-import") {
+      state.evidenceImportResultIds = [];
+      state.modal = "edit-dataset";
+      render();
+    } else if (action === "open-evidence-asset") {
+      event.preventDefault();
+      state.pendingEvidenceAssetId = event.currentTarget.dataset.assetId;
+      state.pendingEvidenceAssetDraft = null;
+      state.modal = "edit-evidence-asset";
+      render();
+    } else if (action === "open-evidence-entity") {
+      const entity = state.evidenceGraph.entities.find((item) => item.id === event.currentTarget.dataset.entityId);
+      if (entity?.datasetId) {
+        state.pendingDatasetId = entity.datasetId;
+        state.evidenceSelectionIds = [];
+        state.modal = "edit-dataset";
+      } else if (entity?.assetId) {
+        state.pendingEvidenceAssetId = entity.assetId;
+        state.pendingEvidenceAssetDraft = null;
+        state.modal = "edit-evidence-asset";
+      }
+      render();
+    } else if (action === "save-evidence-asset") {
+      saveEvidenceAsset();
+    } else if (action === "start-ai-from-connection") {
+      const connection = state.evidenceGraph.relationships.find((item) => item.id === event.currentTarget.dataset.connectionId);
+      if (!connection) throw new Error("The selected evidence connection is unavailable.");
+      const datasetIds = [connection.fromId, connection.toId].filter((id) => state.datasets.some((dataset) => dataset.id === id));
+      openAiInvestigation();
+      state.aiInvestigation.draft.scope = { kind: "connected-evidence", datasetIds };
+      const techniques = new Set(datasetIds.map((id) => state.datasets.find((dataset) => dataset.id === id)?.evidenceMetadata?.technique?.id).filter(Boolean));
+      state.aiInvestigation.draft.goal = techniques.size > 1 ? "multimodal-consistency" : "custom";
+      state.aiInvestigation.draft.context = `Investigate the reviewed connection ${connection.id} (${connection.type}). User rationale: ${connection.rationale}`;
+      render();
+    } else if (action === "add-evidence-connection") {
+      persistDatasetDetails({ close: false, notify: false });
+      state.pendingConnectionId = null;
+      state.pendingConnectionTargetIds = [];
+      state.modal = "edit-connection";
+      render();
+    } else if (action === "edit-evidence-connection") {
+      persistDatasetDetails({ close: false, notify: false });
+      state.pendingConnectionId = event.currentTarget.dataset.connectionId;
+      state.pendingConnectionTargetIds = [];
+      state.modal = "edit-connection";
+      render();
+    } else if (action === "remove-evidence-connection") {
+      const connectionId = event.currentTarget.dataset.connectionId;
+      state.evidenceGraph = removeEvidenceConnection(state.evidenceGraph, connectionId, state.datasets);
+      markDirty();
+      state.notice = { kind: "success", title: "Connection removed", message: "The relationship was removed; neither dataset nor source data was deleted." };
+      render();
+    } else if (action === "save-evidence-connection") {
+      saveEvidenceConnection();
+    } else if (action === "back-dataset-details") {
+      state.pendingConnectionId = null;
+      state.pendingConnectionTargetIds = [];
+      state.pendingEvidenceAssetId = null;
+      state.pendingEvidenceAssetDraft = null;
+      state.modal = "edit-dataset";
+      render();
     } else if (action === "move-dataset") {
       state.pendingDatasetId = event.currentTarget.dataset.datasetId;
       state.datasetMenu = null;
@@ -1650,6 +2432,90 @@ async function handleAction(event) {
   } catch (error) {
     showError(error);
   }
+}
+
+async function importEvidenceFiles(event) {
+  const files = Array.from(event.target.files ?? []);
+  if (files.length) await importEvidenceFileList(files);
+  event.target.value = "";
+}
+
+function handleEvidenceDragEnter(event) {
+  event.preventDefault();
+  event.currentTarget.classList.add("drag-active");
+}
+
+function handleEvidenceDragOver(event) {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  event.currentTarget.classList.add("drag-active");
+}
+
+function handleEvidenceDragLeave(event) {
+  if (event.currentTarget.contains(event.relatedTarget)) return;
+  event.currentTarget.classList.remove("drag-active");
+}
+
+async function handleEvidenceDrop(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove("drag-active");
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  if (!files.length) throw new Error("The dropped content contains no files or pictures.");
+  await importEvidenceFileList(files);
+}
+
+async function handleEvidencePaste(event) {
+  const files = clipboardEvidenceFiles(event.clipboardData);
+  if (!files.length) return;
+  event.preventDefault();
+  await importEvidenceFileList(files);
+}
+
+function clipboardEvidenceFiles(clipboardData) {
+  const direct = Array.from(clipboardData?.files ?? []);
+  const itemFiles = Array.from(clipboardData?.items ?? [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile?.())
+    .filter(Boolean);
+  const files = direct.length ? direct : itemFiles;
+  return files.map((file, index) => normalizePastedEvidenceFile(file, index));
+}
+
+function normalizePastedEvidenceFile(file, index) {
+  if (file.name && !/^image\.(png|jpe?g)$/i.test(file.name)) return file;
+  const extension = file.type === "image/jpeg" ? "jpg"
+    : file.type === "image/svg+xml" ? "svg"
+      : file.type === "image/webp" ? "webp"
+        : "png";
+  const name = `pasted-evidence-${new Date().toISOString().replace(/[:.]/g, "-")}-${index + 1}.${extension}`;
+  if (typeof File === "function") return new File([file], name, { type: file.type || `image/${extension}` });
+  return { name, type: file.type || `image/${extension}`, arrayBuffer: () => file.arrayBuffer() };
+}
+
+async function importEvidenceFileList(files) {
+  if (!files.length) return;
+  const importMode = state.evidenceImportMode;
+  await runJob(`Importing ${files.length} evidence item${files.length === 1 ? "" : "s"}`, "import-evidence", async () => {
+    const imported = [];
+    for (let index = 0; index < files.length; index += 1) {
+      state.job.detail = `${index + 1} of ${files.length}: ${files[index].name}`;
+      render();
+      await nextFrame();
+      imported.push(await createEvidenceAssetFromFile(files[index], {
+        ...evidenceImportOptions(files[index].name, files[index].type, importMode),
+        createdAt: new Date().toISOString(),
+      }));
+    }
+    state.evidenceAssets.push(...imported);
+    state.evidenceGraph = migrateEvidenceGraph(state.evidenceGraph, state.datasets, {
+      createdAt: new Date().toISOString(),
+      evidenceAssets: state.evidenceAssets,
+    });
+    state.evidenceSelectionIds = [...new Set([...state.evidenceSelectionIds, ...imported.map((asset) => asset.id)])];
+    state.evidenceImportResultIds = [...new Set([...state.evidenceImportResultIds, ...imported.map((asset) => asset.id)])];
+    markDirty();
+    return imported;
+  }, `${files.length} external evidence item${files.length === 1 ? " was" : "s were"} imported with exact source bytes and selected for connection.`);
 }
 
 async function importDataFiles(event, targetFolderId = null) {
@@ -1694,6 +2560,7 @@ async function importDataFiles(event, targetFolderId = null) {
         folderId: folder.id,
         projectLabel: file.name.replace(/\.[^.]+$/, ""),
         sampleNote: isUfs ? Parser.buildUfsDatasetNote(source) : "",
+        evidenceMetadata: normalizeDatasetEvidence(null, "fsta"),
         source,
         baseAnalysis,
         analysis: Parser.cloneAnalysisDataset(baseAnalysis),
@@ -1714,6 +2581,7 @@ async function importDataFiles(event, targetFolderId = null) {
     }
     const firstNewIndex = state.datasets.length;
     state.datasets.push(...datasets);
+    state.evidenceGraph = migrateEvidenceGraph(state.evidenceGraph, state.datasets);
     state.activeIndex = firstNewIndex;
     state.selectedTimeIndex = Math.floor(activeDataset().analysis.timeAxis.length * 0.25);
     state.selectedWavelengthIndex = Math.floor(activeDataset().analysis.spectralAxis.length * 0.5);
@@ -1834,6 +2702,12 @@ async function runFitActive() {
       irfFwhm: state.fitting.irfFwhm,
       lifetimes: configuration.lifetimes,
       fixedLifetimes: configuration.fixedLifetimes,
+      preZeroModel: state.fitting.preZeroModel,
+      coherentArtifactOrder: state.fitting.coherentArtifactOrder,
+      weighting: state.fitting.weighting,
+      optimizerStarts: state.fitting.optimizerStarts,
+      maximumIterations: state.fitting.maximumIterations,
+      rangeSensitivity: state.fitting.rangeSensitivity,
     });
     state.fitting.lifetimeValues = dataset.fit.lifetimes.map((value) => conciseInputNumber(value));
     state.fitting.fixedLifetimes = dataset.fit.fixedLifetimes.slice();
@@ -1869,6 +2743,12 @@ async function runBatchFit() {
         irfFwhm: state.fitting.irfFwhm,
         lifetimes: configuration.lifetimes,
         fixedLifetimes: configuration.fixedLifetimes,
+        preZeroModel: state.fitting.preZeroModel,
+        coherentArtifactOrder: state.fitting.coherentArtifactOrder,
+        weighting: state.fitting.weighting,
+        optimizerStarts: state.fitting.optimizerStarts,
+        maximumIterations: state.fitting.maximumIterations,
+        rangeSensitivity: state.fitting.rangeSensitivity,
       });
     }
     const activeFit = activeDataset()?.fit;
@@ -1928,6 +2808,7 @@ function serializeProject() {
       derivedDatasetPolicy: "merged datasets are materialized derivatives with immutable parent sources, explicit lineage, time resampling, retained wavelength segments, and no hidden smoothing",
       folderPolicy: "one-level project dataset folders with per-folder range and treatment state",
       archivePolicy: "original source data and treated Float64 matrix stored once; derived fit matrices reconstructed on open",
+      externalEvidencePolicy: "external evidence retains exact imported bytes; previews and graph relationships are derived, typed, and authored",
     },
     state: {
       activeIndex: state.activeIndex,
@@ -1935,15 +2816,27 @@ function serializeProject() {
       selectedWavelengthIndex: state.selectedWavelengthIndex,
       compare: state.compare,
       fitting: state.fitting,
+      featureFinding: state.featureFinding,
     },
     folders: state.folders,
     datasets: state.datasets,
+    evidenceAssets: state.evidenceAssets,
+    evidenceGraph: migrateEvidenceGraph(state.evidenceGraph, state.datasets, {
+      createdAt: state.project.lastSavedAt ?? null,
+      evidenceAssets: state.evidenceAssets,
+    }),
   };
 }
 
 function loadProject(project) {
   if (!project?.schema?.startsWith("specflowlab")) throw new Error("Unsupported SpecFlowLab project.");
+  clearChartCaptures();
   state.datasets = (project.datasets ?? []).map(reviveDataset);
+  state.evidenceAssets = (project.evidenceAssets ?? []).map((asset) => normalizeEvidenceAsset(asset));
+  state.evidenceGraph = migrateEvidenceGraph(project.evidenceGraph, state.datasets, {
+    createdAt: project.savedAt ?? null,
+    evidenceAssets: state.evidenceAssets,
+  });
   state.folders = reviveFolders(project.folders, project.state);
   assignLegacyFolderMembership();
   state.activeIndex = project.state?.activeIndex ?? 0;
@@ -1951,6 +2844,7 @@ function loadProject(project) {
   state.selectedWavelengthIndex = project.state?.selectedWavelengthIndex ?? 0;
   state.compare = { ...state.compare, ...(project.state?.compare ?? {}) };
   state.fitting = { ...state.fitting, ...(project.state?.fitting ?? {}) };
+  state.featureFinding = { ...state.featureFinding, ...(project.state?.featureFinding ?? {}) };
   state.merge = { selectedIds: [], plan: null, draft: null };
   state.compare.componentMode = "EAS";
   state.fitting.spectrumMode = "EAS";
@@ -1962,6 +2856,10 @@ function loadProject(project) {
   state.zoomSelectionKey = null;
   closeContextMenus();
   state.datasetClipboard = null;
+  state.evidenceSelectionIds = [];
+  state.pendingConnectionTargetIds = [];
+  state.pendingEvidenceAssetId = null;
+  state.pendingEvidenceAssetDraft = null;
 }
 
 function reviveDataset(dataset) {
@@ -1969,6 +2867,7 @@ function reviveDataset(dataset) {
     ...dataset,
     projectLabel: dataset.projectLabel || dataset.source?.fileName?.replace(/\.[^.]+$/, "") || "Dataset",
     sampleNote: dataset.sampleNote || "",
+    evidenceMetadata: normalizeDatasetEvidence(dataset.evidenceMetadata, dataset.kind === "merged" ? "fsta" : "fsta"),
     source: reviveMatrixObject(dataset.source),
     baseAnalysis: reviveMatrixObject(dataset.baseAnalysis),
     analysis: reviveMatrixObject(dataset.analysis),
@@ -2030,6 +2929,9 @@ function reviveFit(fit) {
     fittedMatrix: reviveMatrix(fit.fittedMatrix),
     residualMatrix: reviveMatrix(fit.residualMatrix),
     amplitudes: reviveMatrix(fit.amplitudes),
+    preZeroCoefficients: reviveMatrix(fit.preZeroCoefficients),
+    artifactCoefficients: reviveMatrix(fit.artifactCoefficients),
+    artifactAmplitudes: reviveArray(fit.artifactAmplitudes),
     dasSpectra: reviveSpectra(fit.dasSpectra),
     easSpectra: reviveSpectra(fit.easSpectra),
   };
@@ -2095,6 +2997,198 @@ async function exportMarkdown() {
   }, "AI-ready Markdown exported to the selected path.");
 }
 
+function openAiInvestigation() {
+  refreshChartCaptureStaleness();
+  const project = aiInvestigationProjectSnapshot();
+  const scope = defaultAiScope(project);
+  state.aiInvestigation = {
+    ...state.aiInvestigation,
+    stage: "builder",
+    preview: null,
+    draft: {
+      schema: AI_INVESTIGATION_SPEC_SCHEMA,
+      goal: folderDatasets(activeFolder()?.id).length > 1 ? "compare" : "custom",
+      question: "",
+      context: "",
+      desiredOutput: "",
+      scope: { ...scope, datasetIds: state.datasets.map((dataset) => dataset.id) },
+      evidenceProfile: "diagnostic",
+      userTimesPs: [],
+      userWavelengthsNm: [],
+      captureIds: state.chartCaptures.map((capture) => capture.id),
+      include: {
+        sampleNotes: true,
+        sourceFileNames: true,
+        instrumentMetadata: true,
+        rawSources: false,
+        fullTreatedMatrices: false,
+        fullResidualMatrices: false,
+      },
+      privacy: {
+        redactAbsolutePaths: true,
+        redactOperatorNames: true,
+        redactComputerNames: true,
+      },
+    },
+  };
+  state.modal = "ai-investigation";
+  render();
+}
+
+function syncAiDraftFromDom() {
+  const draft = state.aiInvestigation.draft;
+  if (!draft) return;
+  const textValues = {
+    question: document.getElementById("ai-question")?.value,
+    context: document.getElementById("ai-context")?.value,
+    desiredOutput: document.getElementById("ai-desired-output")?.value,
+  };
+  Object.entries(textValues).forEach(([key, value]) => {
+    if (value !== undefined) draft[key] = value;
+  });
+  const goal = document.getElementById("ai-goal")?.value;
+  if (goal) draft.goal = goal;
+  const scope = document.querySelector('input[name="ai-scope"]:checked')?.value;
+  if (scope) draft.scope.kind = scope;
+  const profile = document.querySelector('input[name="ai-profile"]:checked')?.value;
+  if (profile) draft.evidenceProfile = profile;
+  draft.captureIds = Array.from(document.querySelectorAll(".ai-capture-check:checked"), (input) => input.dataset.captureId);
+  const bindings = [
+    ["ai-include-notes", draft.include, "sampleNotes"],
+    ["ai-include-filenames", draft.include, "sourceFileNames"],
+    ["ai-include-metadata", draft.include, "instrumentMetadata"],
+    ["ai-include-raw", draft.include, "rawSources"],
+    ["ai-include-matrices", draft.include, "fullTreatedMatrices"],
+    ["ai-redact-paths", draft.privacy, "redactAbsolutePaths"],
+    ["ai-redact-operators", draft.privacy, "redactOperatorNames"],
+    ["ai-redact-computers", draft.privacy, "redactComputerNames"],
+  ];
+  bindings.forEach(([id, target, key]) => {
+    const input = document.getElementById(id);
+    if (input) target[key] = input.checked;
+  });
+  state.aiInvestigation.preview = null;
+}
+
+async function reviewAiInvestigation() {
+  syncAiDraftFromDom();
+  const preview = await inspectAiInvestigation(
+    aiInvestigationProjectSnapshot(),
+    state.aiInvestigation.draft,
+    { investigationId: "pending-export", createdAt: "generated-on-export" },
+  );
+  if (preview.errors.length) throw new Error(preview.errors.join(" "));
+  state.aiInvestigation.preview = preview;
+  state.aiInvestigation.stage = "review";
+  render();
+}
+
+async function exportAiInvestigationPackage() {
+  const draft = state.aiInvestigation.draft;
+  await runJob("Building AI investigation package", "export-ai-investigation", async () => {
+    const result = await createAiInvestigationPackage(aiInvestigationProjectSnapshot(), draft, {
+      selections: Object.fromEntries(state.datasets.map((dataset) => [dataset.id, {
+        timeIndex: dataset.id === activeDataset()?.id ? state.selectedTimeIndex : 0,
+        wavelengthIndex: dataset.id === activeDataset()?.id ? state.selectedWavelengthIndex : 0,
+      }])),
+    });
+    const path = await saveBinaryWithDialog(
+      result.bytes,
+      aiInvestigationDefaultName(draft.question),
+      "ai-investigation",
+      "application/zip",
+    );
+    if (!path) return false;
+    state.aiInvestigation.lastExport = {
+      investigationId: result.manifest.investigationId,
+      goalLabel: AI_INVESTIGATION_GOALS[draft.goal]?.label ?? draft.goal,
+      path,
+    };
+    state.modal = null;
+    return true;
+  }, "Local .sflai package saved with a concise brief, provider-neutral prompt, evidence files, checksums, omissions, and limitations.");
+}
+
+async function copyAiInvestigationPrompt() {
+  const prompt = state.aiInvestigation.preview?.prompt;
+  if (!prompt) throw new Error("Review the investigation before copying its prompt.");
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(prompt);
+  } else {
+    const textarea = document.createElement("textarea");
+    textarea.value = prompt;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("The prompt could not be copied; save the brief or package instead.");
+  }
+  state.notice = { kind: "success", title: "Prompt copied", message: "The provider-neutral evidence-citation prompt is on the clipboard." };
+  render();
+}
+
+async function saveAiInvestigationBrief() {
+  const brief = state.aiInvestigation.preview?.brief;
+  if (!brief) throw new Error("Review the investigation before saving its brief.");
+  await runJob("Saving investigation brief", "export-ai-brief", () => saveTextWithDialog(
+    brief,
+    aiInvestigationDefaultName(state.aiInvestigation.draft.question).replace(/\.sflai$/i, ".md"),
+    "markdown",
+    "text/markdown",
+  ), "Concise AI investigation brief saved without an embedded project JSON dump.");
+}
+
+function aiInvestigationProjectSnapshot() {
+  return {
+    ...serializeProject(),
+    chartCaptures: state.chartCaptures.map(({ previewUrl: _previewUrl, ...capture }) => capture),
+    activeDatasetId: activeDataset()?.id ?? null,
+    activeIndex: state.activeIndex,
+    selectedTimeIndex: state.selectedTimeIndex,
+    selectedWavelengthIndex: state.selectedWavelengthIndex,
+  };
+}
+
+function aiInvestigationDefaultName(question) {
+  const stem = String(question || "investigation")
+    .normalize("NFKD")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .toLowerCase();
+  return `SpecFlowLab-${stem || "investigation"}.sflai`;
+}
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1024) return `${Math.max(0, Math.round(bytes || 0))} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function titleCase(value) {
+  return String(value ?? "")
+    .replaceAll("-", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function conditionLabel(field) {
+  return ({
+    solvent: "Solvent / matrix",
+    concentration: "Concentration",
+    temperature: "Temperature",
+    atmosphere: "Atmosphere",
+    ph: "pH",
+    excitationWavelength: "Excitation wavelength",
+    fluence: "Fluence / power",
+    polarization: "Polarization",
+    repetitionRate: "Repetition rate",
+    acquisitionDate: "Acquisition date",
+    instrument: "Instrument",
+  })[field] ?? titleCase(field);
+}
+
 async function selectOriginInstallation() {
   try {
     const result = await invoke("select_origin_installation");
@@ -2143,7 +3237,7 @@ async function createInOrigin() {
       + `then saved a ${formatBytes(result.outputBytes)} ${formatLabel} project at ${result.outputPath}.`
       + `${omittedMsg} `
       + `The exact bridge input remains at ${result.bundlePath}. `
-      + `${result.warningCount ? `${result.warningCount} plot warning(s) were recorded. ` : ""}`
+      + `${result.warnings?.length ? `${result.warnings.length} warning(s): ${result.warnings.join(" ")} ` : ""}`
       + `Diagnostics: ${result.statusPath}, ${result.logPath}, and ${result.launchDiagnosticPath}.`
     );
   });
@@ -2181,6 +3275,171 @@ async function exportDisplayedPlotTxt(plotKey) {
   }, "The numerical data represented by the displayed plot were exported.");
 }
 
+async function capturePlotToTray(plotKey) {
+  await nextFrame();
+  const canvas = findVisiblePlotCanvas(plotKey);
+  if (!canvas) throw new Error("The selected chart is not currently visible.");
+  const dataText = buildDisplayedPlotText(plotKey);
+  const blob = await canvasToBlob(canvas, "image/png");
+  const figureBytes = new Uint8Array(await blob.arrayBuffer());
+  const datasetIds = chartDatasetIds(plotKey);
+  if (!datasetIds.length) throw new Error("The selected chart has no dataset provenance.");
+  const meta = expandedPlotMeta(plotKey);
+  const capture = createChartCapture({
+    title: meta.subtitle ? `${meta.title} · ${meta.subtitle}` : meta.title,
+    plotKey,
+    datasetIds,
+    datasetLabels: datasetIds.map((id) => datasetDisplayName(state.datasets.find((dataset) => dataset.id === id))).filter(Boolean),
+    sourceFingerprint: chartSourceFingerprint(plotKey, datasetIds),
+    view: chartViewState(plotKey),
+    figure: {
+      bytes: figureBytes,
+      width: canvas.width,
+      height: canvas.height,
+      sha256: await sha256HexBytes(figureBytes),
+    },
+    data: {
+      text: dataText,
+      sha256: await sha256HexBytes(new TextEncoder().encode(dataText)),
+      representation: matrixExportForPlot(plotKey)
+        ? "Displayed physical bounds and numerical matrix cells; full treated matrices remain separately opt-in"
+        : "Exact numerical series represented by the displayed chart and current physical zoom",
+    },
+    provenance: [{
+      action: "capture-displayed-chart",
+      appVersion: APP_VERSION,
+      projectPathIncluded: false,
+      temporarySessionEvidence: true,
+    }],
+  });
+  capture.previewUrl = URL.createObjectURL(blob);
+  state.chartCaptures.push(capture);
+  state.captureMode = false;
+  state.captureTrayOpen = true;
+  state.notice = { kind: "success", title: "Chart added to Evidence Tray", message: "The rendered chart, displayed numerical values, and view state were frozen together for this session." };
+  render();
+}
+
+function removeChartCapture(captureId) {
+  const index = state.chartCaptures.findIndex((capture) => capture.id === captureId);
+  if (index < 0) return;
+  const [capture] = state.chartCaptures.splice(index, 1);
+  if (capture.previewUrl) URL.revokeObjectURL(capture.previewUrl);
+  if (state.aiInvestigation.draft?.captureIds) {
+    state.aiInvestigation.draft.captureIds = state.aiInvestigation.draft.captureIds.filter((id) => id !== captureId);
+    state.aiInvestigation.preview = null;
+  }
+}
+
+function clearChartCaptures() {
+  state.chartCaptures.forEach((capture) => {
+    if (capture.previewUrl) URL.revokeObjectURL(capture.previewUrl);
+  });
+  state.chartCaptures = [];
+  state.captureMode = false;
+  if (state.aiInvestigation.draft) state.aiInvestigation.draft.captureIds = [];
+  state.aiInvestigation.preview = null;
+}
+
+function refreshChartCaptureStaleness() {
+  state.chartCaptures.forEach((capture) => {
+    if (capture.stale) return;
+    if (capture.sourceFingerprint !== chartSourceFingerprint(capture.plotKey, capture.datasetIds)) capture.stale = true;
+  });
+}
+
+function chartDatasetIds(plotKey) {
+  if (plotKey.startsWith("compare-")) return compareDatasets().map((dataset) => dataset.id);
+  return activeDataset()?.id ? [activeDataset().id] : [];
+}
+
+function chartViewState(plotKey) {
+  const dataset = activeDataset();
+  const analysis = dataset?.analysis;
+  return {
+    plotKey,
+    zoom: state.plotZooms[plotKey] ? { ...state.plotZooms[plotKey] } : null,
+    selectedTimeIndex: state.selectedTimeIndex,
+    selectedTimePs: analysis?.timeAxis?.[state.selectedTimeIndex] ?? null,
+    selectedWavelengthIndex: state.selectedWavelengthIndex,
+    selectedWavelengthNm: analysis?.spectralAxis?.[state.selectedWavelengthIndex] ?? null,
+    componentMode: plotKey.startsWith("compare-") ? state.compare.componentMode : state.fitting.spectrumMode,
+    normalization: plotKey.startsWith("compare-") ? state.compare.normalize : state.fitting.normalize,
+    comparison: plotKey.startsWith("compare-") ? {
+      timeIndex: state.compare.timeIndex,
+      wavelengthIndex: state.compare.wavelengthIndex,
+      lineWidth: state.compare.lineWidth,
+      lineStyle: state.compare.lineStyle,
+    } : null,
+  };
+}
+
+function chartSourceFingerprint(plotKey, datasetIds) {
+  const snapshot = {
+    plotKey,
+    datasets: datasetIds.map((id) => {
+      const dataset = state.datasets.find((item) => item.id === id);
+      const analysis = dataset?.analysis;
+      const matrix = analysis?.matrix ?? [];
+      const rowIndexes = uniqueIndexes(matrix.length);
+      const columnIndexes = uniqueIndexes(analysis?.timeAxis?.length ?? 0);
+      return {
+        id,
+        spectralAxis: axisFingerprint(analysis?.spectralAxis),
+        timeAxis: axisFingerprint(analysis?.timeAxis),
+        matrixCheckpoints: rowIndexes.flatMap((rowIndex) => columnIndexes.map((columnIndex) => matrix[rowIndex]?.[columnIndex] ?? null)),
+        provenance: analysis?.provenance ?? analysis?.history ?? null,
+        fit: dataset?.fit ? {
+          lifetimes: dataset.fit.lifetimes,
+          irfLimited: dataset.fit.irfLimited,
+          rmse: dataset.fit.rmse,
+          explainedVariance: dataset.fit.explainedVariance,
+          eas: spectraFingerprint(dataset.fit.easSpectra),
+          das: spectraFingerprint(dataset.fit.dasSpectra),
+        } : null,
+      };
+    }),
+  };
+  return fnv1a(JSON.stringify(snapshot));
+}
+
+function spectraFingerprint(spectra = []) {
+  return spectra.map((spectrum) => ({
+    label: spectrum.label,
+    lifetime: spectrum.lifetime,
+    x: axisFingerprint(spectrum.x),
+    y: sampledValues(spectrum.y),
+  }));
+}
+
+function axisFingerprint(values = []) {
+  return { length: values.length, samples: sampledValues(values) };
+}
+
+function sampledValues(values = []) {
+  return uniqueIndexes(values.length).map((index) => Number.isNaN(values[index]) ? "NaN" : values[index]);
+}
+
+function uniqueIndexes(length) {
+  if (!length) return [];
+  return [...new Set([0, Math.floor((length - 1) / 2), length - 1])];
+}
+
+function fnv1a(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+async function sha256HexBytes(bytes) {
+  if (!globalThis.crypto?.subtle) return null;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
 function findVisiblePlotCanvas(plotKey) {
   if (state.expandedPlot === plotKey) {
     const expanded = document.getElementById("expanded-canvas");
@@ -2216,6 +3475,21 @@ function buildDisplayedPlotText(plotKey) {
 function matrixExportForPlot(plotKey) {
   const dataset = activeDataset();
   if (!dataset) return null;
+  if (plotKey === "feature-time") {
+    const compressed = buildFeatureTimeMap(dataset, featureMonitorFor(dataset));
+    if (compressed.status !== "live") return null;
+    return {
+      columns: ["Feature", "Candidate", "Wavelength min (nm)", "Wavelength max (nm)", "Time (ps)", "Mean DeltaOD"],
+      rows: compressed.features.flatMap((feature) => compressed.timeAxis.map((time, timeIndex) => [
+        feature.featureCode,
+        feature.candidateType,
+        feature.wavelengthMin,
+        feature.wavelengthMax,
+        time,
+        feature.trace[timeIndex],
+      ])),
+    };
+  }
   const analysis = plotKey === "fit-residual" && dataset.fit?.residualMatrix
     ? { ...dataset.analysis, matrix: dataset.fit.residualMatrix }
     : plotKey === "heatmap" ? dataset.analysis : null;
@@ -2245,16 +3519,16 @@ function lineExportForPlot(plotKey) {
   if (plotKey === "compare-components") return comparisonComponentSeriesData();
   if (plotKey === "main-components") {
     return componentSeriesData(
-      visibleComponentSpectra(dataset, state.fitting.spectrumMode, state.fitting.hideIrfLimited),
+      visibleComponentSpectra(dataset, state.fitting.spectrumMode),
       state.fitting.normalize,
       `${state.fitting.spectrumMode} DeltaOD`,
     );
   }
   if (plotKey === "modal-eas") {
-    return componentSeriesData(visibleComponentSpectra(dataset, "EAS", state.fitting.hideIrfLimited), "none", "EAS DeltaOD");
+    return componentSeriesData(visibleComponentSpectra(dataset, "EAS"), "none", "EAS DeltaOD");
   }
   if (plotKey === "modal-das") {
-    return componentSeriesData(visibleComponentSpectra(dataset, "DAS", state.fitting.hideIrfLimited), "none", "DAS DeltaOD");
+    return componentSeriesData(visibleComponentSpectra(dataset, "DAS"), "none", "DAS DeltaOD");
   }
   return null;
 }
@@ -2331,7 +3605,7 @@ function comparisonComponentSeriesData() {
   compareDatasets().forEach((dataset, datasetIndex) => {
     const style = ensureDatasetStyle(dataset, datasetIndex);
     (dataset.fit?.[spectraKey] ?? []).forEach((spectrum, componentIndex) => {
-      if (state.compare.hideIrfLimited && dataset.fit?.irfLimited?.[componentIndex]) return;
+      if (dataset.fit?.irfLimited?.[componentIndex]) return;
       const points = normalizePoints(
         spectrum.x.map((x, pointIndex) => ({ x, y: spectrum.y[pointIndex] })),
         state.compare.normalize,
@@ -2528,6 +3802,7 @@ function createMergedDatasetFromDraft() {
     kind: "merged",
     projectLabel: uniqueDatasetLabel(outputName),
     sampleNote: buildMergedDatasetNote(result.merge),
+    evidenceMetadata: normalizeDatasetEvidence(null, "fsta"),
     source,
     baseAnalysis,
     analysis,
@@ -2535,6 +3810,7 @@ function createMergedDatasetFromDraft() {
     fit: null,
   };
   state.datasets.push(dataset);
+  state.evidenceGraph = migrateEvidenceGraph(state.evidenceGraph, state.datasets);
   state.activeIndex = state.datasets.length - 1;
   state.selectedTimeIndex = clamp(draft.previewTimeIndex, 0, analysis.timeAxis.length - 1);
   state.selectedWavelengthIndex = Math.floor(analysis.spectralAxis.length / 2);
@@ -2607,31 +3883,20 @@ function syncComparisonSelectionControls() {
 
 function updateComponentViewUi() {
   const dataset = activeDataset();
-  const hiddenCount = state.fitting.hideIrfLimited && dataset?.fit
-    ? dataset.fit.irfLimited?.filter(Boolean).length || 0
-    : 0;
+  const hiddenCount = irfLimitedCount(dataset);
   document.querySelectorAll("[data-action=\"result-mode\"]").forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === state.fitting.spectrumMode);
   });
   const copy = document.getElementById("main-component-mode-copy");
   if (copy) {
-    copy.textContent = hiddenCount ? `${hiddenCount} hidden` : "";
+    copy.textContent = hiddenCount ? `${hiddenCount} IRF-limited excluded` : "";
   }
   const canvas = document.getElementById("main-components");
   if (canvas) canvas.setAttribute("aria-label", `${state.fitting.spectrumMode} component spectra`);
-  const resultHide = document.getElementById("result-hide-irf");
-  const fitHide = document.getElementById("fit-hide-irf");
-  const expandedHide = state.expandedPlot === "compare-components" ? null : document.getElementById("expanded-hide-irf");
-  [resultHide, fitHide, expandedHide].filter(Boolean).forEach((control) => {
-    const limited = irfLimitedCount(dataset);
-    control.checked = state.fitting.hideIrfLimited && Boolean(limited);
-    control.disabled = !limited;
-  });
   paintCanvases();
 }
 
 function comparisonComponentCopy() {
-  if (!state.compare.hideIrfLimited) return "";
   const hidden = compareDatasets().reduce(
     (count, dataset) => count + (dataset.fit?.irfLimited?.filter(Boolean).length || 0),
     0,
@@ -2642,15 +3907,8 @@ function comparisonComponentCopy() {
 function updateComparisonComponentUi() {
   const heading = document.getElementById("compare-component-heading");
   const copy = document.getElementById("compare-component-copy");
-  const hide = document.getElementById("compare-hide-irf");
-  const expandedHide = state.expandedPlot === "compare-components" ? document.getElementById("expanded-hide-irf") : null;
   if (heading) heading.textContent = `${state.compare.componentMode} Comparison`;
   if (copy) copy.textContent = comparisonComponentCopy();
-  [hide, expandedHide].filter(Boolean).forEach((control) => {
-    const limited = compareDatasets().some((dataset) => irfLimitedCount(dataset));
-    control.checked = state.compare.hideIrfLimited && limited;
-    control.disabled = !limited;
-  });
   paintComparisonComponents(document.getElementById("compare-components"));
   paintExpandedPlot();
 }
@@ -2663,11 +3921,12 @@ function paintCanvases() {
   paintKinetics(document.getElementById("kinetics"), dataset);
   paintComponentSpectra(
     document.getElementById("main-components"),
-    visibleComponentSpectra(dataset, state.fitting.spectrumMode, state.fitting.hideIrfLimited),
-    { normalize: state.fitting.normalize, xBreaks: dataset.analysis.wavelengthBreaks },
+    visibleComponentSpectra(dataset, state.fitting.spectrumMode),
+    { normalize: state.fitting.normalize, xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, state.fitting.spectrumMode).candidates },
   );
-  paintComponentSpectra(document.getElementById("modal-eas"), visibleComponentSpectra(dataset, "EAS", state.fitting.hideIrfLimited), { xBreaks: dataset.analysis.wavelengthBreaks });
-  paintComponentSpectra(document.getElementById("modal-das"), visibleComponentSpectra(dataset, "DAS", state.fitting.hideIrfLimited), { xBreaks: dataset.analysis.wavelengthBreaks });
+  paintComponentSpectra(document.getElementById("modal-eas"), visibleComponentSpectra(dataset, "EAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "EAS").candidates });
+  paintComponentSpectra(document.getElementById("modal-das"), visibleComponentSpectra(dataset, "DAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "DAS").candidates });
+  paintFeatureTimeMap(document.getElementById("feature-time"), buildFeatureTimeMap(dataset, featureMonitorFor(dataset)));
   if (dataset.fit?.residualMatrix) {
     paintHeatmap(document.getElementById("fit-residual"), {
       ...dataset.analysis,
@@ -2886,7 +4145,7 @@ function paintComparisonComponents(canvas) {
     const style = ensureDatasetStyle(dataset, datasetIndex);
     let retained = 0;
     (dataset.fit?.[spectraKey] ?? []).forEach((spectrum, componentIndex) => {
-      if (state.compare.hideIrfLimited && dataset.fit?.irfLimited?.[componentIndex]) return;
+      if (dataset.fit?.irfLimited?.[componentIndex]) return;
       const points = spectrum.x.map((x, pointIndex) => ({ x, y: spectrum.y[pointIndex] }));
       series.push({
         points: normalizePoints(points, state.compare.normalize),
@@ -2942,6 +4201,117 @@ function paintComponentSpectra(canvas, spectra, options = {}) {
     bottomPadding: 72,
     xLabelOffset: 30,
   });
+  drawFeatureAnnotations(canvas, spectra, options.features ?? [], options.normalize);
+}
+
+function drawFeatureAnnotations(canvas, spectra, features, normalizeMode) {
+  const geometry = plotGeometry.get(canvas);
+  if (!geometry || !features.length) return;
+  const { ctx } = setupCanvas(canvas);
+  const visibleComponents = new Set(spectra.map((spectrum, index) => spectrum.componentIndex ?? index));
+  const retained = features.filter((feature) => visibleComponents.has(feature.componentIndex)).slice(0, 10);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(geometry.plot.left, geometry.plot.top, geometry.plot.right - geometry.plot.left, geometry.plot.bottom - geometry.plot.top);
+  ctx.clip();
+  retained.forEach((feature, labelIndex) => {
+    const x0 = scale(feature.wavelengthMin, geometry.xExtent, [geometry.plot.left, geometry.plot.right]);
+    const x1 = scale(feature.wavelengthMax, geometry.xExtent, [geometry.plot.left, geometry.plot.right]);
+    if (x1 < geometry.plot.left || x0 > geometry.plot.right) return;
+    const color = feature.sign === "positive" ? "#b96332" : "#7552a6";
+    ctx.fillStyle = feature.sign === "positive" ? "rgba(185, 99, 50, 0.055)" : "rgba(117, 82, 166, 0.055)";
+    ctx.fillRect(Math.max(x0, geometry.plot.left), geometry.plot.top, Math.max(2, Math.min(x1, geometry.plot.right) - Math.max(x0, geometry.plot.left)), geometry.plot.bottom - geometry.plot.top);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.5;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(Math.max(x0, geometry.plot.left), geometry.plot.top, Math.max(2, Math.min(x1, geometry.plot.right) - Math.max(x0, geometry.plot.left)), geometry.plot.bottom - geometry.plot.top);
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+
+    const spectrum = spectra.find((item, index) => (item.componentIndex ?? index) === feature.componentIndex);
+    if (!spectrum) return;
+    const normalized = normalizePoints(spectrum.x.map((x, index) => ({ x, y: spectrum.y[index] })), normalizeMode);
+    const nearest = normalized[nearestIndex(normalized.map((point) => point.x), feature.wavelengthCenter)];
+    const anchorX = scale(feature.wavelengthCenter, geometry.xExtent, [geometry.plot.left, geometry.plot.right]);
+    const anchorY = Number.isFinite(nearest?.y) ? scale(nearest.y, geometry.yExtent, [geometry.plot.bottom, geometry.plot.top]) : geometry.plot.top + 18;
+    const label = `${feature.featureCode} ${shortFeatureType(feature.candidateType)}`;
+    ctx.font = "700 10px system-ui, sans-serif";
+    const labelWidth = Math.min(78, Math.max(45, ctx.measureText(label).width + 10));
+    const labelX = clamp(anchorX - labelWidth / 2, geometry.plot.left + 2, geometry.plot.right - labelWidth - 2);
+    const verticalShift = (labelIndex % 3) * 18;
+    const labelY = clamp(anchorY - 22 - verticalShift, geometry.plot.top + 3, geometry.plot.bottom - 18);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+    ctx.fillRect(labelX, labelY, labelWidth, 16);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(labelX, labelY, labelWidth, 16);
+    ctx.fillStyle = color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, labelX + labelWidth / 2, labelY + 8, labelWidth - 6);
+  });
+  ctx.restore();
+}
+
+function paintFeatureTimeMap(canvas, compressed) {
+  if (!canvas) return;
+  if (compressed?.status !== "live" || !compressed.features.length) {
+    drawEmptyCanvas(canvas, compressed?.limitations?.[0] ?? uiText("No live feature regions are available."));
+    return;
+  }
+  const { ctx, width, height } = setupCanvas(canvas);
+  ctx.fillStyle = "#fbfcfc";
+  ctx.fillRect(0, 0, width, height);
+  const plot = {
+    left: Math.max(142, Math.round(width * 0.18)),
+    right: Math.max(230, Math.round(width * 0.975)),
+    top: 14,
+    bottom: height - 50,
+  };
+  const timeExtent = [compressed.timeAxis[0], compressed.timeAxis.at(-1)];
+  const timeTransform = makeTimeTransform(timeExtent);
+  const xCenters = compressed.timeAxis.map((time) => scale(timeTransform.toFraction(time), [0, 1], [plot.left, plot.right]));
+  const xBounds = cellBounds(xCenters, plot.left, plot.right);
+  const rowHeight = (plot.bottom - plot.top) / compressed.features.length;
+  const finite = compressed.matrix.flat().filter(Number.isFinite).map(Math.abs).sort((a, b) => a - b);
+  const limit = finite[Math.floor(finite.length * 0.985)] || 1;
+  compressed.features.forEach((feature, rowIndex) => {
+    const y0 = plot.top + rowIndex * rowHeight;
+    const y1 = plot.top + (rowIndex + 1) * rowHeight;
+    feature.trace.forEach((value, timeIndex) => {
+      ctx.fillStyle = Number.isFinite(value) ? diverging(value / limit) : "#d9e0e2";
+      ctx.fillRect(xBounds[timeIndex], y0, Math.max(1, xBounds[timeIndex + 1] - xBounds[timeIndex] + 0.5), Math.max(1, y1 - y0));
+    });
+    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+    ctx.beginPath();
+    ctx.moveTo(plot.left, y1);
+    ctx.lineTo(plot.right, y1);
+    ctx.stroke();
+    ctx.fillStyle = feature.candidateType === "ESA candidate" ? "#9b4d25" : "#654391";
+    ctx.font = "700 11px system-ui, sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${feature.featureCode} ${shortFeatureType(feature.candidateType)}`, plot.left - 9, (y0 + y1) / 2 - 6);
+    ctx.fillStyle = "#718084";
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.fillText(`${formatWavelength(feature.wavelengthMin)}–${formatWavelength(feature.wavelengthMax)} nm`, plot.left - 9, (y0 + y1) / 2 + 7);
+  });
+  ctx.strokeStyle = "#bfcacc";
+  ctx.strokeRect(plot.left, plot.top, plot.right - plot.left, plot.bottom - plot.top);
+  ctx.fillStyle = "#687579";
+  ctx.font = "12px system-ui, sans-serif";
+  makeTimeTickSet(timeExtent[0], timeExtent[1]).major.forEach((tick) => {
+    const x = scale(timeTransform.toFraction(tick), [0, 1], [plot.left, plot.right]);
+    ctx.beginPath();
+    ctx.moveTo(x, plot.bottom);
+    ctx.lineTo(x, plot.bottom + 6);
+    ctx.stroke();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(`${Math.round(tick)}`, x, plot.bottom + 9);
+  });
+  ctx.font = "600 13px system-ui, sans-serif";
+  ctx.fillText(uiText("Time (ps)"), (plot.left + plot.right) / 2, plot.bottom + 38);
 }
 
 function paintExpandedPlot() {
@@ -2955,14 +4325,17 @@ function paintExpandedPlot() {
   } else if (state.expandedPlot === "kinetics") {
     paintKinetics(canvas, dataset);
   } else if (state.expandedPlot === "main-components") {
-    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, state.fitting.spectrumMode, state.fitting.hideIrfLimited), {
+    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, state.fitting.spectrumMode), {
       normalize: state.fitting.normalize,
       xBreaks: dataset.analysis.wavelengthBreaks,
+      features: featureMonitorFor(dataset, state.fitting.spectrumMode).candidates,
     });
   } else if (state.expandedPlot === "modal-eas") {
-    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, "EAS", state.fitting.hideIrfLimited), { xBreaks: dataset.analysis.wavelengthBreaks });
+    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, "EAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "EAS").candidates });
   } else if (state.expandedPlot === "modal-das") {
-    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, "DAS", state.fitting.hideIrfLimited), { xBreaks: dataset.analysis.wavelengthBreaks });
+    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, "DAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "DAS").candidates });
+  } else if (state.expandedPlot === "feature-time") {
+    paintFeatureTimeMap(canvas, buildFeatureTimeMap(dataset, featureMonitorFor(dataset)));
   } else if (state.expandedPlot === "fit-residual" && dataset.fit?.residualMatrix) {
     paintHeatmap(canvas, { ...dataset.analysis, matrix: dataset.fit.residualMatrix }, { crosshair: false });
   } else if (state.expandedPlot === "compare-kinetics") {
@@ -3621,16 +4994,112 @@ function moveDatasetToFolder(datasetId, folderId) {
 }
 
 function saveDatasetDetails() {
+  persistDatasetDetails({ close: true, notify: true });
+}
+
+function persistDatasetDetails({ close = true, notify = true } = {}) {
   const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
   const displayName = document.getElementById("dataset-display-name")?.value.trim();
   if (!dataset || !displayName) throw new Error("Dataset display name is required.");
   dataset.projectLabel = displayName;
   dataset.sampleNote = document.getElementById("dataset-sample-note")?.value.trim() ?? "";
+  const metadata = normalizeDatasetEvidence(dataset.evidenceMetadata, "fsta");
+  const techniqueId = document.getElementById("dataset-technique")?.value || metadata.technique.id;
+  metadata.technique = { id: techniqueId, label: getTechnique(techniqueId).label };
+  metadata.measurementRole = document.getElementById("dataset-measurement-role")?.value || "unknown";
+  metadata.sampleId = document.getElementById("dataset-sample-id")?.value.trim() ?? "";
+  metadata.preparationId = document.getElementById("dataset-preparation-id")?.value.trim() ?? "";
+  metadata.conditions = Object.fromEntries(CONDITION_FIELDS.map((field) => {
+    const value = document.getElementById(`dataset-condition-${field}`)?.value.trim();
+    return [field, value || null];
+  }));
+  dataset.evidenceMetadata = metadata;
+  const speciesLabels = String(document.getElementById("dataset-species-states")?.value ?? "")
+    .split(/[,;\n]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  state.evidenceGraph = updateDatasetEvidenceEntities(state.evidenceGraph, dataset, state.datasets, {
+    speciesLabels,
+    createdAt: new Date().toISOString(),
+  });
   if (state.compare.styles[dataset.id]) state.compare.styles[dataset.id].label = displayName;
-  state.pendingDatasetId = null;
-  state.modal = null;
   markDirty();
-  state.notice = { kind: "success", title: "Dataset details saved", message: "The display name and sample note are now included in the project and AI handoff." };
+  if (close) {
+    state.pendingDatasetId = null;
+    state.modal = null;
+  }
+  if (notify) state.notice = { kind: "success", title: "Dataset details saved", message: "Scientific metadata, conditions, hypotheses, notes, and graph records are included in the project." };
+  if (close || notify) render();
+}
+
+function saveEvidenceConnection() {
+  const existing = state.evidenceGraph.relationships.find((item) => item.id === state.pendingConnectionId);
+  const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
+  if (!dataset) throw new Error("The connection source dataset is unavailable.");
+  const fromId = existing?.fromId ?? dataset.id;
+  const targetIds = existing ? [existing.toId] : state.pendingConnectionTargetIds.length
+    ? state.pendingConnectionTargetIds
+    : [document.getElementById("connection-target")?.value].filter(Boolean);
+  if (!targetIds.length) throw new Error("Choose evidence to connect.");
+  const now = new Date().toISOString();
+  targetIds.forEach((toId) => {
+    state.evidenceGraph = upsertEvidenceConnection(state.evidenceGraph, {
+      id: existing?.id,
+      fromId,
+      toId,
+      type: document.getElementById("connection-type")?.value,
+      assertionStatus: document.getElementById("connection-status")?.value,
+      rationale: document.getElementById("connection-rationale")?.value,
+      author: document.getElementById("connection-author")?.value,
+      createdAt: existing?.createdAt,
+    }, state.datasets, { createdAt: now, evidenceAssets: state.evidenceAssets });
+  });
+  state.pendingConnectionId = null;
+  state.pendingConnectionTargetIds = [];
+  state.evidenceSelectionIds = [];
+  state.modal = "edit-dataset";
+  markDirty();
+  state.notice = { kind: "success", title: "Evidence connection saved", message: "The authored relationship and rationale are now part of the project evidence graph." };
+  render();
+}
+
+function saveEvidenceAsset() {
+  const current = state.pendingEvidenceAssetDraft
+    ?? state.evidenceAssets.find((item) => item.id === state.pendingEvidenceAssetId);
+  if (!current) throw new Error("The external evidence item is unavailable.");
+  const label = document.getElementById("evidence-asset-label")?.value.trim();
+  if (!label) throw new Error("Evidence label is required.");
+  const updated = normalizeEvidenceAsset({
+    ...current,
+    label,
+    kind: document.getElementById("evidence-asset-kind")?.value,
+    techniqueId: document.getElementById("evidence-asset-technique")?.value,
+    measurementRole: document.getElementById("evidence-asset-role")?.value,
+    note: document.getElementById("evidence-asset-note")?.value.trim() ?? "",
+    citation: {
+      ...current.citation,
+      title: document.getElementById("evidence-citation-title")?.value.trim() ?? "",
+      authors: document.getElementById("evidence-citation-authors")?.value.trim() ?? "",
+      year: document.getElementById("evidence-citation-year")?.value.trim() ?? "",
+      doi: document.getElementById("evidence-citation-doi")?.value.trim() ?? "",
+      url: document.getElementById("evidence-citation-url")?.value.trim() ?? "",
+      figure: document.getElementById("evidence-citation-figure")?.value.trim() ?? "",
+      rightsStatus: document.getElementById("evidence-asset-rights")?.value,
+    },
+  });
+  const index = state.evidenceAssets.findIndex((item) => item.id === updated.id);
+  if (index >= 0) state.evidenceAssets[index] = updated;
+  else state.evidenceAssets.push(updated);
+  state.evidenceGraph = migrateEvidenceGraph(state.evidenceGraph, state.datasets, {
+    createdAt: new Date().toISOString(),
+    evidenceAssets: state.evidenceAssets,
+  });
+  state.evidenceSelectionIds = [...new Set([...state.evidenceSelectionIds, updated.id])];
+  state.pendingEvidenceAssetDraft = null;
+  state.pendingEvidenceAssetId = null;
+  state.modal = "edit-dataset";
+  markDirty();
+  state.notice = { kind: "success", title: "Evidence saved", message: "The external evidence record is selected and ready to connect." };
   render();
 }
 
@@ -3670,6 +5139,7 @@ function pasteDatasetIntoFolder(folderId) {
   cloned.projectLabel = uniqueDatasetLabel(`${datasetDisplayName(sourceDataset)} Copy`);
   cloned.sampleNote = sourceDataset.sampleNote || "";
   state.datasets.push(reviveDataset(cloned));
+  state.evidenceGraph = migrateEvidenceGraph(state.evidenceGraph, state.datasets);
   state.activeIndex = state.datasets.length - 1;
   folder.collapsed = false;
   ensureDatasetStyle(state.datasets.at(-1), state.datasets.length - 1);
@@ -3696,6 +5166,7 @@ function removeDatasetFromProject(datasetId) {
     throw new Error(`${datasetDisplayName(state.datasets[index])} is a parent of ${datasetDisplayName(dependent)}. Remove the merged derivative first so its lineage is not detached.`);
   }
   const [removed] = state.datasets.splice(index, 1);
+  state.evidenceGraph = removeDatasetFromEvidenceGraph(state.evidenceGraph, datasetId, state.datasets);
   state.compare.selectedIds = state.compare.selectedIds.filter((id) => id !== datasetId);
   state.merge.selectedIds = state.merge.selectedIds.filter((id) => id !== datasetId);
   delete state.compare.styles[datasetId];
@@ -3746,12 +5217,12 @@ function rangeFromAnalysis(analysis) {
   };
 }
 
-function visibleComponentSpectra(dataset, mode, hideIrfLimited) {
+function visibleComponentSpectra(dataset, mode) {
   if (!dataset?.fit) return [];
   const spectra = mode === "EAS" ? dataset.fit.easSpectra : dataset.fit.dasSpectra;
   return (spectra ?? [])
     .map((spectrum, index) => ({ ...spectrum, componentIndex: index }))
-    .filter((spectrum) => !hideIrfLimited || !dataset.fit.irfLimited?.[spectrum.componentIndex]);
+    .filter((spectrum) => !dataset.fit.irfLimited?.[spectrum.componentIndex]);
 }
 
 function expandedPlotMeta(key) {
@@ -3760,13 +5231,14 @@ function expandedPlotMeta(key) {
     heatmap: ["Analysis Heatmap", ""],
     spectrum: ["Spectrum", `${formatCoordinate(activeDataset()?.analysis.timeAxis[state.selectedTimeIndex])} ps`],
     kinetics: ["Kinetics", `${formatWavelength(activeDataset()?.analysis.spectralAxis[state.selectedWavelengthIndex])} nm`],
-    "main-components": [`${mode} Component Spectra`, state.fitting.hideIrfLimited ? "IRF-limited components hidden" : ""],
-    "modal-eas": ["EAS Preview", state.fitting.hideIrfLimited ? "IRF-limited components hidden" : ""],
-    "modal-das": ["DAS", state.fitting.hideIrfLimited ? "IRF-limited components hidden" : ""],
+    "main-components": [`${mode} Component Spectra`, irfLimitedCount(activeDataset()) ? "IRF-limited components excluded" : ""],
+    "modal-eas": ["EAS Preview", irfLimitedCount(activeDataset()) ? "IRF-limited components excluded" : ""],
+    "modal-das": ["DAS", irfLimitedCount(activeDataset()) ? "IRF-limited components excluded" : ""],
     "fit-residual": ["Fit Residual Map", ""],
+    "feature-time": ["Feature × Time Map", "Lossy regional compression; source fsTA heatmap remains authoritative"],
     "compare-kinetics": ["Kinetics Comparison", ""],
     "compare-spectrum": ["Spectra Comparison", ""],
-    "compare-components": [`${state.compare.componentMode} Comparison`, state.compare.hideIrfLimited ? "IRF-limited components hidden" : ""],
+    "compare-components": [`${state.compare.componentMode} Comparison`, compareDatasets().some((dataset) => irfLimitedCount(dataset)) ? "IRF-limited components excluded" : ""],
   };
   const [title, subtitle] = labels[key] ?? ["Plot", ""];
   return { title, subtitle };
@@ -3999,6 +5471,11 @@ let resizeTimer = null;
 document.addEventListener("contextmenu", (event) => {
   if (event.target.closest("input, textarea, select")) return;
   event.preventDefault();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !state.captureMode) return;
+  state.captureMode = false;
+  render();
 });
 window.addEventListener("resize", () => {
   window.clearTimeout(resizeTimer);

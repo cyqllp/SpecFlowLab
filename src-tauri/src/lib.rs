@@ -43,6 +43,7 @@ struct OriginLaunchResult {
     graph_count: usize,
     output_bytes: u64,
     warning_count: usize,
+    warnings: Vec<String>,
     create_plots: bool,
     #[allow(dead_code)]
     created_graph_types: Vec<String>,
@@ -94,6 +95,7 @@ fn safe_default_name(default_name: &str, fallback: &str) -> String {
 fn extension_filter(file_type: &str) -> (&'static str, &'static [&'static str]) {
     match file_type {
         "project" => ("SpecFlowLab Project", &["sflproj"]),
+        "ai-investigation" => ("SpecFlowLab AI Investigation", &["sflai"]),
         "origin" => ("SpecFlowLab Origin Bundle", &["sflorigin"]),
         "origin-project" => ("Origin Project", &["opju"]),
         "markdown" => ("Markdown", &["md"]),
@@ -200,6 +202,7 @@ async fn create_origin_project(
         result.graph_count = status.graph_count.unwrap_or_default();
         result.output_bytes = status.output_bytes.unwrap_or_default();
         result.warning_count = status.warnings.len();
+        result.warnings = status.warnings;
         result.omitted_graph_types = status.omitted_graph_types.unwrap_or_default();
         result.omission_reasons = status.omission_reasons.unwrap_or_default();
         Ok(Some(result))
@@ -429,6 +432,7 @@ fn create_origin_project_on_windows(
         graph_count: 0,
         output_bytes: 0,
         warning_count: 0,
+        warnings: Vec::new(),
         create_plots,
         created_graph_types: output_plan.created_graph_types,
         omitted_graph_types: output_plan.omitted_graph_types,
@@ -589,7 +593,7 @@ fn spawn_origin_com_bridge(
         "statusPath": status_path,
         "startupLogPath": log_path,
         "outputPath": output_path,
-        "commandSummary": "Origin.Application CreatePage/Worksheet.SetData/Save",
+        "commandSummary": "CLSID-resolved Origin COM server: CreatePage/Worksheet.SetData/Save",
     });
     std::fs::write(
         launch_diagnostic_path,
@@ -668,7 +672,7 @@ fn powershell_single_quoted(value: &str) -> String {
 
 #[cfg(any(target_os = "windows", test))]
 fn origin_com_launcher_source(
-    origin_executable: &Path,
+    selected_executable: &Path,
     manifest_path: &Path,
     log_path: &Path,
     status_path: &Path,
@@ -677,7 +681,7 @@ fn origin_com_launcher_source(
     dataset_count: usize,
 ) -> String {
     let template = r#"$ErrorActionPreference = 'Stop'
-$expectedExecutable = @@EXPECTED_EXECUTABLE@@
+$selectedExecutable = @@SELECTED_EXECUTABLE@@
 $manifestPath = @@MANIFEST_PATH@@
 $logPath = @@LOG_PATH@@
 $statusPath = @@STATUS_PATH@@
@@ -709,13 +713,94 @@ function Write-FailedStatus([string]$Message, [string]$Trace) {
     Write-Utf8NoBom $statusPath $payload
 }
 
+function Parse-CommandLineExecutable([string]$CommandLine) {
+    # Origin registers its LocalServer32 as a bare path that may contain spaces
+    # and is occasionally quoted or followed by arguments such as /Automation.
+    # Quoted: take the text between the first pair of quotes. Unquoted: prefer
+    # the full value when it is an existing file, otherwise the first token.
+    $trimmed = $CommandLine.Trim()
+    if ($trimmed.StartsWith('"')) {
+        $end = $trimmed.IndexOf('"', 1)
+        if ($end -gt 0) { return $trimmed.Substring(1, $end - 1) }
+        return $trimmed.Substring(1)
+    }
+    if ([System.IO.File]::Exists($trimmed)) { return $trimmed }
+    $space = $trimmed.IndexOf(' ')
+    if ($space -gt 0) { return $trimmed.Substring(0, $space) }
+    return $trimmed
+}
+
+function Get-OriginComServerRegistration([string]$ExecutablePath) {
+    # Every Origin release shares the Application/ApplicationSI/ApplicationCOMSI
+    # coclasses, so the ProgID is ambiguous across installs and bitness views.
+    # Return the CLSID whose LocalServer32 targets the exact executable so COM
+    # launches the server we validated instead of whatever registered last.
+    $target = [System.IO.Path]::GetFullPath($ExecutablePath)
+    foreach ($progid in @('Origin.Application', 'Origin.ApplicationSI', 'Origin.ApplicationCOMSI')) {
+        foreach ($progidRoot in @('Registry::HKEY_CLASSES_ROOT', 'Registry::HKEY_CLASSES_ROOT\WOW6432Node')) {
+            $clsid = $null
+            try {
+                $clsid = [string](Get-ItemProperty -LiteralPath (Join-Path (Join-Path $progidRoot $progid) 'CLSID') -ErrorAction Stop).'(default)'
+            } catch {}
+            if ([String]::IsNullOrWhiteSpace($clsid)) { continue }
+            foreach ($clsidRoot in @('Registry::HKEY_CLASSES_ROOT\CLSID', 'Registry::HKEY_CLASSES_ROOT\WOW6432Node\CLSID')) {
+                $serverCommand = $null
+                try {
+                    $serverCommand = [string](Get-ItemProperty -LiteralPath (Join-Path (Join-Path $clsidRoot $clsid) 'LocalServer32') -ErrorAction Stop).'(default)'
+                } catch {}
+                if ([String]::IsNullOrWhiteSpace($serverCommand)) { continue }
+                $serverExecutable = Parse-CommandLineExecutable $serverCommand
+                if ($null -ne $serverExecutable -and
+                    [String]::Equals([System.IO.Path]::GetFullPath($serverExecutable), $target, [StringComparison]::OrdinalIgnoreCase)) {
+                    return [ordered]@{ Clsid = $clsid; Executable = $serverExecutable }
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Find-CompanionOriginExecutable([string]$ExecutablePath) {
+    # Pre-2021 64-bit Origin builds (notably Origin 8.6) ship a 64-bit
+    # executable that never registers a COM automation server. Locate the 32-bit
+    # sibling in the same folder so the hidden worksheet import can still run.
+    $directory = [System.IO.Path]::GetDirectoryName($ExecutablePath)
+    $file = [System.IO.Path]::GetFileNameWithoutExtension($ExecutablePath)
+    $base = $file -replace '_(64|32)$', ''
+    foreach ($suffix in @('', '_32', '_64')) {
+        $candidate = Join-Path $directory ($base + $suffix + '.exe')
+        if ([String]::Equals([System.IO.Path]::GetFullPath($candidate), [System.IO.Path]::GetFullPath($ExecutablePath), [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ([System.IO.File]::Exists($candidate)) { return $candidate }
+    }
+    return $null
+}
+
 try {
-    Write-BridgeLog ('Starting Origin COM automation for ' + $expectedExecutable)
+    Write-BridgeLog ('Starting Origin COM automation for ' + $selectedExecutable)
+    $registration = Get-OriginComServerRegistration $selectedExecutable
+    if ($null -eq $registration) {
+        $companion = Find-CompanionOriginExecutable $selectedExecutable
+        if ($null -ne $companion) {
+            $registration = Get-OriginComServerRegistration $companion
+        }
+        if ($null -ne $registration) {
+            $warnings.Add(('The selected Origin executable {0} does not register a COM automation server; the 64-bit build of this Origin release predates 64-bit COM automation. SpecFlowLab used {1} for the hidden worksheet import and will open the saved project in the selected {2}.' -f $selectedExecutable, $registration.Executable, $selectedExecutable)) | Out-Null
+        } else {
+            throw ('No Origin COM automation server is registered for the selected executable {0}. Start the 32-bit Origin of this installation once as the current Windows user, close every Origin window, and retry, or select the 32-bit executable directly.' -f $selectedExecutable)
+        }
+    }
+    $automationExecutable = [string]$registration.Executable
+    $automationClsid = [string]$registration.Clsid
+
     $beforeIds = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
         $_.ProcessName -match '(?i)^origin'
     } | ForEach-Object { $_.Id })
 
-    $origin = New-Object -ComObject Origin.Application
+    $originType = [Type]::GetTypeFromCLSID([guid]$automationClsid)
+    if ($null -eq $originType) {
+        throw ('Origin COM class {0} is not registered for automation.' -f $automationClsid)
+    }
+    $origin = [Activator]::CreateInstance($originType)
     Start-Sleep -Milliseconds 300
     $spawnedCandidates = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
         $_.ProcessName -match '(?i)^origin' -and $beforeIds -notcontains $_.Id
@@ -724,7 +809,7 @@ try {
         try {
             [String]::Equals(
                 [System.IO.Path]::GetFullPath($_.Path),
-                [System.IO.Path]::GetFullPath($expectedExecutable),
+                [System.IO.Path]::GetFullPath($automationExecutable),
                 [StringComparison]::OrdinalIgnoreCase
             )
         } catch { $false }
@@ -735,11 +820,11 @@ try {
             try { $_.Path } catch { '<unavailable>' }
         }) -join ', '
         if ([String]::IsNullOrWhiteSpace($actual)) { $actual = '<no new Origin process>' }
-        throw ('The {0}-bit Origin COM registration did not launch the selected executable. Selected: {1}. COM launched: {2}. Start the selected Origin once as the current Windows user, close every Origin window, and retry.' -f ([IntPtr]::Size * 8), $expectedExecutable, $actual)
+        throw ('Origin COM automation launched {2} instead of the expected server {1} for the selected executable {3}. Start the required Origin once as the current Windows user, close every Origin window, and retry.' -f ([IntPtr]::Size * 8), $automationExecutable, $actual, $selectedExecutable)
     }
 
     Write-Utf8NoBom $probePath ('SFL_COM_OK' + [Environment]::NewLine)
-    Write-BridgeLog ('COM connected to selected Origin process ' + $spawnedOrigin.Id)
+    Write-BridgeLog ('COM connected to Origin automation process ' + $spawnedOrigin.Id)
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ($manifest.schema -ne 'specflowlab.origin_com_import.v2') {
@@ -752,7 +837,7 @@ try {
     $startedPayload = [ordered]@{
         state = 'started'
         datasetCount = $datasetCount
-        warnings = @()
+        warnings = @($warnings)
     } | ConvertTo-Json -Compress
     Write-Utf8NoBom $statusPath $startedPayload
 
@@ -925,7 +1010,7 @@ if ($null -ne $spawnedOrigin) {
                 $liveAutomation.MainWindowHandle -eq 0 -and
                 [String]::Equals(
                     [System.IO.Path]::GetFullPath($liveAutomation.Path),
-                    [System.IO.Path]::GetFullPath($expectedExecutable),
+                    [System.IO.Path]::GetFullPath($automationExecutable),
                     [StringComparison]::OrdinalIgnoreCase
                 )) {
                 $liveAutomation.Kill()
@@ -942,9 +1027,9 @@ if ($bridgeFailed) { exit 1 }
 
 try {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $expectedExecutable
+    $startInfo.FileName = $selectedExecutable
     $startInfo.Arguments = '"' + $outputPath + '"'
-    $startInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($expectedExecutable)
+    $startInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($selectedExecutable)
     $startInfo.UseShellExecute = $true
     $opened = [System.Diagnostics.Process]::Start($startInfo)
     $outputBytes = (Get-Item -LiteralPath $outputPath).Length
@@ -970,8 +1055,8 @@ try {
 
     template
         .replace(
-            "@@EXPECTED_EXECUTABLE@@",
-            &powershell_single_quoted(&origin_executable.to_string_lossy()),
+            "@@SELECTED_EXECUTABLE@@",
+            &powershell_single_quoted(&selected_executable.to_string_lossy()),
         )
         .replace(
             "@@MANIFEST_PATH@@",
@@ -1717,7 +1802,12 @@ mod tests {
             Path::new("C:/Data/project.opj"),
             3,
         );
-        assert!(source.contains("New-Object -ComObject Origin.Application"));
+        assert!(source.contains("[Type]::GetTypeFromCLSID([guid]$automationClsid)"));
+        assert!(source.contains("[Activator]::CreateInstance($originType)"));
+        assert!(source.contains("Get-OriginComServerRegistration"));
+        assert!(source.contains("Find-CompanionOriginExecutable"));
+        assert!(source
+            .contains("'Origin.Application', 'Origin.ApplicationSI', 'Origin.ApplicationCOMSI'"));
         assert!(source.contains("$origin.CreatePage("));
         assert!(source.contains("$sheet.SetData($data, 0, 0)"));
         assert!(source.contains("newsheet name:="));
@@ -1729,13 +1819,14 @@ mod tests {
         assert!(source.contains("$origin.Save($outputPath)"));
         assert!(source.contains("$origin.FindWorksheet(('[' + $pageName + ']Sheet1'))"));
         assert!(!source.contains("open -w"));
-        assert!(source.contains("COM registration did not launch the selected executable"));
+        assert!(source.contains("instead of the expected server"));
         assert!(source.contains("SFL_COM_OK"));
         assert!(source.contains("state = 'failed'"));
         assert!(source.contains("state = 'completed'"));
         assert!(source.contains("$datasetCount = 3"));
         assert!(source.contains("[System.Diagnostics.Process]::Start($startInfo)"));
-        assert!(source.contains("'C:/Program Files/OriginLab/Origin/origin86.exe'"));
+        assert!(source
+            .contains("$selectedExecutable = 'C:/Program Files/OriginLab/Origin/origin86.exe'"));
     }
 
     #[test]

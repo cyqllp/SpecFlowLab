@@ -1,11 +1,73 @@
 # SpecFlowLab OriginPro 8.6 Windows Debug Handoff
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 ## Purpose
 
 This note records the implementation, physical evidence, root cause, and
 remaining packaged-application verification for the OriginPro 8.6 bridge.
+
+## 2026-08-12: 64-bit Origin 8.6 COM selection fix
+
+### Symptom
+
+Selecting `origin86_64.exe` (the 64-bit Origin 8.6 launcher) failed with:
+
+```text
+Origin import failed: The 64-bit Origin COM registration did not launch the
+selected executable. Selected: C:\Program Files\OriginLab\Origin\origin86_64.exe.
+COM launched: C:\Program Files\OriginLab\Origin\origin86.exe.
+```
+
+### Root cause (physical evidence on this machine)
+
+- All Origin releases share the `Origin.Application` / `Origin.ApplicationSI` /
+  `Origin.ApplicationCOMSI` coclasses (`{B0F21977-...}`, `{2F234A01-...}`,
+  `{9FE89513-...}`), so the ProgID is ambiguous across installs and bitness
+  views.
+- `origin86.exe` (32-bit) has a **per-user** registration at
+  `HKCU\Software\Classes\WOW6432Node\CLSID\{B0F21977-...}\LocalServer32` →
+  `origin86.exe`. HKCU wins over HKLM, so COM launches `origin86.exe` from both
+  the 32-bit and the 64-bit COM host. Verified by a direct 64-bit PowerShell
+  `GetTypeFromCLSID` instantiation, which spawned `origin86.exe`.
+- `origin86_64.exe` (64-bit) has **no COM registration in any hive** (native or
+  WOW6432Node, HKLM or HKCU) and does not self-register when launched. Origin
+  8.6's 64-bit build never supported COM automation. The current user's other
+  registrations of the shared CLSID point to Origin 8.5 (`Origin85.exe`, HKLM
+  32-bit) and a stale Origin 2021 path (`D:\Softwares\OriginPro 2021\Origin64.exe`,
+  no longer present on disk).
+- The helper's strict `launched == selected` validation therefore always failed
+  for the 64-bit executable, even though the 32-bit automation itself worked.
+
+### Fix
+
+The generated COM helper now:
+
+1. **Resolves the CLSID whose `LocalServer32` targets the selected executable**
+   instead of trusting the ProgID. It scans the known Origin ProgIDs and reads
+   each CLSID's `LocalServer32` from both the native and `WOW6432Node` merged
+   views, and instantiates via
+   `[Activator]::CreateInstance([Type]::GetTypeFromCLSID($clsid))`.
+2. **Falls back to the 32-bit sibling in the same folder** when the selected
+   executable is not a registered COM server (the pre-2021 64-bit case). The
+   hidden worksheet import runs through the 32-bit server, a clear warning is
+   recorded, and the saved `.opj` is reopened with the **selected** executable.
+3. Validates the launched process against the resolved automation server (not
+   the possibly-unservable selected executable), so a 64-bit selection now
+   completes instead of erroring.
+
+The resolution logic was physically verified: selecting
+`origin86_64.exe` resolves to `origin86.exe` with the shared CLSID, and COM
+launches exactly that server.
+
+### Remaining verification
+
+The same packaged-application loop still applies: run a real bundle through the
+built app with `origin86_64.exe` selected and confirm the `.opj` opens in the
+64-bit Origin, with the companion-fallback warning shown in the completion
+message.
+
+
 
 ## Root cause and resolved transport
 

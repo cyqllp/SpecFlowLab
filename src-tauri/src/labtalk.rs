@@ -324,11 +324,12 @@ fn read_f64_from_zip(
     if bytes.len() % 8 != 0 {
         return Err(format!("{name}: not aligned to 8 bytes"));
     }
-    let count = bytes.len() / 8;
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    debug_assert!(remainder.is_empty());
+    let count = chunks.len();
     let mut values = Vec::with_capacity(count);
-    for chunk in bytes.chunks_exact(8) {
-        let arr: [u8; 8] = chunk.try_into().unwrap();
-        values.push(f64::from_le_bytes(arr));
+    for chunk in chunks {
+        values.push(f64::from_le_bytes(*chunk));
     }
     Ok(values)
 }

@@ -2,6 +2,107 @@
 
 All notable changes to SpecFlowLab are recorded here.
 
+## [Unreleased]
+
+## [1.0.6] - 2026-08-21
+
+- **Variable-projection global-analysis core** — replaces coordinate-wise
+  lifetime search with bounded deterministic multi-start optimization over
+  shared lifetimes and a column-pivoted QR conditional spectral solve. The fit
+  now models a smooth structured pre-zero envelope and selectable Gaussian
+  coherent-artifact derivatives, supports robust noise weighting, and records
+  convergence, rank/condition, and edge-range sensitivity diagnostics. EAS is
+  labeled as a sequential-model preview rather than species proof.
+- **Model-conditional lifetime uncertainty** — free lifetimes now report
+  residual-variance-scaled standard errors, 95% log-space confidence intervals,
+  covariance/correlation, effective Jacobian rank, residual degrees of freedom,
+  and boundary or identifiability warnings. Fixed lifetimes are labeled fixed
+  and never receive fabricated intervals; AI and Origin handoffs retain the
+  uncertainty metadata while continuing to exclude IRF-limited components.
+- **External Evidence Workspace** — Dataset Details now combines scientific
+  identity, role, and high-value conditions in a compact upper panel and keeps
+  less-used conditions in a disclosure. The lower panel adds a project evidence
+  library for spectroscopy/characterization files, figures, manuscripts,
+  documents, and citation-only literature, with checkbox bulk connection and a
+  focused Obsidian-inspired one-hop relation map.
+- **Exact-source external evidence** — `.sflproj` archives preserve imported
+  evidence bytes, SHA-256, native non-authoritative previews, citation/figure,
+  rights status, and provenance separately from graph metadata. Connected
+  `.sflai` packages include external-evidence records and embed exact files only
+  for Full-profile raw-source opt-in when the rights state permits it.
+- **File-first evidence import** — a dedicated Evidence Import panel accepts
+  Finder selection, drag-and-drop, and clipboard paste. Literature uses the
+  same file-first route for papers, manuscripts, and figures instead of asking
+  users to type a citation before importing its source.
+- **Live fsTA Feature Monitor** — completed global analyses now produce
+  deterministic EAS/DAS sign-region candidates. Positive regions are marked as
+  possible ESA, while negative regions remain GSB/SE candidates and are refined
+  only when explicitly connected absorption or PL evidence overlaps them. The
+  monitor recomputes with current fit, treatment, and graph state and exports
+  its `suggested-not-confirmed` observations into `.sflai` packages.
+- **Integrated feature presentation** — the standalone monitor card has been
+  removed. Stable feature codes now annotate EAS and DAS plots and repeat in
+  their corresponding lifetime rows. A Feature × Time Map stores finite mean
+  DeltaOD traces over candidate wavelength regions and reports compression,
+  coverage, and reconstruction diagnostics while retaining the raw heatmap as
+  authoritative.
+- **Noise-aware Gaussian Lineshape Finder** — EAS/DAS feature discovery now
+  fits signed multi-Gaussian models per component, requires robust local-noise
+  amplitude SNR and BIC improvement for added peaks, and exposes minimum SNR,
+  maximum peaks per component, and minimum FWHM. Regression coverage includes a
+  5%-amplitude minor band, a low-amplitude later component, pure-noise rejection,
+  and the explicit legacy local-threshold fallback.
+- **Temporary Evidence Tray** — every chart can be pinned with its PNG,
+  displayed numerical values, view state, and dataset/fit fingerprint. Selected
+  in-scope captures become one checksummed `E###` PNG/TSV/JSON record in
+  `.sflai`; captures remain session-only and do not dirty or enter `.sflproj`.
+- **Permanent IRF-limit exclusion** — IRF-limited components no longer appear
+  in interpreted lifetime tables, EAS/DAS plots, comparisons, feature labels,
+  Feature x Time maps, AI evidence summaries, or Origin component outputs.
+  They remain only in internal fit provenance and full fitted/residual matrices
+  so the numerical result stays reproducible.
+- **Simpler dataset metadata UI** — the dataset menu now opens Edit Dataset
+  Details. Project label and sample note have one focused section; IDs, role,
+  technique, and conditions use compact tag controls and a compact read-only
+  tag summary on the main workspace.
+
+- **AI Investigation Phase 2: Dataset Connections** — adds the versioned
+  `specflowlab.evidence_graph.v1` project layer, structured technique/role/
+  sample/preparation/condition metadata, proposed species/state entities, and
+  lossless migration of sample notes into stable linked annotations. Dataset
+  Details now provides auditable add/edit/remove connections with authored
+  rationale and visibly separates factual from interpretive relationships.
+- **Connected evidence packages** — investigations can start from a reviewed
+  connection or selected root datasets and traverse exactly one explicit hop.
+  `.sflai` packages include graph records, connection-specific inclusion
+  reasons, and matching/different/unknown condition comparisons without
+  declaring scientific equivalence or inferring links from filenames,
+  lifetimes, or spectral similarity. A native-shape modality registry lays the
+  foundation for later spectrum, trace, and table adapters.
+- **Question-driven AI Investigation Phase 1** — replaces the sidebar's blind
+  project-wide Markdown action with a required question, goal, explicit scope,
+  evidence profile, privacy review, and local `.sflai` ZIP export. Packages use
+  `specflowlab.ai_investigation.v1`, stable `E###` IDs, SHA-256 checksums, a
+  concise brief and provider-neutral prompt, and separate CSV/JSON evidence.
+  Exact raw sources and full little-endian Float64 matrices are opt-in only.
+- **Honest AI diagnostics boundary** — deterministic comparable physical
+  coordinates and finite-only residual RMS summaries are exported when
+  available; unsupported residual SVD remains explicit rather than inferred,
+  while later fits can export model-conditional uncertainty and stability
+  diagnostics. The legacy Markdown exporter is
+  retained under Advanced for compatibility, with no provider upload or
+  automatic project mutation.
+- **Reliable Origin COM server selection** — the COM helper no longer trusts the
+  ambiguous `Origin.Application` ProgID. It resolves the CLSID whose
+  `LocalServer32` targets the selected executable and instantiates that server
+  directly. Selecting a 64-bit pre-2021 Origin (for example `origin86_64.exe`,
+  whose build never registers a COM automation server) now falls back to the
+  32-bit sibling in the same folder for the hidden worksheet import, records a
+  clear warning, and still opens the saved project in the selected executable.
+- **Import warnings surface to the user** — worksheet/COM bridge warnings from
+  the Origin job status are included in the completion message instead of only
+  reporting a count.
+
 ## [1.0.5] - 2026-08-11
 
 - **OriginPro 8.6 direct automation** — a bitness-matched Windows PowerShell COM
