@@ -12,6 +12,8 @@ const MAX_MATRIX_VALUES = 100_000_000;
 
 const DERIVED_FIT_KEYS = new Set([
   "amplitudes",
+  "preZeroCoefficients",
+  "artifactCoefficients",
   "artifactAmplitudes",
   "dasSpectra",
   "easSpectra",
@@ -228,11 +230,17 @@ function restoreFit(fit, analysis, parser) {
     lifetimes: fit.lifetimes,
     fixedLifetimes: Array.from({ length: componentCount }, () => true),
     includeIrfArtifact: fit.irfArtifactModel !== "off",
+    preZeroModel: fit.preZeroModel === "off" ? "off" : "smooth",
+    coherentArtifactOrder: Number.isInteger(fit.coherentArtifactOrder) ? fit.coherentArtifactOrder : 1,
+    weighting: fit.weighting ?? "robust-noise",
+    rangeSensitivity: false,
   });
   return {
     ...recomputed,
     ...fit,
     amplitudes: recomputed.amplitudes,
+    preZeroCoefficients: recomputed.preZeroCoefficients,
+    artifactCoefficients: recomputed.artifactCoefficients,
     artifactAmplitudes: recomputed.artifactAmplitudes,
     amplitudeRanges: recomputed.amplitudeRanges,
     dasSpectra: recomputed.dasSpectra,

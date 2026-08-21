@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { detectFstaFeatureCandidates } from "../src/lib/feature-monitor/detector.js";
 import { buildFeatureTimeMap } from "../src/lib/feature-monitor/compression.js";
+import { fitMultiGaussianSpectrum } from "../src/lib/feature-monitor/multigaussian.js";
 
 test("feature monitor waits for global analysis and never labels heatmap signs as assignments", () => {
   const result = detectFstaFeatureCandidates({ id: "ta", evidenceMetadata: { technique: { id: "fsta" } } }, null, []);
@@ -34,11 +35,11 @@ test("feature detection can annotate DAS independently from preferred EAS", () =
   assert.equal(result.candidates.every((candidate) => candidate.id.includes(":das:")), true);
 });
 
-test("feature finder sensitivity can reveal a weak Gaussian-shaped band", () => {
-  const x = Array.from({ length: 31 }, (_, index) => 450 + index * 10);
+test("noise-aware multi-Gaussian fitting finds a weak band without a component-maximum gate", () => {
+  const x = Array.from({ length: 101 }, (_, index) => 450 + index * 3);
   const y = x.map((wavelength) => (
     Math.exp(-0.5 * ((wavelength - 520) / 16) ** 2)
-    + 0.16 * Math.exp(-0.5 * ((wavelength - 670) / 13) ** 2)
+    + 0.05 * Math.exp(-0.5 * ((wavelength - 670) / 13) ** 2)
   ));
   const dataset = {
     id: "ta",
@@ -46,15 +47,74 @@ test("feature finder sensitivity can reveal a weak Gaussian-shaped band", () => 
     fit: { easSpectra: [{ label: "EAS 1", lifetime: 12, x, y }] },
   };
 
-  const conservative = detectFstaFeatureCandidates(dataset, { relationships: [] }, [], {
-    relativeThreshold: 0.25,
-  });
-  const sensitive = detectFstaFeatureCandidates(dataset, { relationships: [] }, [], {
-    relativeThreshold: 0.08,
-  });
+  const result = detectFstaFeatureCandidates(dataset, { relationships: [] }, [], { minimumSnr: 4 });
 
-  assert.equal(conservative.candidates.some((candidate) => candidate.peakWavelength >= 640), false);
-  assert.equal(sensitive.candidates.some((candidate) => candidate.peakWavelength >= 640), true);
+  assert.equal(result.detectionMethod, "multi-gaussian");
+  assert.equal(result.candidates.some((candidate) => Math.abs(candidate.wavelengthCenter - 670) < 5), true);
+  assert.equal(result.candidates.every((candidate) => Number.isFinite(candidate.amplitudeSnr)), true);
+});
+
+test("legacy local-threshold behavior remains available as an explicit fallback", () => {
+  const x = Array.from({ length: 31 }, (_, index) => 450 + index * 10);
+  const y = x.map((wavelength) => Math.exp(-0.5 * ((wavelength - 520) / 16) ** 2)
+    + 0.16 * Math.exp(-0.5 * ((wavelength - 670) / 13) ** 2));
+  const dataset = { id: "ta", evidenceMetadata: { technique: { id: "fsta" } }, fit: { easSpectra: [{ x, y }] } };
+  const result = detectFstaFeatureCandidates(dataset, { relationships: [] }, [], { method: "local-threshold", relativeThreshold: 0.25 });
+
+  assert.equal(result.detectionMethod, "local-threshold");
+  assert.equal(result.candidates.some((candidate) => candidate.peakWavelength >= 640), false);
+});
+
+test("later low-amplitude component spectra are evaluated against local noise", () => {
+  const x = Array.from({ length: 151 }, (_, index) => 450 + index * 2);
+  const noise = (index) => 0.0008 * Math.sin(index * 12.9898) * Math.cos(index * 5.17);
+  const dataset = {
+    id: "ta",
+    evidenceMetadata: { technique: { id: "fsta" } },
+    fit: {
+      easSpectra: [
+        { label: "EAS 1", x, y: x.map((wavelength, index) => Math.exp(-0.5 * ((wavelength - 520) / 15) ** 2) + noise(index)) },
+        { label: "EAS 2", x, y: x.map((wavelength, index) => 0.03 * Math.exp(-0.5 * ((wavelength - 675) / 12) ** 2) + noise(index)) },
+      ],
+    },
+  };
+  const result = detectFstaFeatureCandidates(dataset, { relationships: [] }, [], { minimumSnr: 4 });
+
+  assert.equal(result.candidates.some((candidate) => candidate.componentIndex === 0 && Math.abs(candidate.wavelengthCenter - 520) < 4), true);
+  assert.equal(result.candidates.some((candidate) => candidate.componentIndex === 1 && Math.abs(candidate.wavelengthCenter - 675) < 4), true);
+});
+
+test("multi-Gaussian fitting rejects deterministic noise without a supported peak", () => {
+  const x = Array.from({ length: 151 }, (_, index) => 450 + index * 2);
+  const y = x.map((_wavelength, index) => 0.008 * Math.sin(index * 12.9898) * Math.cos(index * 5.17));
+  const result = fitMultiGaussianSpectrum(x, y, { minimumSnr: 4, minimumFwhmNm: 6 });
+
+  assert.equal(result.status, "no-supported-peaks");
+  assert.deepEqual(result.peaks, []);
+});
+
+test("multi-Gaussian fitting separates overlapping positive and negative bands", () => {
+  const x = Array.from({ length: 161 }, (_, index) => 450 + index * 2);
+  const y = x.map((wavelength, index) => 0.8 * Math.exp(-0.5 * ((wavelength - 540) / 18) ** 2)
+    - 0.6 * Math.exp(-0.5 * ((wavelength - 580) / 16) ** 2)
+    + 0.003 * Math.sin(index * 8.1));
+  const result = fitMultiGaussianSpectrum(x, y, { minimumSnr: 4, minimumFwhmNm: 8, maximumPeaks: 5 });
+
+  assert.equal(result.peaks.some((peak) => peak.sign === "positive" && Math.abs(peak.centerNm - 540) < 5), true);
+  assert.equal(result.peaks.some((peak) => peak.sign === "negative" && Math.abs(peak.centerNm - 580) < 5), true);
+  assert.equal(result.peaks.some((peak) => peak.centerNm < 480), false);
+});
+
+test("multi-Gaussian fitting tolerates nonuniform sampling and explicit missing values", () => {
+  const x = Array.from({ length: 90 }, (_, index) => 470 + index * (index % 3 === 0 ? 2.2 : 2.7));
+  x.sort((left, right) => left - right);
+  const y = x.map((wavelength) => 0.4 * Math.exp(-0.5 * ((wavelength - 575) / 17) ** 2));
+  y[12] = Number.NaN;
+  y[47] = Number.NaN;
+  const result = fitMultiGaussianSpectrum(x, y, { minimumSnr: 3, minimumFwhmNm: 6 });
+
+  assert.equal(result.peaks.some((peak) => Math.abs(peak.centerNm - 575) < 6), true);
+  assert.equal(result.diagnostics.pointCount, x.length - 2);
 });
 
 test("IRF-limited components never create feature candidates or feature-time evolution", () => {
@@ -99,7 +159,7 @@ test("feature monitor recomputes classification when a linked PL reference is ad
 
   assert.equal(before.candidates.find((candidate) => candidate.sign === "negative").candidateType, "GSB candidate");
   assert.equal(after.candidates.find((candidate) => candidate.sign === "negative").candidateType, "GSB / SE overlap candidate");
-  assert.match(after.recomputePolicy, /every render/i);
+  assert.match(after.recomputePolicy, /current analysis.*evidence connections/i);
 });
 
 test("feature-time map compresses deterministic wavelength regions into measured-time traces", () => {

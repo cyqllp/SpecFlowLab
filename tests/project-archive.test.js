@@ -52,6 +52,7 @@ test("compressed project archive preserves source, treated data, and reconstruct
   assert.deepEqual(dataset.analysis.matrix, expectedAnalysis);
   assert.deepEqual(dataset.fit.lifetimes, fit.lifetimes);
   assert.equal(dataset.fit.fixedLifetimes.every(Boolean), true);
+  assert.deepEqual(dataset.fit.uncertainty, fit.uncertainty);
   assert.ok(Math.abs(dataset.fit.rmse - fit.rmse) < 1e-12);
   assert.deepEqual(dataset.fit.fittedMatrix, fit.fittedMatrix);
   assert.deepEqual(dataset.fit.residualMatrix, fit.residualMatrix);

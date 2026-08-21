@@ -36,6 +36,13 @@ test("UI translations preserve scientific abbreviations and interpolate counts",
   assert.equal(translateText("2 datasets imported into one new folder. Original CSV text or UFS bytes are preserved.", "zh-CN"), "2 个数据集已导入到一个新文件夹；原始 CSV 文本或 UFS 字节已保留。");
   assert.equal(translateText("EAS", "zh-CN"), "EAS");
   assert.equal(translateText("Gaussian Feature Finder", "zh-CN"), "高斯特征寻找器");
+  assert.equal(translateText("Gaussian Lineshape Finder", "zh-CN"), "高斯线形寻找器");
+  assert.equal(translateText("Evidence Tray", "zh-CN"), "证据托盘");
   assert.equal(translateText("2 IRF-limited excluded", "zh-CN"), "已排除 2 个 IRF 受限组分");
+  assert.equal(translateText("Numerical model and convergence", "zh-CN"), "数值模型与收敛");
+  assert.equal(translateText("Run range-sensitivity refits", "zh-CN"), "运行范围敏感性重新拟合");
+  assert.equal(translateText("Condition est.", "zh-CN"), "条件数估计");
+  assert.equal(translateText("Uncertainty", "zh-CN"), "不确定度");
+  assert.equal(translateText("Residual DoF", "zh-CN"), "残差自由度");
   assert.equal(translateText("Component Spectra", "en"), "Component Spectra");
 });

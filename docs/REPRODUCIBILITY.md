@@ -44,8 +44,9 @@ AI Investigation export is local and provider-neutral. Default packages omit
 raw sources and full matrices; explicit Full-profile opt-in preserves exact
 source bytes and little-endian Float64 NaNs. The package records stable evidence
 IDs, file checksums, scope, omissions, and limitations. The current package
-exports finite-only residual RMS profiles but marks residual SVD, uncertainty,
-and fit-stability diagnostics unavailable.
+exports finite-only residual RMS profiles, deterministic multi-start/range
+diagnostics, and model-conditional lifetime covariance when estimable. Residual
+SVD remains explicitly unavailable.
 
 Dataset Connections use `specflowlab.evidence_graph.v1`. Dataset identity,
 conditions, proposed species/state hypotheses, authored factual/interpretive
@@ -65,14 +66,29 @@ also require a reviewed rights state, while citation and relationship metadata
 remain usable when bytes are omitted.
 
 The fsTA Feature Monitor is deterministic but derived and non-authoritative. It
-searches EAS and DAS independently for local positive and negative bands, then
-reports a moment-based Gaussian R-squared and FWHM. The UI exposes a relative
-peak threshold, minimum Gaussian R-squared, and minimum FWHM so a user can
-deliberately inspect minor features. Stable feature codes annotate their source
-plots and corresponding lifetime rows. Explicitly connected absorption and PL
-previews can refine negative regions to GSB or SE candidates, but neither
-spectral overlap nor Gaussian likeness proves an assignment. Asymmetric,
-overlapping, clipped, or sparse bands can be under-scored or missed.
+fits a signed Gaussian mixture independently to each EAS or DAS component. A
+constant/linear baseline and Gaussian amplitudes are solved together; candidate
+centers and widths are refined deterministically, and additional peaks require
+both a minimum robust local-noise SNR and BIC improvement. This avoids gating a
+minor or late-component band against the strongest peak. The UI exposes minimum
+amplitude SNR, maximum peaks per component, and minimum FWHM, while preserving
+the prior local-threshold method as an explicit fallback. Stable feature codes
+annotate their source plots and corresponding lifetime rows. Explicitly
+connected absorption and PL previews can refine negative regions to GSB or SE
+candidates, but neither spectral overlap nor fitted Gaussian decomposition
+proves an assignment. Asymmetric, overlapping, clipped, sparse, or non-Gaussian
+bands can remain unstable or be missed. Spectra longer than 360 finite points
+use deterministic adjacent-bin means for lineshape fitting only; the diagnostics
+record input and fitted point counts, and the original EAS/DAS arrays remain
+unchanged and authoritative.
+
+`specflowlab.chart_capture.v1` is temporary session evidence. A chart capture
+freezes its PNG, the numerical values represented by the current physical view,
+the plot/view configuration, dataset IDs, and a lightweight analysis/fit
+fingerprint. Captures do not enter `.sflproj` or mark it dirty. Selected captures
+whose datasets are inside the investigation scope enter `.sflai` as one `E###`
+record with separately checksummed PNG, TSV, and JSON files. Out-of-scope or
+missing captures are recorded as omissions and never widen scope silently.
 
 IRF-limited components are excluded unconditionally from interpreted lifetime
 tables, EAS/DAS and comparison plots, feature candidates, Feature x Time maps,
@@ -85,14 +101,32 @@ audited.
 candidate wavelength region at every measured time. It reports cell reduction,
 wavelength coverage, reconstruction RMSE, and a zero-baseline reconstruction
 score. It is a lossy derived view; the treated fsTA matrix remains
-authoritative. Candidates remain `suggested-not-confirmed`; the workflow does
-not yet provide validated uncertainty, peak deconvolution, model selection, or
-species proof.
+authoritative. Candidates remain `suggested-not-confirmed`; lifetime covariance
+does not provide Gaussian-band uncertainty, independent reference-dataset
+confirmation, or species proof.
 
-The current global-fit nonlinear core is a JavaScript coordinate-search
-preview. It needs a validated variable-projection optimizer, uncertainty
-estimates, and reference-dataset regressions before publication-grade fitting
-claims. For merged VIS/NIR analysis, the recommended next numerical step is
-simultaneous fitting of the original parent datasets with shared lifetimes,
-separate amplitudes, and noise-based weights; equal segment balancing is a
-robustness check rather than the default result.
+The current global-fit core uses separable nonlinear least squares: lifetimes
+are optimized in bounded log space with deterministic multi-start quasi-Newton
+search, while wavelength-dependent spectra and nuisance terms are solved by
+column-pivoted QR. The design matrix contains analytic Gaussian-IRF-convolved
+causal exponentials, a smooth negative-time envelope and slope, and selectable
+Gaussian coherent-artifact derivatives. Thus, pre-zero observations are fitted
+as measured structure rather than forced to constant zero. Robust noise weights,
+rank/condition estimates, convergence metadata, and early/late edge-omission
+refits are stored with the result. For each free lifetime, the fitted result
+also stores the finite-difference Jacobian of the profiled weighted residual in
+log-lifetime coordinates, residual-variance-scaled covariance, one-standard-
+error uncertainty, a 95% log-Wald interval, correlations, degrees of freedom,
+and bound/rank warnings. These intervals are conditional on the selected model,
+range, weights, IRF, and local optimum.
+
+This implementation is still a public-beta numerical core, not a publication-
+grade replacement for TIMP or pyglotaran. Synthetic recovery and range tests
+cover the implementation, but independent reference-dataset regression,
+profile-likelihood or bootstrap uncertainty-coverage validation, residual-SVD diagnostics, and
+simultaneous multi-dataset fitting remain required. `EAS preview` is only the
+algebraic transform implied by a sequential model; it must not be interpreted
+as model-independent species proof. For merged VIS/NIR analysis, the recommended
+next step remains simultaneous fitting of the original parent datasets with
+shared lifetimes, separate amplitudes, and noise-based weights; equal segment
+balancing is a robustness check rather than the default result.

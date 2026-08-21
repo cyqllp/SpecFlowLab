@@ -10,6 +10,7 @@ import { AI_INVESTIGATION_SCHEMA, AI_INVESTIGATION_SPEC_SCHEMA, assertSafeAiPath
 import { defaultAiScope, resolveAiScope } from "../src/lib/ai-investigation/scope.js";
 import { upsertEvidenceConnection } from "../src/lib/evidence-graph/connections.js";
 import { migrateEvidenceGraph } from "../src/lib/evidence-graph/schema.js";
+import { createChartCapture } from "../src/lib/chart-capture/schema.js";
 
 test("AI investigation defaults multi-dataset work to the current folder", () => {
   const project = buildProject();
@@ -198,6 +199,60 @@ test("connected external evidence exports metadata and only embeds reviewed exac
   assert.equal(metadata.citation.doi, "10.1000/figure");
   assert.equal(metadata.source.exactSourceEmbeddedSeparately, true);
   assert.equal("rawBytes" in metadata.source, false);
+});
+
+test("selected temporary chart captures become checksummed PNG, TSV, and metadata evidence", async () => {
+  const project = buildProject();
+  const capture = createChartCapture({
+    id: "capture:spectrum-a",
+    createdAt: "2026-08-20T10:00:00.000Z",
+    title: "Condition A spectrum at 1 ps",
+    plotKey: "spectrum",
+    datasetIds: ["dataset-a"],
+    datasetLabels: ["Condition A"],
+    sourceFingerprint: "fit-a",
+    view: { timePs: 1 },
+    figure: { bytes: Uint8Array.from([137, 80, 78, 71, 1, 2, 3]), width: 640, height: 310 },
+    data: { text: "Series\tWavelength (nm)\tDeltaOD\nMeasured\t500\t0.1\n" },
+    provenance: [{ action: "capture-displayed-chart" }],
+  });
+  project.chartCaptures = [capture];
+  const result = await createAiInvestigationPackage(project, buildSpec({ captureIds: [capture.id] }), {
+    investigationId: "investigation-capture",
+    createdAt: "2026-08-20T10:01:00.000Z",
+  });
+  const entries = unzipSync(result.bytes);
+  const evidence = result.manifest.evidence.find((item) => item.kind === "chart-capture");
+
+  assert.ok(evidence);
+  assert.equal(evidence.files.some((path) => path.endsWith("-chart.png")), true);
+  assert.equal(evidence.files.some((path) => path.endsWith("-chart-data.tsv")), true);
+  assert.equal(evidence.files.some((path) => path.endsWith("-chart-metadata.json")), true);
+  assert.deepEqual(entries[evidence.files.find((path) => path.endsWith("-chart.png"))], capture.figure.bytes);
+  assert.match(strFromU8(entries[evidence.files.find((path) => path.endsWith("-chart-data.tsv"))]), /Measured/);
+  assert.equal(evidence.files.every((path) => result.manifest.checksums[path]), true);
+});
+
+test("chart captures outside the selected investigation scope are omitted without widening scope", async () => {
+  const project = buildProject();
+  const capture = createChartCapture({
+    id: "capture:outside",
+    title: "Dataset B spectrum",
+    plotKey: "spectrum",
+    datasetIds: ["dataset-b"],
+    figure: { bytes: Uint8Array.from([1, 2, 3]), width: 10, height: 10 },
+    data: { text: "x\ty\n1\t2\n" },
+  });
+  project.chartCaptures = [capture];
+  const result = await createAiInvestigationPackage(project, buildSpec({
+    goal: "custom",
+    scope: { kind: "selected-datasets", datasetIds: ["dataset-a"] },
+    captureIds: [capture.id],
+  }));
+
+  assert.equal(result.manifest.evidence.some((item) => item.kind === "chart-capture"), false);
+  assert.equal(result.manifest.omissions.some((item) => item.captureId === capture.id && /outside the investigation/i.test(item.reason)), true);
+  assert.deepEqual(result.manifest.scope.datasetIds, ["dataset-a"]);
 });
 
 function buildSpec(overrides = {}) {

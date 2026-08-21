@@ -44,6 +44,7 @@ import {
 import { getTechnique, listTechniques } from "./lib/modalities/registry.js";
 import { detectFstaFeatureCandidates } from "./lib/feature-monitor/detector.js";
 import { buildFeatureTimeMap } from "./lib/feature-monitor/compression.js";
+import { createChartCapture } from "./lib/chart-capture/schema.js";
 import {
   SUPPORTED_LOCALES,
   localizeDom,
@@ -57,7 +58,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.5";
+const APP_VERSION = "1.0.6";
 const plotGeometry = new WeakMap();
 
 const state = {
@@ -88,6 +89,12 @@ const state = {
   fitting: {
     components: 3,
     irfFwhm: 0.25,
+    preZeroModel: "smooth",
+    coherentArtifactOrder: 1,
+    weighting: "robust-noise",
+    optimizerStarts: 3,
+    maximumIterations: 55,
+    rangeSensitivity: true,
     spectrumMode: "EAS",
     normalize: "none",
     hideIrfLimited: true,
@@ -96,6 +103,10 @@ const state = {
     fixedLifetimes: [],
   },
   featureFinding: {
+    method: "multi-gaussian",
+    minimumSnr: 4,
+    maximumPeaksPerComponent: 6,
+    minimumBicImprovement: 6,
     relativeThreshold: 0.12,
     minimumGaussianR2: 0.45,
     minimumFwhmNm: 6,
@@ -133,6 +144,9 @@ const state = {
   pendingEvidenceAssetDraft: null,
   evidenceImportMode: "evidence",
   evidenceImportResultIds: [],
+  chartCaptures: [],
+  captureTrayOpen: false,
+  captureMode: false,
   datasetMenu: null,
   folderMenu: null,
   plotMenu: null,
@@ -144,6 +158,7 @@ const state = {
 
 function render() {
   pruneMergeSelection();
+  refreshChartCaptureStaleness();
   const datasetTreeScrollTop =
     document.querySelector(".dataset-tree-scroll")?.scrollTop ?? 0;
   const dataset = activeDataset();
@@ -246,6 +261,7 @@ function render() {
     ${state.datasetMenu ? renderDatasetContextMenu() : ""}
     ${state.folderMenu ? renderFolderContextMenu() : ""}
     ${state.plotMenu ? renderPlotContextMenu() : ""}
+    ${renderCaptureStation()}
   `;
   localizeDom(app, state.locale);
   bindDom();
@@ -436,6 +452,13 @@ function renderOverview() {
 function renderMainFitSummary(dataset, includeSupportingDetails = false) {
   const fit = dataset.fit;
   const limitedCount = fit.irfLimited?.filter(Boolean).length || 0;
+  const convergence = fit.convergence ?? null;
+  const uncertainty = fit.uncertainty ?? null;
+  const rangeSensitivity = fit.rangeSensitivity ?? null;
+  const convergenceLabel = convergence ? (convergence.converged ? "Converged" : "Not converged") : "Legacy fit";
+  const rangeLabel = rangeSensitivity?.status && rangeSensitivity.status !== "not-evaluated"
+    ? `${rangeSensitivity.status}${Number.isFinite(rangeSensitivity.maximumRelativeShift) ? ` (${(rangeSensitivity.maximumRelativeShift * 100).toFixed(1)}%)` : ""}`
+    : "Not evaluated";
   const visibleLifetimes = fit.lifetimes
     .map((lifetime, index) => ({ lifetime, index }))
     .filter(({ index }) => !fit.irfLimited?.[index]);
@@ -449,7 +472,7 @@ function renderMainFitSummary(dataset, includeSupportingDetails = false) {
         ${visibleLifetimes.map(({ lifetime, index }) => `
           <tr>
             <td>t${index + 1}</td>
-            <td>${format(lifetime)} ps${fit.fixedLifetimes?.[index] ? " <span class=\"fixed-text\">(fixed)</span>" : ""}</td>
+            <td>${renderLifetimeEstimate(fit, lifetime, index)}</td>
             ${showFeatures ? `<td><div class="lifetime-feature-tags">${monitor.candidates.filter((candidate) => candidate.componentIndex === index).map(renderFeatureTag).join("") || "<span class=\"feature-none\">None above threshold</span>"}</div></td>` : ""}
           </tr>`).join("")}
       </tbody>
@@ -459,9 +482,27 @@ function renderMainFitSummary(dataset, includeSupportingDetails = false) {
       <div><dt>RMSE</dt><dd>${format(fit.rmse)}</dd></div>
       <div><dt>Explained</dt><dd>${Number.isFinite(fit.explainedVariance) ? `${(fit.explainedVariance * 100).toFixed(1)}%` : "-"}</dd></div>
       <div><dt>Iterations</dt><dd>${fit.lifetimeIterations ?? "-"}</dd></div>
+      <div><dt>Convergence</dt><dd class="${convergence?.converged === false ? "warning-text" : ""}">${escapeHtml(convergenceLabel)}</dd></div>
+      <div><dt>Uncertainty</dt><dd class="${["unavailable", "available-with-warnings"].includes(uncertainty?.status) ? "warning-text" : ""}">${escapeHtml(uncertainty?.status ?? "Legacy fit")}</dd></div>
+      <div><dt>Residual DoF</dt><dd>${Number.isFinite(uncertainty?.degreesOfFreedom) ? uncertainty.degreesOfFreedom : "-"}</dd></div>
+      <div><dt>Range sensitivity</dt><dd class="${["sensitive", "unstable", "indeterminate"].includes(rangeSensitivity?.status) ? "warning-text" : ""}">${escapeHtml(rangeLabel)}</dd></div>
+      <div><dt>Linear solve</dt><dd>${fit.designRank ?? "-"}/${fit.designParameterCount ?? "-"} rank</dd></div>
+      <div><dt>Condition est.</dt><dd>${Number.isFinite(fit.designConditionEstimate) ? format(fit.designConditionEstimate) : "-"}</dd></div>
     </dl>
-    ${includeSupportingDetails ? `<p class="fit-supporting-details">Model: ${escapeHtml(fit.lifetimeBasis)}. Time-zero term: ${escapeHtml(fit.irfArtifactModel ?? "off")}.</p>` : ""}
+    ${convergence?.warnings?.length ? `<ul class="fit-warning-list">${convergence.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : ""}
+    ${includeSupportingDetails ? `<p class="fit-supporting-details">Model: ${escapeHtml(fit.lifetimeBasis)}. Pre-zero: ${escapeHtml(fit.preZeroModel ?? "legacy")}. Time-zero terms: ${escapeHtml(fit.irfArtifactModel ?? "off")}. Linear solver: ${escapeHtml(fit.linearSolver ?? "legacy normal equations")}.</p>` : ""}
   `;
+}
+
+function renderLifetimeEstimate(fit, lifetime, index) {
+  if (fit.fixedLifetimes?.[index]) return `${format(lifetime)} ps <span class="fixed-text">(fixed)</span>`;
+  const estimate = fit.uncertainty?.lifetimes?.[index];
+  if (!Number.isFinite(estimate?.standardError)) return `${format(lifetime)} ps`;
+  const interval = estimate.confidenceInterval95;
+  const intervalText = Array.isArray(interval) && interval.every(Number.isFinite)
+    ? `95% CI ${format(interval[0])}–${format(interval[1])} ps`
+    : "95% CI unavailable";
+  return `${format(lifetime)} ± ${format(estimate.standardError)} ps <span class="fit-lifetime-ci">${intervalText}</span>`;
 }
 
 function renderMainComponentSpectra(dataset) {
@@ -500,8 +541,11 @@ function featureMonitorFor(dataset, mode = null) {
 function renderFeatureTag(candidate) {
   const range = `${formatWavelength(candidate.wavelengthMin)}–${formatWavelength(candidate.wavelengthMax)} nm`;
   const gaussian = candidate.gaussianShape;
-  const shape = Number.isFinite(gaussian?.rSquared) ? `Gaussian R² ${(gaussian.rSquared * 100).toFixed(0)}%; FWHM ${formatWavelength(gaussian.fwhmNm)} nm` : "Gaussian score unavailable";
-  return `<span class="feature-tag ${candidate.sign}" title="${escapeHtml(`${candidate.candidateType}; ${range}; ${shape}; ${candidate.supportSummary}; suggested, not confirmed`)}"><b>${escapeHtml(candidate.featureCode)}</b>${escapeHtml(shortFeatureType(candidate.candidateType))}<small>${range} · G${Number.isFinite(gaussian?.rSquared) ? Math.round(gaussian.rSquared * 100) : "-"}%</small></span>`;
+  const shape = candidate.detectionMethod === "multi-gaussian"
+    ? `Fitted center ${formatWavelength(candidate.wavelengthCenter)} nm; amplitude SNR ${format(candidate.amplitudeSnr)}; FWHM ${formatWavelength(gaussian?.fwhmNm)} nm${gaussian?.qualityFlags?.length ? `; ${gaussian.qualityFlags.join(", ")}` : ""}`
+    : Number.isFinite(gaussian?.rSquared) ? `Gaussian R² ${(gaussian.rSquared * 100).toFixed(0)}%; FWHM ${formatWavelength(gaussian.fwhmNm)} nm` : "Gaussian score unavailable";
+  const score = candidate.detectionMethod === "multi-gaussian" ? `SNR ${format(candidate.amplitudeSnr)}` : `G${Number.isFinite(gaussian?.rSquared) ? Math.round(gaussian.rSquared * 100) : "-"}%`;
+  return `<span class="feature-tag ${candidate.sign}" title="${escapeHtml(`${candidate.candidateType}; ${range}; ${shape}; ${candidate.supportSummary}; suggested, not confirmed`)}"><b>${escapeHtml(candidate.featureCode)}</b>${escapeHtml(shortFeatureType(candidate.candidateType))}<small>${range} · ${escapeHtml(score)}</small></span>`;
 }
 
 function renderFeaturePlotNote(dataset, mode) {
@@ -510,7 +554,8 @@ function renderFeaturePlotNote(dataset, mode) {
   const context = monitor.references.length
     ? `${monitor.references.length} explicitly connected Abs/PL reference${monitor.references.length === 1 ? "" : "s"} supplies overlap context.`
     : "No linked Abs/PL reference: negative regions remain unresolved GSB/SE candidates.";
-  return `<p class="feature-plot-note"><span><i></i>Labels are live ${escapeHtml(mode)} Gaussian-informed candidate regions.</span><span>${escapeHtml(context)}</span><strong>Suggested, not confirmed</strong></p>`;
+  const method = monitor.detectionMethod === "multi-gaussian" ? "noise-aware Gaussian-mixture" : "legacy local-threshold";
+  return `<p class="feature-plot-note"><span><i></i>Labels are live ${escapeHtml(mode)} ${escapeHtml(method)} candidate regions.</span><span>${escapeHtml(context)}</span><strong>Suggested, not confirmed</strong></p>`;
 }
 
 function shortFeatureType(candidateType) {
@@ -526,6 +571,7 @@ function enlargeButton(plotKey) {
   return `
     <button class="icon-button plot-tool ${selecting ? "active" : ""}" data-action="select-plot-region" data-plot-key="${plotKey}" title="Select a plot region to magnify" aria-label="Select a plot region to magnify">&#128269;</button>
     ${zoomed ? `<button class="icon-button plot-reset" data-action="reset-plot-zoom" data-plot-key="${plotKey}" title="Reset plot region" aria-label="Reset plot region">&#8634;</button>` : ""}
+    <button class="icon-button plot-capture" data-action="capture-plot" data-plot-key="${plotKey}" title="Add this chart to the temporary Evidence Tray" aria-label="Add chart to Evidence Tray">&#128247;</button>
     <button class="icon-button plot-expand" data-action="enlarge-plot" data-plot-key="${plotKey}" title="Enlarge plot" aria-label="Enlarge plot">\u26f6</button>`;
 }
 
@@ -555,6 +601,7 @@ function renderAiInvestigationModal() {
     return renderAiInvestigationReview(draft, state.aiInvestigation.preview);
   }
   const selected = new Set(draft.scope.datasetIds ?? []);
+  const selectedCaptures = new Set(draft.captureIds ?? []);
   const datasetPickerEnabled = ["selected-datasets", "connected-evidence"].includes(draft.scope.kind);
   return `
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="New AI Investigation">
@@ -605,6 +652,7 @@ function renderAiInvestigationModal() {
               ${aiCheckbox("ai-include-raw", "Include exact raw sources", draft.include.rawSources, draft.evidenceProfile !== "full")}
               ${aiCheckbox("ai-include-matrices", "Include full treated matrices", draft.include.fullTreatedMatrices, draft.evidenceProfile !== "full")}
             </div>
+            ${state.chartCaptures.length ? `<div class="ai-pinned-captures"><strong>Pinned chart evidence</strong><p>Selected captures are explicit evidence and retain their frozen view and displayed numerical values.</p>${state.chartCaptures.map((capture) => `<label><input class="ai-capture-check" type="checkbox" data-capture-id="${escapeHtml(capture.id)}" ${selectedCaptures.has(capture.id) ? "checked" : ""} /><img src="${escapeHtml(capture.previewUrl ?? "")}" alt="" /><span><b>${escapeHtml(capture.title)}</b><small>${escapeHtml(capture.datasetLabels.join(", "))}${capture.stale ? " · Earlier analysis state" : ""}</small></span></label>`).join("")}</div>` : `<div class="ai-pinned-captures empty"><strong>Pinned chart evidence</strong><p>No temporary chart captures are waiting in the Evidence Tray.</p></div>`}
           </section>
 
           <section class="ai-builder-section ai-review-callout">
@@ -755,7 +803,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.5 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.6 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -850,10 +898,31 @@ function renderPlotContextMenu() {
     <menu class="app-context-menu plot-context-menu" aria-label="Plot actions">
       <li class="context-menu-title">${escapeHtml(meta.title)}</li>
       <li class="plot-export-actions">
+        <button data-action="capture-plot" data-plot-key="${escapeHtml(state.plotMenu.plotKey)}">Add to Evidence Tray</button>
         <button data-action="export-plot-png" data-plot-key="${escapeHtml(state.plotMenu.plotKey)}">PNG image...</button>
         <button data-action="export-plot-txt" data-plot-key="${escapeHtml(state.plotMenu.plotKey)}">TXT data...</button>
       </li>
     </menu>`;
+}
+
+function renderCaptureStation() {
+  const count = state.chartCaptures.length;
+  return `
+    <aside class="capture-station ${state.captureTrayOpen ? "open" : ""} ${state.captureMode ? "capturing" : ""}" aria-label="Temporary Evidence Tray">
+      ${state.captureTrayOpen ? `<section class="capture-tray-panel">
+        <header><div><strong>Evidence Tray</strong><span>${count} temporary chart${count === 1 ? "" : "s"}</span></div><button class="icon-button" data-action="toggle-capture-tray" aria-label="Close Evidence Tray">x</button></header>
+        <p>Captures remain in this session and can be selected in AI Investigation. They do not modify the project.</p>
+        <div class="capture-tray-list">${count ? state.chartCaptures.map((capture) => `
+          <article class="capture-tray-item ${capture.stale ? "stale" : ""}">
+            <img src="${escapeHtml(capture.previewUrl ?? "")}" alt="" />
+            <div><strong>${escapeHtml(capture.title)}</strong><span>${escapeHtml(capture.datasetLabels.join(", "))}</span><small>${escapeHtml(new Date(capture.createdAt).toLocaleString())}${capture.stale ? " · Earlier analysis state" : ""}</small></div>
+            <button class="icon-button" data-action="remove-chart-capture" data-capture-id="${escapeHtml(capture.id)}" title="Remove capture" aria-label="Remove capture">x</button>
+          </article>`).join("") : `<div class="capture-tray-empty">Capture a chart to hold its image, displayed values, and view state here.</div>`}</div>
+        <footer><button class="secondary-command" data-action="clear-chart-captures" ${count ? "" : "disabled"}>Clear all</button><button data-action="start-capture-mode">${state.captureMode ? "Cancel capture" : "Capture a chart"}</button></footer>
+      </section>` : ""}
+      <button class="capture-station-button" data-action="toggle-capture-tray" title="Open temporary Evidence Tray" aria-label="Open temporary Evidence Tray"><span aria-hidden="true">&#128247;</span>${count ? `<b>${count}</b>` : ""}</button>
+      ${state.captureMode ? `<div class="capture-mode-hint">Select a highlighted chart · Esc to cancel</div>` : ""}
+    </aside>`;
 }
 
 function renderDatasetSelection(mode) {
@@ -1050,18 +1119,32 @@ function renderLifetimeControls() {
             <span class="fix-control"><input class="lifetime-fixed" data-lifetime-index="${index}" type="checkbox" ${state.fitting.fixedLifetimes[index] ? "checked" : ""} /> Fix</span>
           </label>`).join("")}
       </div>
+      <details class="fit-numerical-model">
+        <summary>Numerical model and convergence</summary>
+        <div class="fit-numerical-grid">
+          <label><span>Pre-zero model</span><select id="fit-prezero"><option value="smooth" ${state.fitting.preZeroModel !== "off" ? "selected" : ""}>Smooth envelope + slope</option><option value="off" ${state.fitting.preZeroModel === "off" ? "selected" : ""}>Off</option></select></label>
+          <label><span>Time-zero terms</span><select id="fit-artifact-order"><option value="0" ${state.fitting.coherentArtifactOrder === 0 ? "selected" : ""}>Gaussian</option><option value="1" ${state.fitting.coherentArtifactOrder === 1 ? "selected" : ""}>Gaussian + derivative</option><option value="2" ${state.fitting.coherentArtifactOrder === 2 ? "selected" : ""}>Gaussian + 2 derivatives</option></select></label>
+          <label><span>Spectral weighting</span><select id="fit-weighting"><option value="robust-noise" ${state.fitting.weighting !== "uniform" ? "selected" : ""}>Robust noise</option><option value="uniform" ${state.fitting.weighting === "uniform" ? "selected" : ""}>Uniform</option></select></label>
+          <label><span>Optimizer starts</span><input id="fit-optimizer-starts" type="number" min="1" max="5" step="1" value="${state.fitting.optimizerStarts}" /></label>
+          <label><span>Maximum iterations</span><input id="fit-maximum-iterations" type="number" min="8" max="120" step="1" value="${state.fitting.maximumIterations}" /></label>
+          <label class="fit-range-check"><input id="fit-range-sensitivity" type="checkbox" ${state.fitting.rangeSensitivity !== false ? "checked" : ""} /><span>Run range-sensitivity refits</span></label>
+        </div>
+        <p>The smooth pre-zero envelope and Gaussian derivative terms allow structured signal on both sides of time zero. Range checks refit after modest edge omissions and warn when lifetimes move materially.</p>
+      </details>
     </section>`;
 }
 
 function renderFeatureFindingControls() {
   const finder = state.featureFinding;
   return `<section class="feature-finder-controls" aria-label="Feature finding controls">
-    <div><strong>Gaussian Feature Finder</strong><span>Search EAS/DAS for resolved major and minor bands</span></div>
-    <label><span>Relative peak threshold</span><input id="feature-relative-threshold" type="number" min="1" max="80" step="1" value="${Math.round(finder.relativeThreshold * 100)}" /><small>% of component maximum</small></label>
-    <label><span>Minimum Gaussian R²</span><input id="feature-gaussian-r2" type="number" min="0" max="0.99" step="0.05" value="${finder.minimumGaussianR2}" /></label>
+    <div><strong>Gaussian Lineshape Finder</strong><span>Fit signed Gaussian mixtures to each EAS/DAS component</span></div>
+    <label><span>Method</span><select id="feature-method"><option value="multi-gaussian" ${finder.method !== "local-threshold" ? "selected" : ""}>Noise-aware multi-Gaussian</option><option value="local-threshold" ${finder.method === "local-threshold" ? "selected" : ""}>Legacy local threshold</option></select></label>
+    ${finder.method === "local-threshold"
+      ? `<label><span>Relative peak threshold</span><input id="feature-relative-threshold" type="number" min="1" max="80" step="1" value="${Math.round(finder.relativeThreshold * 100)}" /><small>% of component maximum</small></label><label><span>Minimum Gaussian R²</span><input id="feature-gaussian-r2" type="number" min="0" max="0.99" step="0.05" value="${finder.minimumGaussianR2}" /></label>`
+      : `<label><span>Minimum amplitude SNR</span><input id="feature-minimum-snr" type="number" min="1" max="50" step="0.5" value="${finder.minimumSnr}" /><small>relative to robust local noise</small></label><label><span>Maximum peaks</span><input id="feature-maximum-peaks" type="number" min="1" max="12" step="1" value="${finder.maximumPeaksPerComponent}" /><small>per component spectrum</small></label>`}
     <label><span>Minimum FWHM</span><input id="feature-minimum-fwhm" type="number" min="0" max="500" step="1" value="${finder.minimumFwhmNm}" /><small>nm</small></label>
     <button data-action="reset-feature-finder" class="secondary-command">Reset finder</button>
-    <p>A lower threshold finds weaker peaks; Gaussian likeness filters irregular shapes. Neither setting confirms ESA, GSB, SE, or species identity.</p>
+    <p>${finder.method === "local-threshold" ? "A lower threshold finds weaker peaks but a dominant band can suppress minor bands." : "Model order is selected from local noise and residual improvement rather than the strongest peak."} Neither method confirms ESA, GSB, SE, or species identity.</p>
   </section>`;
 }
 
@@ -1089,7 +1172,7 @@ function renderFitDiagnostics(dataset) {
         ${renderFeaturePlotNote(dataset, "DAS")}
       </article>
       <article class="plot-panel feature-time-panel">
-        <div class="panel-head"><div><h3>Feature × Time Map</h3><span>Lossy regional compression of the treated fsTA heatmap</span></div><div class="panel-head-actions"><button class="icon-button plot-expand" data-action="enlarge-plot" data-plot-key="feature-time" title="Enlarge plot" aria-label="Enlarge plot">⛶</button></div></div>
+        <div class="panel-head"><div><h3>Feature × Time Map</h3><span>Lossy regional compression of the treated fsTA heatmap</span></div><div class="panel-head-actions">${enlargeButton("feature-time")}</div></div>
         <canvas id="feature-time" data-plot-key="feature-time" width="1180" height="390" aria-label="Feature by time compressed fsTA map"></canvas>
         ${renderFeatureTimeSummary(dataset)}
       </article>
@@ -1642,6 +1725,42 @@ function bindDom() {
   document.getElementById("fit-irf")?.addEventListener("input", (event) => {
     state.fitting.irfFwhm = Number(event.target.value) || 0.25;
   });
+  document.getElementById("fit-prezero")?.addEventListener("change", (event) => {
+    state.fitting.preZeroModel = event.target.value === "off" ? "off" : "smooth";
+  });
+  document.getElementById("fit-artifact-order")?.addEventListener("change", (event) => {
+    state.fitting.coherentArtifactOrder = Math.round(clamp(Number(event.target.value) || 0, 0, 2));
+  });
+  document.getElementById("fit-weighting")?.addEventListener("change", (event) => {
+    state.fitting.weighting = event.target.value === "uniform" ? "uniform" : "robust-noise";
+  });
+  document.getElementById("fit-optimizer-starts")?.addEventListener("change", (event) => {
+    state.fitting.optimizerStarts = Math.round(clamp(Number(event.target.value) || 3, 1, 5));
+  });
+  document.getElementById("fit-maximum-iterations")?.addEventListener("change", (event) => {
+    state.fitting.maximumIterations = Math.round(clamp(Number(event.target.value) || 55, 8, 120));
+  });
+  document.getElementById("fit-range-sensitivity")?.addEventListener("change", (event) => {
+    state.fitting.rangeSensitivity = event.target.checked;
+  });
+  document.getElementById("feature-method")?.addEventListener("change", (event) => {
+    state.featureFinding.method = event.target.value === "local-threshold" ? "local-threshold" : "multi-gaussian";
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
+  document.getElementById("feature-minimum-snr")?.addEventListener("change", (event) => {
+    state.featureFinding.minimumSnr = clamp(Number(event.target.value) || 4, 1, 50);
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
+  document.getElementById("feature-maximum-peaks")?.addEventListener("change", (event) => {
+    state.featureFinding.maximumPeaksPerComponent = Math.round(clamp(Number(event.target.value) || 6, 1, 12));
+    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
+    markDirty();
+    render();
+  });
   document.getElementById("feature-relative-threshold")?.addEventListener("change", (event) => {
     state.featureFinding.relativeThreshold = clamp((Number(event.target.value) || 12) / 100, 0.01, 0.8);
     clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
@@ -1886,6 +2005,14 @@ function bindPlotInteractions() {
   document.querySelectorAll("canvas[data-plot-key]").forEach((canvas) => {
     const plotKey = canvas.dataset.plotKey;
     canvas.classList.toggle("zoom-selecting", state.zoomSelectionKey === plotKey);
+    canvas.classList.toggle("capture-target", state.captureMode);
+    canvas.addEventListener("click", (event) => {
+      if (!state.captureMode || state.zoomSelectionKey === plotKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      state.captureMode = false;
+      capturePlotToTray(plotKey).catch(showError);
+    });
     canvas.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -2106,7 +2233,7 @@ async function handleAction(event) {
     } else if (action === "run-fit") {
       await runFitActive();
     } else if (action === "reset-feature-finder") {
-      state.featureFinding = { relativeThreshold: 0.12, minimumGaussianR2: 0.45, minimumFwhmNm: 6 };
+      state.featureFinding = { method: "multi-gaussian", minimumSnr: 4, maximumPeaksPerComponent: 6, minimumBicImprovement: 6, relativeThreshold: 0.12, minimumGaussianR2: 0.45, minimumFwhmNm: 6 };
       clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
       markDirty();
       render();
@@ -2120,6 +2247,24 @@ async function handleAction(event) {
       await selectOriginInstallation();
     } else if (action === "create-origin") {
       await createInOrigin();
+    } else if (action === "toggle-capture-tray") {
+      state.captureTrayOpen = !state.captureTrayOpen;
+      if (!state.captureTrayOpen) state.captureMode = false;
+      render();
+    } else if (action === "start-capture-mode") {
+      state.captureMode = !state.captureMode;
+      state.captureTrayOpen = true;
+      render();
+    } else if (action === "capture-plot") {
+      const plotKey = event.currentTarget.dataset.plotKey;
+      closeContextMenus();
+      await capturePlotToTray(plotKey);
+    } else if (action === "remove-chart-capture") {
+      removeChartCapture(event.currentTarget.dataset.captureId);
+      render();
+    } else if (action === "clear-chart-captures") {
+      clearChartCaptures();
+      render();
     } else if (action === "export-plot-png") {
       const plotKey = event.currentTarget.dataset.plotKey;
       closeContextMenus();
@@ -2557,6 +2702,12 @@ async function runFitActive() {
       irfFwhm: state.fitting.irfFwhm,
       lifetimes: configuration.lifetimes,
       fixedLifetimes: configuration.fixedLifetimes,
+      preZeroModel: state.fitting.preZeroModel,
+      coherentArtifactOrder: state.fitting.coherentArtifactOrder,
+      weighting: state.fitting.weighting,
+      optimizerStarts: state.fitting.optimizerStarts,
+      maximumIterations: state.fitting.maximumIterations,
+      rangeSensitivity: state.fitting.rangeSensitivity,
     });
     state.fitting.lifetimeValues = dataset.fit.lifetimes.map((value) => conciseInputNumber(value));
     state.fitting.fixedLifetimes = dataset.fit.fixedLifetimes.slice();
@@ -2592,6 +2743,12 @@ async function runBatchFit() {
         irfFwhm: state.fitting.irfFwhm,
         lifetimes: configuration.lifetimes,
         fixedLifetimes: configuration.fixedLifetimes,
+        preZeroModel: state.fitting.preZeroModel,
+        coherentArtifactOrder: state.fitting.coherentArtifactOrder,
+        weighting: state.fitting.weighting,
+        optimizerStarts: state.fitting.optimizerStarts,
+        maximumIterations: state.fitting.maximumIterations,
+        rangeSensitivity: state.fitting.rangeSensitivity,
       });
     }
     const activeFit = activeDataset()?.fit;
@@ -2673,6 +2830,7 @@ function serializeProject() {
 
 function loadProject(project) {
   if (!project?.schema?.startsWith("specflowlab")) throw new Error("Unsupported SpecFlowLab project.");
+  clearChartCaptures();
   state.datasets = (project.datasets ?? []).map(reviveDataset);
   state.evidenceAssets = (project.evidenceAssets ?? []).map((asset) => normalizeEvidenceAsset(asset));
   state.evidenceGraph = migrateEvidenceGraph(project.evidenceGraph, state.datasets, {
@@ -2771,6 +2929,9 @@ function reviveFit(fit) {
     fittedMatrix: reviveMatrix(fit.fittedMatrix),
     residualMatrix: reviveMatrix(fit.residualMatrix),
     amplitudes: reviveMatrix(fit.amplitudes),
+    preZeroCoefficients: reviveMatrix(fit.preZeroCoefficients),
+    artifactCoefficients: reviveMatrix(fit.artifactCoefficients),
+    artifactAmplitudes: reviveArray(fit.artifactAmplitudes),
     dasSpectra: reviveSpectra(fit.dasSpectra),
     easSpectra: reviveSpectra(fit.easSpectra),
   };
@@ -2837,6 +2998,7 @@ async function exportMarkdown() {
 }
 
 function openAiInvestigation() {
+  refreshChartCaptureStaleness();
   const project = aiInvestigationProjectSnapshot();
   const scope = defaultAiScope(project);
   state.aiInvestigation = {
@@ -2853,6 +3015,7 @@ function openAiInvestigation() {
       evidenceProfile: "diagnostic",
       userTimesPs: [],
       userWavelengthsNm: [],
+      captureIds: state.chartCaptures.map((capture) => capture.id),
       include: {
         sampleNotes: true,
         sourceFileNames: true,
@@ -2889,6 +3052,7 @@ function syncAiDraftFromDom() {
   if (scope) draft.scope.kind = scope;
   const profile = document.querySelector('input[name="ai-profile"]:checked')?.value;
   if (profile) draft.evidenceProfile = profile;
+  draft.captureIds = Array.from(document.querySelectorAll(".ai-capture-check:checked"), (input) => input.dataset.captureId);
   const bindings = [
     ["ai-include-notes", draft.include, "sampleNotes"],
     ["ai-include-filenames", draft.include, "sourceFileNames"],
@@ -2979,6 +3143,7 @@ async function saveAiInvestigationBrief() {
 function aiInvestigationProjectSnapshot() {
   return {
     ...serializeProject(),
+    chartCaptures: state.chartCaptures.map(({ previewUrl: _previewUrl, ...capture }) => capture),
     activeDatasetId: activeDataset()?.id ?? null,
     activeIndex: state.activeIndex,
     selectedTimeIndex: state.selectedTimeIndex,
@@ -3108,6 +3273,171 @@ async function exportDisplayedPlotTxt(plotKey) {
     const contents = buildDisplayedPlotText(plotKey);
     return saveTextWithDialog(contents, `${plotExportBaseName(plotKey)}.txt`, "txt", "text/plain");
   }, "The numerical data represented by the displayed plot were exported.");
+}
+
+async function capturePlotToTray(plotKey) {
+  await nextFrame();
+  const canvas = findVisiblePlotCanvas(plotKey);
+  if (!canvas) throw new Error("The selected chart is not currently visible.");
+  const dataText = buildDisplayedPlotText(plotKey);
+  const blob = await canvasToBlob(canvas, "image/png");
+  const figureBytes = new Uint8Array(await blob.arrayBuffer());
+  const datasetIds = chartDatasetIds(plotKey);
+  if (!datasetIds.length) throw new Error("The selected chart has no dataset provenance.");
+  const meta = expandedPlotMeta(plotKey);
+  const capture = createChartCapture({
+    title: meta.subtitle ? `${meta.title} · ${meta.subtitle}` : meta.title,
+    plotKey,
+    datasetIds,
+    datasetLabels: datasetIds.map((id) => datasetDisplayName(state.datasets.find((dataset) => dataset.id === id))).filter(Boolean),
+    sourceFingerprint: chartSourceFingerprint(plotKey, datasetIds),
+    view: chartViewState(plotKey),
+    figure: {
+      bytes: figureBytes,
+      width: canvas.width,
+      height: canvas.height,
+      sha256: await sha256HexBytes(figureBytes),
+    },
+    data: {
+      text: dataText,
+      sha256: await sha256HexBytes(new TextEncoder().encode(dataText)),
+      representation: matrixExportForPlot(plotKey)
+        ? "Displayed physical bounds and numerical matrix cells; full treated matrices remain separately opt-in"
+        : "Exact numerical series represented by the displayed chart and current physical zoom",
+    },
+    provenance: [{
+      action: "capture-displayed-chart",
+      appVersion: APP_VERSION,
+      projectPathIncluded: false,
+      temporarySessionEvidence: true,
+    }],
+  });
+  capture.previewUrl = URL.createObjectURL(blob);
+  state.chartCaptures.push(capture);
+  state.captureMode = false;
+  state.captureTrayOpen = true;
+  state.notice = { kind: "success", title: "Chart added to Evidence Tray", message: "The rendered chart, displayed numerical values, and view state were frozen together for this session." };
+  render();
+}
+
+function removeChartCapture(captureId) {
+  const index = state.chartCaptures.findIndex((capture) => capture.id === captureId);
+  if (index < 0) return;
+  const [capture] = state.chartCaptures.splice(index, 1);
+  if (capture.previewUrl) URL.revokeObjectURL(capture.previewUrl);
+  if (state.aiInvestigation.draft?.captureIds) {
+    state.aiInvestigation.draft.captureIds = state.aiInvestigation.draft.captureIds.filter((id) => id !== captureId);
+    state.aiInvestigation.preview = null;
+  }
+}
+
+function clearChartCaptures() {
+  state.chartCaptures.forEach((capture) => {
+    if (capture.previewUrl) URL.revokeObjectURL(capture.previewUrl);
+  });
+  state.chartCaptures = [];
+  state.captureMode = false;
+  if (state.aiInvestigation.draft) state.aiInvestigation.draft.captureIds = [];
+  state.aiInvestigation.preview = null;
+}
+
+function refreshChartCaptureStaleness() {
+  state.chartCaptures.forEach((capture) => {
+    if (capture.stale) return;
+    if (capture.sourceFingerprint !== chartSourceFingerprint(capture.plotKey, capture.datasetIds)) capture.stale = true;
+  });
+}
+
+function chartDatasetIds(plotKey) {
+  if (plotKey.startsWith("compare-")) return compareDatasets().map((dataset) => dataset.id);
+  return activeDataset()?.id ? [activeDataset().id] : [];
+}
+
+function chartViewState(plotKey) {
+  const dataset = activeDataset();
+  const analysis = dataset?.analysis;
+  return {
+    plotKey,
+    zoom: state.plotZooms[plotKey] ? { ...state.plotZooms[plotKey] } : null,
+    selectedTimeIndex: state.selectedTimeIndex,
+    selectedTimePs: analysis?.timeAxis?.[state.selectedTimeIndex] ?? null,
+    selectedWavelengthIndex: state.selectedWavelengthIndex,
+    selectedWavelengthNm: analysis?.spectralAxis?.[state.selectedWavelengthIndex] ?? null,
+    componentMode: plotKey.startsWith("compare-") ? state.compare.componentMode : state.fitting.spectrumMode,
+    normalization: plotKey.startsWith("compare-") ? state.compare.normalize : state.fitting.normalize,
+    comparison: plotKey.startsWith("compare-") ? {
+      timeIndex: state.compare.timeIndex,
+      wavelengthIndex: state.compare.wavelengthIndex,
+      lineWidth: state.compare.lineWidth,
+      lineStyle: state.compare.lineStyle,
+    } : null,
+  };
+}
+
+function chartSourceFingerprint(plotKey, datasetIds) {
+  const snapshot = {
+    plotKey,
+    datasets: datasetIds.map((id) => {
+      const dataset = state.datasets.find((item) => item.id === id);
+      const analysis = dataset?.analysis;
+      const matrix = analysis?.matrix ?? [];
+      const rowIndexes = uniqueIndexes(matrix.length);
+      const columnIndexes = uniqueIndexes(analysis?.timeAxis?.length ?? 0);
+      return {
+        id,
+        spectralAxis: axisFingerprint(analysis?.spectralAxis),
+        timeAxis: axisFingerprint(analysis?.timeAxis),
+        matrixCheckpoints: rowIndexes.flatMap((rowIndex) => columnIndexes.map((columnIndex) => matrix[rowIndex]?.[columnIndex] ?? null)),
+        provenance: analysis?.provenance ?? analysis?.history ?? null,
+        fit: dataset?.fit ? {
+          lifetimes: dataset.fit.lifetimes,
+          irfLimited: dataset.fit.irfLimited,
+          rmse: dataset.fit.rmse,
+          explainedVariance: dataset.fit.explainedVariance,
+          eas: spectraFingerprint(dataset.fit.easSpectra),
+          das: spectraFingerprint(dataset.fit.dasSpectra),
+        } : null,
+      };
+    }),
+  };
+  return fnv1a(JSON.stringify(snapshot));
+}
+
+function spectraFingerprint(spectra = []) {
+  return spectra.map((spectrum) => ({
+    label: spectrum.label,
+    lifetime: spectrum.lifetime,
+    x: axisFingerprint(spectrum.x),
+    y: sampledValues(spectrum.y),
+  }));
+}
+
+function axisFingerprint(values = []) {
+  return { length: values.length, samples: sampledValues(values) };
+}
+
+function sampledValues(values = []) {
+  return uniqueIndexes(values.length).map((index) => Number.isNaN(values[index]) ? "NaN" : values[index]);
+}
+
+function uniqueIndexes(length) {
+  if (!length) return [];
+  return [...new Set([0, Math.floor((length - 1) / 2), length - 1])];
+}
+
+function fnv1a(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+async function sha256HexBytes(bytes) {
+  if (!globalThis.crypto?.subtle) return null;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 function findVisiblePlotCanvas(plotKey) {
@@ -5141,6 +5471,11 @@ let resizeTimer = null;
 document.addEventListener("contextmenu", (event) => {
   if (event.target.closest("input, textarea, select")) return;
   event.preventDefault();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !state.captureMode) return;
+  state.captureMode = false;
+  render();
 });
 window.addEventListener("resize", () => {
   window.clearTimeout(resizeTimer);

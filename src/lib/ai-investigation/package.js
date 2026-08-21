@@ -13,6 +13,7 @@ import { buildComparabilityRows } from "../evidence-graph/comparability.js";
 import { resolveConnectedEvidenceScope } from "../evidence-graph/traversal.js";
 import { detectFstaFeatureCandidates } from "../feature-monitor/detector.js";
 import { buildFeatureTimeMap } from "../feature-monitor/compression.js";
+import { chartCaptureMetadata, validateChartCapture } from "../chart-capture/schema.js";
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -94,6 +95,51 @@ export async function inspectAiInvestigation(project, spec, options = {}) {
     selectionReasons: ["required-provenance"],
     transformations: [],
   }, [(id) => ({ path: "evidence/{id}-project-overview.json", text: JSON.stringify({ ...overview, evidenceId: id }, null, 2) })]);
+
+  const requestedCaptureIds = [...new Set((spec.captureIds ?? []).map(String))];
+  const availableCaptures = new Map((project.chartCaptures ?? []).map((capture) => [capture.id, capture]));
+  const scopedDatasetIds = new Set(datasets.map((dataset) => dataset.id));
+  for (const captureId of requestedCaptureIds) {
+    const capture = availableCaptures.get(captureId);
+    if (!capture) {
+      omissions.push({ kind: "chart-capture", captureId, reason: "The selected temporary chart capture is no longer available in this session." });
+      continue;
+    }
+    try {
+      validateChartCapture(capture);
+    } catch (error) {
+      omissions.push({ kind: "chart-capture", captureId, reason: `The chart capture is invalid: ${error.message}` });
+      continue;
+    }
+    const outsideScope = capture.datasetIds.filter((datasetId) => !scopedDatasetIds.has(datasetId));
+    if (outsideScope.length) {
+      omissions.push({
+        kind: "chart-capture",
+        captureId,
+        datasetIds: capture.datasetIds,
+        reason: `Chart capture omitted because its dataset scope is outside the investigation: ${outsideScope.join(", ")}.`,
+      });
+      continue;
+    }
+    const metadata = chartCaptureMetadata(capture);
+    if (spec.include?.sourceFileNames === false) metadata.datasetLabels = [];
+    addEvidence({
+      kind: "chart-capture",
+      title: capture.title,
+      datasetIds: capture.datasetIds,
+      selectionReasons: ["user-pinned-chart-evidence"],
+      transformations: [capture.data.representation, "Rendered view and displayed numerical payload were frozen together at capture time"],
+      stale: capture.stale,
+    }, [
+      (id) => ({ path: "figures/{id}-chart.png", bytes: capture.figure.bytes }),
+      (id) => ({ path: "evidence/{id}-chart-data.tsv", text: capture.data.text }),
+      (id) => ({ path: "evidence/{id}-chart-metadata.json", text: JSON.stringify({ ...metadata, evidenceId: id }, null, 2) }),
+    ]);
+    if (capture.stale) limitations.push(`Pinned chart ${capture.id} was captured from an earlier analysis state; its frozen image and values were not regenerated.`);
+  }
+  if (requestedCaptureIds.length && spec.include?.sourceFileNames === false) {
+    limitations.push("Chart-capture metadata labels were redacted, but user-visible text already rendered into a captured raster image cannot be reliably removed; review pinned figures before sharing.");
+  }
 
   const comparability = connectedScope
     ? buildComparabilityRows(datasets, connectedScope.relationships)
@@ -192,7 +238,7 @@ export async function inspectAiInvestigation(project, spec, options = {}) {
         datasetIds: [dataset.id],
         entityIds: monitor.references.map((reference) => reference.id),
         selectionReasons: ["current-global-analysis-feature-monitor"],
-        transformations: ["Deterministic candidate regions; assignments remain suggested-not-confirmed", "Feature-time traces are lossy finite means over candidate wavelength regions"],
+        transformations: [`Deterministic ${monitor.detectionMethod} candidate regions; assignments remain suggested-not-confirmed`, "Feature-time traces are lossy finite means over candidate wavelength regions"],
       }, [(id) => ({
         path: "evidence/{id}-feature-monitor.json",
         text: JSON.stringify({ ...monitor, featureTimeMap, evidenceId: id }, null, 2),
@@ -272,8 +318,10 @@ export async function inspectAiInvestigation(project, spec, options = {}) {
 
   if (fitted.length && spec.evidenceProfile !== "brief") {
     omissions.push({ kind: "residual-svd", reason: "Unavailable: the preview fitter has no validated missing-data residual SVD implementation." });
-    omissions.push({ kind: "fit-stability", reason: "Unavailable: deterministic multi-start stability analysis is not implemented." });
-    limitations.push("Residual SVD, uncertainty intervals, identifiability, and fit-stability evidence are unavailable and were not inferred.");
+    if (fitted.some((dataset) => !["available", "available-with-warnings", "fixed"].includes(dataset.fit?.uncertainty?.status))) {
+      omissions.push({ kind: "lifetime-uncertainty", reason: "Unavailable for at least one selected fit because its profiled residual Jacobian or residual degrees of freedom was insufficient." });
+    }
+    limitations.push("Residual SVD remains unavailable. Lifetime covariance and range/multi-start diagnostics are local, model-conditional evidence and do not prove target topology or species identity.");
   }
 
   if (spec.evidenceProfile === "full") {
@@ -331,6 +379,7 @@ export async function inspectAiInvestigation(project, spec, options = {}) {
       instrumentMetadataIncluded: spec.include?.instrumentMetadata !== false,
       rawSourcesIncluded: Boolean(spec.evidenceProfile === "full" && spec.include?.rawSources),
       fullTreatedMatricesIncluded: Boolean(spec.evidenceProfile === "full" && spec.include?.fullTreatedMatrices),
+      chartCapturesIncluded: requestedCaptureIds.length,
     },
     ...(connectedScope ? {
       focusEntityIds: connectedScope.rootEntityIds,
@@ -481,25 +530,35 @@ function fitSummaryCsv(datasets, evidenceId) {
   const rows = datasets.map((dataset) => {
     const fit = dataset.fit;
     const interpretedLifetimes = (fit.lifetimes ?? []).filter((_, index) => !fit.irfLimited?.[index]);
+    const interpretedUncertainty = (fit.lifetimes ?? [])
+      .map((_, index) => ({ index, uncertainty: fit.uncertainty?.lifetimes?.[index] }))
+      .filter(({ index }) => !fit.irfLimited?.[index]);
     const excludedIrfLimitedCount = (fit.irfLimited ?? []).filter(Boolean).length;
     return [
       evidenceId,
       dataset.id,
       datasetLabel(dataset),
-      "legacy-preview",
+      fit.model ?? "legacy-preview",
       interpretedLifetimes.length,
       interpretedLifetimes.join(";"),
+      interpretedUncertainty.map(({ uncertainty }) => uncertainty?.standardError ?? "").join(";"),
+      interpretedUncertainty.map(({ uncertainty }) => uncertainty?.confidenceInterval95?.join(":") ?? "").join(";"),
       excludedIrfLimitedCount,
       fit.irfFwhm,
       fit.rmse,
       fit.explainedVariance,
       fit.fitPointCount,
       fit.lifetimeBasis ?? "preview",
+      fit.uncertainty?.status ?? "unavailable",
+      fit.uncertainty?.method ?? "",
+      fit.uncertainty?.degreesOfFreedom ?? "",
     ];
   });
   return mixedCsv([
-    "evidence_id", "dataset_id", "dataset_label", "fit_status", "interpreted_component_count", "interpreted_lifetimes_ps", "excluded_irf_limited_count",
+    "evidence_id", "dataset_id", "dataset_label", "fit_status", "interpreted_component_count", "interpreted_lifetimes_ps",
+    "lifetime_standard_errors_ps", "lifetime_confidence_intervals_95_ps", "excluded_irf_limited_count",
     "irf_fwhm_ps", "rmse", "explained_variance", "fit_point_count", "lifetime_basis",
+    "uncertainty_status", "uncertainty_method", "residual_degrees_of_freedom",
   ], rows);
 }
 

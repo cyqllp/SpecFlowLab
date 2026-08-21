@@ -110,9 +110,11 @@ Implemented version 1.0 scope:
   repeated inside the corresponding lifetime-table row; positive regions are
   ESA candidates, negative regions remain GSB/SE candidates, and only explicit
   absorption/PL connections refine their context;
-- a Gaussian-informed Feature Finder ranks resolved major and minor bands with
-  controllable relative peak threshold, minimum Gaussian R-squared, and minimum
-  FWHM; shape likeness remains a candidate filter rather than assignment proof;
+- a noise-aware Gaussian Lineshape Finder fits signed Gaussian mixtures to each
+  EAS/DAS component, selects additional peaks from robust local noise and BIC
+  improvement, and exposes minimum amplitude SNR, maximum peaks per component,
+  and minimum FWHM; the previous local-threshold method remains an explicit
+  fallback and neither method proves an assignment;
 - the derived Feature × Time Map compresses every candidate wavelength band
   into a measured-time trace and reports cell reduction, wavelength coverage,
   and a piecewise reconstruction score instead of claiming that the lossy map
@@ -126,6 +128,11 @@ Implemented version 1.0 scope:
   bounded enlargement, and compact plot-local PNG or tab-delimited TXT export
   from its context menu; enlarged spectrum and kinetics views retain their
   time and wavelength selectors, respectively;
+- every chart can also be pinned into a session-only Evidence Tray that freezes
+  its rendered PNG, displayed numerical values, dataset/fit fingerprint, and
+  view state; selected in-scope captures enter AI Investigation as one
+  checksummed `E###` record with PNG, TSV, and JSON provenance without changing
+  or enlarging the saved `.sflproj` project;
 - dataset and folder context menus are anchored to the item that opened them;
   folder menus provide scoped import and clipboard paste without exposing the
   WebView's generic Reload action;
@@ -133,6 +140,17 @@ Implemented version 1.0 scope:
   current fit and preserves completed fit results;
 - global fitting accepts editable lifetime starts and explicit per-lifetime
   `Fix` controls; entering a value alone does not fix it;
+- global fitting uses a separable variable-projection architecture: shared
+  lifetimes are optimized nonlinearly while wavelength-dependent spectra,
+  smooth pre-zero terms, and coherent time-zero terms are solved conditionally
+  with column-pivoted QR rather than normal equations;
+- the pre-zero model is a smooth negative-time envelope with an optional slope,
+  not a constant-zero assumption, and Gaussian derivative terms can represent
+  structured coherent signal on both sides of time zero;
+- deterministic multi-start optimization, robust noise weighting, explicit
+  convergence diagnostics, rank/condition estimates, and edge-omission refits
+  expose numerical and selected-range sensitivity instead of silently accepting
+  one optimizer result;
 - the Tauri icon depicts photons traveling through a guided fluid-like path;
 - Tauri save commands use native destination dialogs for projects, Markdown
   briefs, `.sflai` investigation packages, Origin interoperability
@@ -158,14 +176,21 @@ Remaining production gaps:
   streaming native archive writer are still future hardening work;
 - the comparison and fitting workspaces are focused in-app windows rather than
   separate operating-system windows;
-- the numerical core still uses the JavaScript coordinate-search nonlinear
-  preview. It needs a validated variable-projection optimizer, uncertainty
-  estimates, and reference-dataset regression tests before publication use.
-- Gaussian shape scores, Feature Finder thresholds, and Abs/PL overlap are
-  heuristic. Real bands may be asymmetric, overlapping, clipped, or
-  non-Gaussian. Validated
-  uncertainty, peak deconvolution, model selection, user-confirmed persistent
-  feature nodes, and species-level proof remain future work.
+- the numerical core is now a JavaScript variable-projection implementation
+  with synthetic recovery and range-stability regressions. Free lifetimes now
+  include profiled-residual Jacobian standard errors, 95% log-space intervals,
+  parameter correlations, residual degrees of freedom, and rank/bound warnings.
+  It still needs independent TIMP/pyglotaran-compatible reference regression,
+  profile-likelihood or bootstrap coverage validation, residual-SVD diagnostics,
+  and shared simultaneous multi-dataset fitting before publication-grade claims;
+- the generated `EAS preview` is an algebraic sequential-model transform, not
+  a model-independent species spectrum. Scientific EAS claims require an
+  explicit kinetic/target model and validation;
+- Signed Gaussian decomposition, BIC improvement, amplitude SNR, and Abs/PL
+  overlap remain heuristic candidate evidence. Real bands may be asymmetric,
+  overlapping, clipped, or non-Gaussian. Validated parameter uncertainty,
+  reference-dataset benchmarking, user-confirmed persistent feature nodes, and
+  species-level proof remain future work.
 
 ## Product Direction
 
@@ -178,7 +203,7 @@ Remaining production gaps:
 
 ## Current State
 
-The `1.0.5` desktop application is implemented and syntax-checked, and its
+The `1.0.6` desktop application is implemented and syntax-checked, and its
 spectroscopy and archive workflows are exercised with synthetic regressions
 and the real 20-dataset example project.
 
@@ -269,6 +294,8 @@ Current DMG status: the `.app` target builds successfully. Full `npm run tauri:b
   commands, scientific data mapping, and Windows integration boundary.
 - Use this desktop shell to test the real project workflow, native file
   destinations, coordinated comparison, and focused analysis workspaces.
-- The next numerical milestone is replacing the current coordinate-search nonlinear fit with a stronger variable-projection optimizer.
+- The next numerical milestone is external reference and uncertainty-coverage
+  validation, followed by simultaneous multi-dataset fitting with shared
+  lifetimes and dataset-specific amplitudes/noise models.
 
 A provenance-preserving desktop workspace for time-resolved spectroscopy.

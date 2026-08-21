@@ -4,6 +4,21 @@ All notable changes to SpecFlowLab are recorded here.
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-08-21
+
+- **Variable-projection global-analysis core** — replaces coordinate-wise
+  lifetime search with bounded deterministic multi-start optimization over
+  shared lifetimes and a column-pivoted QR conditional spectral solve. The fit
+  now models a smooth structured pre-zero envelope and selectable Gaussian
+  coherent-artifact derivatives, supports robust noise weighting, and records
+  convergence, rank/condition, and edge-range sensitivity diagnostics. EAS is
+  labeled as a sequential-model preview rather than species proof.
+- **Model-conditional lifetime uncertainty** — free lifetimes now report
+  residual-variance-scaled standard errors, 95% log-space confidence intervals,
+  covariance/correlation, effective Jacobian rank, residual degrees of freedom,
+  and boundary or identifiability warnings. Fixed lifetimes are labeled fixed
+  and never receive fabricated intervals; AI and Origin handoffs retain the
+  uncertainty metadata while continuing to exclude IRF-limited components.
 - **External Evidence Workspace** — Dataset Details now combines scientific
   identity, role, and high-value conditions in a compact upper panel and keeps
   less-used conditions in a disclosure. The lower panel adds a project evidence
@@ -31,11 +46,16 @@ All notable changes to SpecFlowLab are recorded here.
   DeltaOD traces over candidate wavelength regions and reports compression,
   coverage, and reconstruction diagnostics while retaining the raw heatmap as
   authoritative.
-- **Controllable Gaussian Feature Finder** — EAS/DAS feature discovery now
-  locates local positive and negative bands, ranks their Gaussian likeness,
-  and exposes a relative peak threshold, minimum Gaussian R-squared, and minimum
-  FWHM controls. A regression demonstrates that lowering the threshold reveals
-  a weak 16%-amplitude Gaussian band without treating shape as identity proof.
+- **Noise-aware Gaussian Lineshape Finder** — EAS/DAS feature discovery now
+  fits signed multi-Gaussian models per component, requires robust local-noise
+  amplitude SNR and BIC improvement for added peaks, and exposes minimum SNR,
+  maximum peaks per component, and minimum FWHM. Regression coverage includes a
+  5%-amplitude minor band, a low-amplitude later component, pure-noise rejection,
+  and the explicit legacy local-threshold fallback.
+- **Temporary Evidence Tray** — every chart can be pinned with its PNG,
+  displayed numerical values, view state, and dataset/fit fingerprint. Selected
+  in-scope captures become one checksummed `E###` PNG/TSV/JSON record in
+  `.sflai`; captures remain session-only and do not dirty or enter `.sflproj`.
 - **Permanent IRF-limit exclusion** — IRF-limited components no longer appear
   in interpreted lifetime tables, EAS/DAS plots, comparisons, feature labels,
   Feature x Time maps, AI evidence summaries, or Origin component outputs.
@@ -67,8 +87,9 @@ All notable changes to SpecFlowLab are recorded here.
   Exact raw sources and full little-endian Float64 matrices are opt-in only.
 - **Honest AI diagnostics boundary** — deterministic comparable physical
   coordinates and finite-only residual RMS summaries are exported when
-  available; residual SVD, uncertainty, and fit stability are explicitly
-  listed as unavailable instead of inferred. The legacy Markdown exporter is
+  available; unsupported residual SVD remains explicit rather than inferred,
+  while later fits can export model-conditional uncertainty and stability
+  diagnostics. The legacy Markdown exporter is
   retained under Advanced for compatibility, with no provider upload or
   automatic project mutation.
 - **Reliable Origin COM server selection** — the COM helper no longer trusts the

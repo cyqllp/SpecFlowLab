@@ -248,8 +248,31 @@ function interpretedFitMetadata(fit) {
     lifetimes: retainedIndices.map((index) => archiveNumber(fit.lifetimes[index])),
     fixedLifetimes: retainedIndices.map((index) => Boolean(fit.fixedLifetimes?.[index])),
     irfLimited: retainedIndices.map(() => false),
+    uncertainty: interpretedLifetimeUncertainty(fit.uncertainty, retainedIndices),
     excludedIrfLimitedComponentCount: (fit.irfLimited ?? []).filter(Boolean).length,
     originHideIrfLimited: true,
+  };
+}
+
+function interpretedLifetimeUncertainty(uncertainty, retainedIndices) {
+  if (!uncertainty) return null;
+  const retainedSet = new Set(retainedIndices);
+  const originalFreeIndices = uncertainty.freeComponentIndices ?? [];
+  const retainedFreePositions = originalFreeIndices
+    .map((componentIndex, freeIndex) => ({ componentIndex, freeIndex }))
+    .filter(({ componentIndex }) => retainedSet.has(componentIndex));
+  return {
+    ...uncertainty,
+    lifetimes: retainedIndices.map((index) => uncertainty.lifetimes?.[index] ?? null),
+    freeComponentIndices: retainedFreePositions.map(({ componentIndex }) => retainedIndices.indexOf(componentIndex)),
+    freeParameterCount: retainedFreePositions.length,
+    jacobianRank: Math.min(uncertainty.jacobianRank ?? 0, retainedFreePositions.length),
+    covarianceLogLifetime: retainedFreePositions.map(({ freeIndex: row }) => (
+      retainedFreePositions.map(({ freeIndex: column }) => uncertainty.covarianceLogLifetime?.[row]?.[column] ?? null)
+    )),
+    correlationMatrix: retainedFreePositions.map(({ freeIndex: row }) => (
+      retainedFreePositions.map(({ freeIndex: column }) => uncertainty.correlationMatrix?.[row]?.[column] ?? null)
+    )),
   };
 }
 

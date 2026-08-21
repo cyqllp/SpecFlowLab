@@ -1,3 +1,5 @@
+import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
+
 (function attachParser(root) {
   const MAX_UFS_STRING_BYTES = 16 * 1024 * 1024;
   const MAX_UFS_MATRIX_VALUES = 100_000_000;
@@ -451,62 +453,7 @@
   }
 
   function fitGlobalExponentials(analysis, componentCount, options = {}) {
-    const count = Math.max(1, Math.min(6, Number(componentCount) || 1));
-    const irfFwhm = Math.max(0, Number(options.irfFwhm) || 0);
-    const fitIndexes = analysis.timeAxis
-      .map((time, index) => ({ time, index }))
-      .filter((item) => Number.isFinite(item.time))
-      .map((item) => item.index);
-    if (fitIndexes.length < count + 3) {
-      throw new Error("Not enough finite time points for fitting.");
-    }
-
-    const fitTimes = fitIndexes.map((index) => analysis.timeAxis[index]);
-    const requestedLifetimes = Array.isArray(options.lifetimes) ? options.lifetimes.map(Number) : [];
-    const initialLifetimes = normalizeFitLifetimes(fitTimes, count, irfFwhm, requestedLifetimes);
-    const hasExplicitFixedMask = Array.isArray(options.fixedLifetimes);
-    const fixedMask = Array.from({ length: count }, (_, index) => {
-      const hasValue = Number.isFinite(requestedLifetimes[index]) && requestedLifetimes[index] > 0;
-      return hasValue && (hasExplicitFixedMask ? Boolean(options.fixedLifetimes[index]) : true);
-    });
-    const includeIrfArtifact = options.includeIrfArtifact !== false && irfFwhm > 0;
-    const optimized = refineGlobalLifetimes(analysis, fitIndexes, fitTimes, initialLifetimes, irfFwhm, fixedMask, { includeIrfArtifact });
-    const lifetimes = optimized.lifetimes;
-    const hasFixedLifetimes = fixedMask.some(Boolean);
-    const irfLimited = lifetimes.map((lifetime) => lifetime <= Math.max(0.001, irfFwhm * 1.05));
-    const solved = solveGlobalAmplitudes(analysis, fitIndexes, fitTimes, lifetimes, irfFwhm, { includeIrfArtifact });
-    const { amplitudes, artifactAmplitudes, fittedMatrix, residualMatrix, sse, sst, finiteCount } = solved;
-
-    const amplitudeRanges = lifetimes.map((_, componentIndex) => {
-      const values = amplitudes.map((row) => row[componentIndex]).filter(Number.isFinite);
-      return values.length ? { min: Math.min(...values), max: Math.max(...values) } : { min: Number.NaN, max: Number.NaN };
-    });
-    const dasSpectra = buildDasSpectra(analysis.spectralAxis, lifetimes, amplitudes);
-    const easSpectra = buildSequentialEasSpectra(analysis.spectralAxis, lifetimes, amplitudes);
-
-    return {
-      model: "global-exponential-preview",
-      componentCount: count,
-      irfFwhm,
-      preZeroModel: "wavelength-dependent constant offset",
-      lifetimeBasis: hasFixedLifetimes ? "nonlinear refined with user-fixed components" : "nonlinear globally refined",
-      lifetimeIterations: optimized.iterations,
-      lifetimeRmseStart: optimized.startRmse,
-      fixedLifetimes: fixedMask,
-      irfLimited,
-      irfArtifactModel: includeIrfArtifact ? "wavelength-dependent Gaussian time-zero term" : "off",
-      lifetimes,
-      amplitudes,
-      artifactAmplitudes,
-      amplitudeRanges,
-      dasSpectra,
-      easSpectra,
-      fittedMatrix,
-      residualMatrix,
-      fitPointCount: finiteCount,
-      rmse: finiteCount ? Math.sqrt(sse / finiteCount) : Number.NaN,
-      explainedVariance: sst > 0 ? 1 - sse / sst : Number.NaN,
-    };
+    return fitVariableProjectionGlobal(analysis, componentCount, options);
   }
 
   function refineGlobalLifetimes(analysis, fitIndexes, fitTimes, initialLifetimes, irfFwhm, fixedMask, options = {}) {
@@ -723,6 +670,20 @@
         irf_fwhm_ps: cleanNumber(fit.irfFwhm),
         component_count: retainedComponentIndices.length,
         lifetimes_ps: retainedComponentIndices.map((index) => cleanNumber(fit.lifetimes[index])),
+        lifetime_uncertainty: {
+          status: fit.uncertainty?.status ?? "unavailable",
+          method: fit.uncertainty?.method ?? null,
+          confidence_level: cleanNumber(fit.uncertainty?.confidenceLevel),
+          degrees_of_freedom: fit.uncertainty?.degreesOfFreedom ?? null,
+          estimates: retainedComponentIndices.map((index) => ({
+            component: `C${index + 1}`,
+            lifetime_ps: cleanNumber(fit.lifetimes[index]),
+            standard_error_ps: cleanNumber(fit.uncertainty?.lifetimes?.[index]?.standardError),
+            confidence_interval_95_ps: (fit.uncertainty?.lifetimes?.[index]?.confidenceInterval95 ?? []).map(cleanNumber),
+            fixed: Boolean(fit.fixedLifetimes?.[index]),
+          })),
+          warnings: fit.uncertainty?.warnings ?? [],
+        },
         fit_quality: {
           rmse: cleanNumber(fit.rmse),
           explained_variance: cleanNumber(fit.explainedVariance),
@@ -874,6 +835,14 @@
     }
     if (Number.isFinite(fit.lifetimeRmseStart) && fit.rmse < fit.lifetimeRmseStart) {
       notes.push(`Nonlinear lifetime refinement improved RMSE from ${format(fit.lifetimeRmseStart)} to ${format(fit.rmse)}.`);
+    }
+    if (["available", "available-with-warnings"].includes(fit.uncertainty?.status)) {
+      notes.push("Lifetime standard errors and 95% intervals use local profiled-residual Jacobian covariance in log-lifetime space; they are conditional on the selected model, range, weights, and converged optimum.");
+      notes.push(...(fit.uncertainty.warnings ?? []));
+    } else if (fit.uncertainty?.status === "fixed") {
+      notes.push("All lifetimes were fixed by the user, so lifetime uncertainty was not estimated.");
+    } else {
+      notes.push("Lifetime uncertainty is unavailable for this fit; do not infer precision from displayed digits.");
     }
     if ((analysis.provenance ?? []).some((item) => item.status === "skipped")) {
       notes.push("At least one preprocessing step was skipped; inspect processing history before interpretation.");
