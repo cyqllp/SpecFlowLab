@@ -41,8 +41,18 @@ Implemented version 1.0 scope:
 - CSV/text matrices and Ultrafast Systems `Version2` `.ufs` raw-data files
   enter the same processing workflow; UFS acquisition metadata is copied into
   the editable dataset note while the original binary remains immutable;
-- project-owned dataset display names and sample notes are saved and included
-  in the AI handoff, while raw filenames remain immutable;
+- project-owned Dataset Details save display names, sample notes, technique,
+  scientific role, sample/preparation IDs, candidate species/states, and
+  the most relevant experimental conditions in one compact upper record;
+  less-used conditions remain available without crowding the primary view;
+- the lower Connected Evidence workspace imports external spectroscopy and
+  characterization files, figures, documents/manuscripts, and literature into
+  a project evidence library through a dedicated Finder, drag-and-drop, and
+  clipboard-paste panel; exact source bytes, checksums, rights/citation
+  metadata, and provenance survive `.sflproj` save/reopen;
+- checkbox selection can apply one reviewed relationship type and authored
+  rationale to multiple evidence items, while a focused one-hop relation map
+  visualizes only explicit edges and never infers scientific identity;
 - merge selection is available only for treated datasets, and the Merge command
   sits between Chirp and Reset so the product workflow is treatment-first;
 - exactly two treated VIS/NIR datasets can enter the focused merge workspace:
@@ -88,21 +98,41 @@ Implemented version 1.0 scope:
   reporting success, and OriginPro 8.5 or older is rejected;
 - Origin heatmaps place wavelength on the horizontal axis and log-scaled time
   on the vertical axis from 0.1 ps to the measured maximum; line graphs are
-  created on independent one-layer pages, and hidden IRF-limited components
-  are omitted from Origin component sheets/plots while retained in the
-  provenance bundle;
+  created on independent one-layer pages, and IRF-limited components are
+  always omitted from interpreted lifetime/component sheets and plots while
+  retained only in the internal fit provenance and full fitted/residual data;
 - comparison starts with dataset checkboxes and opens a coordinated
   kinetics/spectra/EAS/DAS workspace with one reusable color, width, dash
   style, and legend name per sample;
 - completed fits reveal a lifetime summary and switchable EAS/DAS panel on the
   main screen, with EAS selected by default;
-- IRF-limited status is shown directly after the affected time constant, and
-  the affected spectra can be hidden reversibly in fit, result, and comparison
-  views;
+- deterministic feature labels are drawn directly on their EAS/DAS regions and
+  repeated inside the corresponding lifetime-table row; positive regions are
+  ESA candidates, negative regions remain GSB/SE candidates, and only explicit
+  absorption/PL connections refine their context;
+- a noise-aware Gaussian Lineshape Finder fits signed Gaussian mixtures to each
+  EAS/DAS component, selects additional peaks from robust local noise and BIC
+  improvement, and exposes minimum amplitude SNR, maximum peaks per component,
+  and minimum FWHM; the previous local-threshold method remains an explicit
+  fallback and neither method proves an assignment;
+- the derived Feature × Time Map compresses every candidate wavelength band
+  into a measured-time trace and reports cell reduction, wavelength coverage,
+  and a piecewise reconstruction score instead of claiming that the lossy map
+  replaces the authoritative treated fsTA heatmap; both candidates and the
+  compressed map are available to AI Investigation export;
+- IRF-limited components are excluded permanently from interpreted lifetime
+  tables, EAS/DAS, comparisons, feature labels, Feature x Time maps, AI feature
+  evidence, and Origin outputs; the fit retains them internally only to
+  reproduce fitted/residual matrices and provenance;
 - every scientific plot supports drag-selected physical-region magnification,
   bounded enlargement, and compact plot-local PNG or tab-delimited TXT export
   from its context menu; enlarged spectrum and kinetics views retain their
   time and wavelength selectors, respectively;
+- every chart can also be pinned into a session-only Evidence Tray that freezes
+  its rendered PNG, displayed numerical values, dataset/fit fingerprint, and
+  view state; selected in-scope captures enter AI Investigation as one
+  checksummed `E###` record with PNG, TSV, and JSON provenance without changing
+  or enlarging the saved `.sflproj` project;
 - dataset and folder context menus are anchored to the item that opened them;
   folder menus provide scoped import and clipboard paste without exposing the
   WebView's generic Reload action;
@@ -110,9 +140,33 @@ Implemented version 1.0 scope:
   current fit and preserves completed fit results;
 - global fitting accepts editable lifetime starts and explicit per-lifetime
   `Fix` controls; entering a value alone does not fix it;
+- global fitting uses a separable variable-projection architecture: shared
+  lifetimes are optimized nonlinearly while wavelength-dependent spectra,
+  smooth pre-zero terms, and coherent time-zero terms are solved conditionally
+  with column-pivoted QR rather than normal equations;
+- the pre-zero model is a smooth negative-time envelope with an optional slope,
+  not a constant-zero assumption, and Gaussian derivative terms can represent
+  structured coherent signal on both sides of time zero;
+- deterministic multi-start optimization, robust noise weighting, explicit
+  convergence diagnostics, rank/condition estimates, and edge-omission refits
+  expose numerical and selected-range sensitivity instead of silently accepting
+  one optimizer result;
 - the Tauri icon depicts photons traveling through a guided fluid-like path;
 - Tauri save commands use native destination dialogs for projects, Markdown
-  summaries, Origin interoperability bundles/projects, and exported figures;
+  briefs, `.sflai` investigation packages, Origin interoperability
+  bundles/projects, and exported figures;
+- AI Investigation requires a scientific question and explicit scope, previews
+  Brief/Diagnostic/Full evidence locally, assigns stable `E###` citations,
+  exports checksummed CSV/JSON evidence with concise `brief.md` and `prompt.md`,
+  keeps raw sources/full matrices opt-in, and performs no provider upload;
+- a versioned `specflowlab.evidence_graph.v1` layer preserves dataset entities,
+  proposed species/state hypotheses, Unicode note annotations, and authored
+  factual or interpretive connections without duplicating numerical data;
+  connected investigations traverse one reviewed relationship hop and export
+  connection IDs, inclusion rationale, and matching/different/unknown condition
+  reports without inferring identity or scientific equivalence; connected
+  external evidence contributes metadata and derived previews, while exact
+  source bytes enter Full packages only after raw-source opt-in and rights review;
 - explicit project, job, dataset, and result states replace the ambiguous
   `Ready` label.
 
@@ -122,13 +176,26 @@ Remaining production gaps:
   streaming native archive writer are still future hardening work;
 - the comparison and fitting workspaces are focused in-app windows rather than
   separate operating-system windows;
-- the numerical core still uses the JavaScript coordinate-search nonlinear
-  preview. It needs a validated variable-projection optimizer, uncertainty
-  estimates, and reference-dataset regression tests before publication use.
+- the numerical core is now a JavaScript variable-projection implementation
+  with synthetic recovery and range-stability regressions. Free lifetimes now
+  include profiled-residual Jacobian standard errors, 95% log-space intervals,
+  parameter correlations, residual degrees of freedom, and rank/bound warnings.
+  It still needs independent TIMP/pyglotaran-compatible reference regression,
+  profile-likelihood or bootstrap coverage validation, residual-SVD diagnostics,
+  and shared simultaneous multi-dataset fitting before publication-grade claims;
+- the generated `EAS preview` is an algebraic sequential-model transform, not
+  a model-independent species spectrum. Scientific EAS claims require an
+  explicit kinetic/target model and validation;
+- Signed Gaussian decomposition, BIC improvement, amplitude SNR, and Abs/PL
+  overlap remain heuristic candidate evidence. Real bands may be asymmetric,
+  overlapping, clipped, or non-Gaussian. Validated parameter uncertainty,
+  reference-dataset benchmarking, user-confirmed persistent feature nodes, and
+  species-level proof remain future work.
 
 ## Product Direction
 
-- Main screen: import, project save/load, baseline, chirp, post-treatment merge, reset, compare, global fitting, and AI Markdown export.
+- Main screen: import, project save/load, baseline, chirp, post-treatment merge,
+  reset, compare, global fitting, and question-driven AI Investigation export.
 - Comparison workspace: opened from one `Compare` button, with dataset-linked plot styles, legend names, line colors, thickness, and line style.
 - Global fitting workspace: opened only when fitting is needed, with component count, IRF, batch fitting, DAS, EAS, and fit statistics.
 - Scientific core: maintained in `src/lib/parser-core.js`, with parser and
@@ -136,7 +203,7 @@ Remaining production gaps:
 
 ## Current State
 
-The `1.0.2` desktop application is implemented and syntax-checked, and its
+The `1.0.6` desktop application is implemented and syntax-checked, and its
 spectroscopy and archive workflows are exercised with synthetic regressions
 and the real 20-dataset example project.
 
@@ -227,6 +294,8 @@ Current DMG status: the `.app` target builds successfully. Full `npm run tauri:b
   commands, scientific data mapping, and Windows integration boundary.
 - Use this desktop shell to test the real project workflow, native file
   destinations, coordinated comparison, and focused analysis workspaces.
-- The next numerical milestone is replacing the current coordinate-search nonlinear fit with a stronger variable-projection optimizer.
+- The next numerical milestone is external reference and uncertainty-coverage
+  validation, followed by simultaneous multi-dataset fitting with shared
+  lifetimes and dataset-specific amplitudes/noise models.
 
 A provenance-preserving desktop workspace for time-resolved spectroscopy.

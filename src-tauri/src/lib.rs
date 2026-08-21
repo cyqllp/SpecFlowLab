@@ -95,6 +95,7 @@ fn safe_default_name(default_name: &str, fallback: &str) -> String {
 fn extension_filter(file_type: &str) -> (&'static str, &'static [&'static str]) {
     match file_type {
         "project" => ("SpecFlowLab Project", &["sflproj"]),
+        "ai-investigation" => ("SpecFlowLab AI Investigation", &["sflai"]),
         "origin" => ("SpecFlowLab Origin Bundle", &["sflorigin"]),
         "origin-project" => ("Origin Project", &["opju"]),
         "markdown" => ("Markdown", &["md"]),
