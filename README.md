@@ -24,7 +24,6 @@ Choose a package from the
   EXE to run without installing. The current Windows packages are not
   Authenticode-signed, so Windows may show a SmartScreen notice.
 
-Release downloads include `SHA256SUMS.txt` for file-integrity checks.
 
 ### 2. Create your first project
 
@@ -32,7 +31,7 @@ Release downloads include `SHA256SUMS.txt` for file-integrity checks.
 2. Select a dataset and open **Edit Dataset Details** to set its name, sample
    information, role, and useful experimental conditions.
 3. Set the wavelength and time range you want to analyze.
-4. Apply **Baseline** or **Chirp** correction only when needed.
+4. Apply **Baseline** to improve data quality or **Chirp** correction when needed.
 5. Explore the linked heatmap, spectrum, and kinetics views. Moving a selector
    in one view updates the others.
 
@@ -45,7 +44,7 @@ treated VIS and NIR datasets while keeping the original sources unchanged.
 2. Adjust starting lifetimes if needed, then run the fit.
 3. Review the fit summary and residual map side by side.
 4. Inspect the EAS and DAS previews below them.
-5. Review the two strongest suggested peaks for each EAS component.
+5. Review the two strongest suggested signatures for each EAS component.
 
 A **signature** is simply a peak you want to track or discuss. Suggested
 signatures appear as dashed lines at their peak wavelengths. Double-click or
