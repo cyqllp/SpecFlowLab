@@ -1,301 +1,157 @@
 # SpecFlowLab
 
-SpecFlowLab is a public-beta portfolio project for provenance-preserving time-resolved spectroscopy.
+SpecFlowLab is a desktop workspace for time-resolved spectroscopy. It keeps
+raw measurements, processing choices, fitting results, feature labels, and
+related evidence together in one reviewable project.
 
-It imports CSV and UFS data, applies explicit treatments, compares and merges
-VIS/NIR measurements, previews global analysis, and hands off exact project
-data to OriginPro 8.6 or later on Windows.
+[Download the latest release](https://github.com/cyqllp/SpecFlowLab/releases/latest)
+or follow the source instructions below.
 
-Start with the 60-second demo in docs/DEMO.md, the job-search brief in
-docs/JOB_SEARCH.md, or the reproducibility note in docs/REPRODUCIBILITY.md.
+![SpecFlowLab workflow](docs/workflow.svg)
 
-![SpecFlowLab reproducible workflow](docs/workflow.svg)
+## Quick start
 
-## Why this project belongs on a public GitHub profile
+### 1. Download the app
 
-This repository combines a Tauri desktop shell, parser and archive core,
-VIS/NIR merge workflow, OriginPro bridge contract, bilingual interface,
-examples, tests, CI, release documentation, and a clear validation boundary.
-It is intentionally honest about what still needs stronger numerical
-validation before publication-grade kinetic fitting claims.
+Choose a package from the
+[latest GitHub release](https://github.com/cyqllp/SpecFlowLab/releases/latest):
 
-Before extending it, review
-docs/ENGINEERING_NOTES.md, especially the immutable data model, native service
-boundary, project format, numerical validation, and Tauri security requirements.
+- **macOS Apple silicon:** download the `macOS-arm64-portable.zip`, extract it,
+  and move `SpecFlowLab.app` to Applications. The test build is ad-hoc signed
+  but not notarized, so macOS may require **Control-click → Open** the first
+  time.
+- **Windows x64:** use the setup EXE or MSI for installation, or the portable
+  EXE to run without installing. The current Windows packages are not
+  Authenticode-signed, so Windows may show a SmartScreen notice.
 
-Implemented version 1.0 scope:
+Release downloads include `SHA256SUMS.txt` for file-integrity checks.
 
-- the main workspace follows a tall project/dataset rail, central
-  information/heatmap/fit-summary column, and right-side
-  spectrum/kinetics/component-spectra column; the component panel receives
-  more vertical plot space while every canvas remains clipped inside its card;
-- the interface can be switched between polished English and Simplified
-  Chinese, remembers the choice locally, and leaves scientific abbreviations,
-  filenames, sample names, and numerical data unchanged;
-- Manual and About dialogs provide an in-app workflow guide, version and
-  copyright information, and the product feedback address;
-- datasets live in one-level project folders such as VIS, NIR, and IR;
-  files imported together enter one folder, and datasets can be moved by a
-  dedicated stable drag grip or desktop context menu without changing their
-  source CSV or UFS files;
-- CSV/text matrices and Ultrafast Systems `Version2` `.ufs` raw-data files
-  enter the same processing workflow; UFS acquisition metadata is copied into
-  the editable dataset note while the original binary remains immutable;
-- project-owned Dataset Details save display names, sample notes, technique,
-  scientific role, sample/preparation IDs, candidate species/states, and
-  the most relevant experimental conditions in one compact upper record;
-  less-used conditions remain available without crowding the primary view;
-- the lower Connected Evidence workspace imports external spectroscopy and
-  characterization files, figures, documents/manuscripts, and literature into
-  a project evidence library through a dedicated Finder, drag-and-drop, and
-  clipboard-paste panel; exact source bytes, checksums, rights/citation
-  metadata, and provenance survive `.sflproj` save/reopen;
-- checkbox selection can apply one reviewed relationship type and authored
-  rationale to multiple evidence items, while a focused one-hop relation map
-  visualizes only explicit edges and never infers scientific identity;
-- merge selection is available only for treated datasets, and the Merge command
-  sits between Chirp and Reset so the product workflow is treatment-first;
-- exactly two treated VIS/NIR datasets can enter the focused merge workspace:
-  it orders the probes by wavelength, uses their already calibrated analysis
-  time axes without an additional hidden time-zero shift, linearly resamples
-  onto measured common time support without extrapolation, and lets the user
-  retain explicit clean wavelength subranges in one compact join/output row;
-- VIS/NIR merging uses a hard spectral join: smoothing is diagnostic only and
-  never changes saved signals, optional overlap matching applies at most one
-  positive amplitude factor, and both parent datasets remain immutable;
-- merged datasets are stored as derived portable CSV-backed records with parent
-  lineage, time-shift convention, resampling method, amplitude-scale decision,
-  exclusions, warnings, spectral segments, and wavelength-axis breaks preserved
-  through project archives, treatments, AI handoff, and Origin bundles;
-- analysis-range, baseline, chirp, and reset operations apply to the active
-  folder, while range values are captured before progress rendering and
-  resolved against each dataset's physical axes;
-- the main screen links the heatmap, spectrum, and kinetics views through a
-  synchronized time/wavelength crosshair;
-- spectra and heatmaps leave unmeasured wavelength gaps blank and draw an axis
-  break instead of visually connecting disjoint VIS/NIR segments;
-- compressed `.sflproj` archives preserve each imported CSV text or UFS binary
-  exactly once, materialize each treated matrix once as portable little-endian
-  Float64 data, and retain folder membership, treatments, selections, UFS
-  metadata, and fit parameters;
-- derived fit matrices and component spectra are rebuilt deterministically
-  from the treated matrix and saved fit parameters when a project is opened;
-- legacy `.sfl.json` preview projects remain readable and are migrated to
-  `.sflproj` the next time they are saved;
-- project, processing, comparison, fitting, and AI-export commands are placed
-  near the content they affect;
-- a versioned `.sflorigin` interoperability bundle exports exact source CSV or
-  UFS data, a derived matrix CSV for OriginPro compatibility, treated
-  axes/matrices, selections, metadata, and available plot-ready
-  fitted/residual/DAS/EAS results for the standalone OriginPro Python bridge;
-- the Windows app can create an Origin project directly while retaining the
-  `.sflorigin` provenance bundle beside it: OriginPro 8.6–2020 uses an
-  experimental COM adapter that exports metadata, treated/selected data, and
-  available fit/DAS/EAS sheets to `.opj` without automatic graphs, while
-  OriginPro 2021+ uses the embedded Python adapter and defaults to `.opju`;
-  both paths
-  require the expected workbook count and a non-empty saved project before
-  reporting success, and OriginPro 8.5 or older is rejected;
-- Origin heatmaps place wavelength on the horizontal axis and log-scaled time
-  on the vertical axis from 0.1 ps to the measured maximum; line graphs are
-  created on independent one-layer pages, and IRF-limited components are
-  always omitted from interpreted lifetime/component sheets and plots while
-  retained only in the internal fit provenance and full fitted/residual data;
-- comparison starts with dataset checkboxes and opens a coordinated
-  kinetics/spectra/EAS/DAS workspace with one reusable color, width, dash
-  style, and legend name per sample;
-- completed fits reveal a lifetime summary and switchable EAS/DAS panel on the
-  main screen, with EAS selected by default;
-- deterministic feature labels are drawn directly on their EAS/DAS regions and
-  repeated inside the corresponding lifetime-table row; positive regions are
-  ESA candidates, negative regions remain GSB/SE candidates, and only explicit
-  absorption/PL connections refine their context;
-- a noise-aware Gaussian Lineshape Finder fits signed Gaussian mixtures to each
-  EAS/DAS component, selects additional peaks from robust local noise and BIC
-  improvement, and exposes minimum amplitude SNR, maximum peaks per component,
-  and minimum FWHM; the previous local-threshold method remains an explicit
-  fallback and neither method proves an assignment;
-- the derived Feature × Time Map compresses every candidate wavelength band
-  into a measured-time trace and reports cell reduction, wavelength coverage,
-  and a piecewise reconstruction score instead of claiming that the lossy map
-  replaces the authoritative treated fsTA heatmap; both candidates and the
-  compressed map are available to AI Investigation export;
-- IRF-limited components are excluded permanently from interpreted lifetime
-  tables, EAS/DAS, comparisons, feature labels, Feature x Time maps, AI feature
-  evidence, and Origin outputs; the fit retains them internally only to
-  reproduce fitted/residual matrices and provenance;
-- every scientific plot supports drag-selected physical-region magnification,
-  bounded enlargement, and compact plot-local PNG or tab-delimited TXT export
-  from its context menu; enlarged spectrum and kinetics views retain their
-  time and wavelength selectors, respectively;
-- every chart can also be pinned into a session-only Evidence Tray that freezes
-  its rendered PNG, displayed numerical values, dataset/fit fingerprint, and
-  view state; selected in-scope captures enter AI Investigation as one
-  checksummed `E###` record with PNG, TSV, and JSON provenance without changing
-  or enlarging the saved `.sflproj` project;
-- dataset and folder context menus are anchored to the item that opened them;
-  folder menus provide scoped import and clipboard paste without exposing the
-  WebView's generic Reload action;
-- batch global fitting processes only datasets that do not already have a
-  current fit and preserves completed fit results;
-- global fitting accepts editable lifetime starts and explicit per-lifetime
-  `Fix` controls; entering a value alone does not fix it;
-- global fitting uses a separable variable-projection architecture: shared
-  lifetimes are optimized nonlinearly while wavelength-dependent spectra,
-  smooth pre-zero terms, and coherent time-zero terms are solved conditionally
-  with column-pivoted QR rather than normal equations;
-- the pre-zero model is a smooth negative-time envelope with an optional slope,
-  not a constant-zero assumption, and Gaussian derivative terms can represent
-  structured coherent signal on both sides of time zero;
-- deterministic multi-start optimization, robust noise weighting, explicit
-  convergence diagnostics, rank/condition estimates, and edge-omission refits
-  expose numerical and selected-range sensitivity instead of silently accepting
-  one optimizer result;
-- the Tauri icon depicts photons traveling through a guided fluid-like path;
-- Tauri save commands use native destination dialogs for projects, Markdown
-  briefs, `.sflai` investigation packages, Origin interoperability
-  bundles/projects, and exported figures;
-- AI Investigation requires a scientific question and explicit scope, previews
-  Brief/Diagnostic/Full evidence locally, assigns stable `E###` citations,
-  exports checksummed CSV/JSON evidence with concise `brief.md` and `prompt.md`,
-  keeps raw sources/full matrices opt-in, and performs no provider upload;
-- a versioned `specflowlab.evidence_graph.v1` layer preserves dataset entities,
-  proposed species/state hypotheses, Unicode note annotations, and authored
-  factual or interpretive connections without duplicating numerical data;
-  connected investigations traverse one reviewed relationship hop and export
-  connection IDs, inclusion rationale, and matching/different/unknown condition
-  reports without inferring identity or scientific equivalence; connected
-  external evidence contributes metadata and derived previews, while exact
-  source bytes enter Full packages only after raw-source opt-in and rights review;
-- explicit project, job, dataset, and result states replace the ambiguous
-  `Ready` label.
+### 2. Create your first project
 
-Remaining production gaps:
+1. Create a project and import one or more CSV or UFS measurements.
+2. Select a dataset and open **Edit Dataset Details** to set its name, sample
+   information, role, and useful experimental conditions.
+3. Set the wavelength and time range you want to analyze.
+4. Apply **Baseline** or **Chirp** correction only when needed.
+5. Explore the linked heatmap, spectrum, and kinetics views. Moving a selector
+   in one view updates the others.
 
-- `.sflproj` is now a versioned ZIP archive, but per-entry checksums and a
-  streaming native archive writer are still future hardening work;
-- the comparison and fitting workspaces are focused in-app windows rather than
-  separate operating-system windows;
-- the numerical core is now a JavaScript variable-projection implementation
-  with synthetic recovery and range-stability regressions. Free lifetimes now
-  include profiled-residual Jacobian standard errors, 95% log-space intervals,
-  parameter correlations, residual degrees of freedom, and rank/bound warnings.
-  It still needs independent TIMP/pyglotaran-compatible reference regression,
-  profile-likelihood or bootstrap coverage validation, residual-SVD diagnostics,
-  and shared simultaneous multi-dataset fitting before publication-grade claims;
-- the generated `EAS preview` is an algebraic sequential-model transform, not
-  a model-independent species spectrum. Scientific EAS claims require an
-  explicit kinetic/target model and validation;
-- Signed Gaussian decomposition, BIC improvement, amplitude SNR, and Abs/PL
-  overlap remain heuristic candidate evidence. Real bands may be asymmetric,
-  overlapping, clipped, or non-Gaussian. Validated parameter uncertainty,
-  reference-dataset benchmarking, user-confirmed persistent feature nodes, and
-  species-level proof remain future work.
+You can organize datasets into folders, compare several measurements, or merge
+treated VIS and NIR datasets while keeping the original sources unchanged.
 
-## Product Direction
+### 3. Run global analysis
 
-- Main screen: import, project save/load, baseline, chirp, post-treatment merge,
-  reset, compare, global fitting, and question-driven AI Investigation export.
-- Comparison workspace: opened from one `Compare` button, with dataset-linked plot styles, legend names, line colors, thickness, and line style.
-- Global fitting workspace: opened only when fitting is needed, with component count, IRF, batch fitting, DAS, EAS, and fit statistics.
-- Scientific core: maintained in `src/lib/parser-core.js`, with parser and
-  numerical behavior covered by fixtures in `tests/`.
+1. Open **Global Fitting** and choose the number of components.
+2. Adjust starting lifetimes if needed, then run the fit.
+3. Review the fit summary and residual map side by side.
+4. Inspect the EAS and DAS previews below them.
+5. Review the two strongest suggested peaks for each EAS component.
 
-## Current State
+A **signature** is simply a peak you want to track or discuss. Suggested
+signatures appear as dashed lines at their peak wavelengths. Double-click or
+right-click a label to rename it, change its type or position, add a note, or
+delete it. You can also click an EAS curve to add your own signature.
 
-The `1.0.6` desktop application is implemented and syntax-checked, and its
-spectroscopy and archive workflows are exercised with synthetic regressions
-and the real 20-dataset example project.
+### 4. Add related evidence
 
-Verified commands:
+Open **Edit Dataset Details**, then use the Evidence Import panel to drag,
+paste, or select:
+
+- absorption, PL, or other spectroscopy data;
+- characterization datasets;
+- figures and images;
+- manuscripts, papers, and supporting documents.
+
+Select imported items to connect them to a dataset. The relation map shows
+only the links you create. Connected absorption or PL data can help you review
+whether a negative fsTA feature is more consistent with GSB or SE, but the app
+keeps this as a suggestion for the user to confirm.
+
+### 5. Save or share the work
+
+- Save the full project as `.sflproj` and reopen it later.
+- Use **AI Investigation** to choose a question, scope, and evidence before
+  exporting a local `.sflai` package. SpecFlowLab does not upload it to an AI
+  provider.
+- On Windows, export a provenance bundle or create an OriginPro project with
+  OriginPro 8.6 or later.
+- Export individual plots as PNG or tab-delimited text from the plot menu.
+
+## What SpecFlowLab can do
+
+- Import CSV/text matrices and Ultrafast Systems `Version2` UFS files.
+- Preserve original source data while recording ranges, baseline correction,
+  chirp correction, merges, and fitting settings.
+- Display coordinated heatmap, spectrum, and kinetics views.
+- Compare datasets and join treated VIS/NIR measurements without hiding the
+  wavelength boundary.
+- Fit shared lifetimes and present the fit summary, residuals, DAS, and EAS
+  preview in one workspace.
+- Suggest spectral peaks, edit labels directly on EAS plots, and keep
+  user-authored ESA, GSB, SE, and other assignments separate from the fit.
+- Import external evidence and organize explicit dataset relationships in a
+  focused relation map.
+- Save portable projects and prepare selected, cited evidence for AI review or
+  OriginPro.
+- Switch the interface between English and Simplified Chinese.
+
+## Main file types
+
+| File | Purpose |
+| --- | --- |
+| CSV, TXT, UFS | Imported measurement data |
+| `.sflproj` | Complete reusable SpecFlowLab project |
+| `.sflai` | Selected evidence package for an AI investigation |
+| `.sflorigin` | Data and provenance bundle for OriginPro |
+
+## Scientific notes
+
+- Automatic feature labels are starting points, not confirmed assignments.
+- EAS is shown as a sequential-model preview; it is not independent proof of a
+  molecular species.
+- Very fast components that cannot be separated from the instrument response
+  are kept in fit provenance but hidden from interpreted component plots and
+  feature summaries.
+- Raw measurements and residual data remain available for checking the result.
+
+## Run from source
+
+Install Node.js 22 or later, Rust stable, and the platform requirements for
+[Tauri 2](https://v2.tauri.app/start/prerequisites/). Then run:
 
 ```bash
-node --check src/main.js
-node --check src/lib/parser-core.js
-npm run build
-npm test
-npm run test:origin
-npm run tauri -- --version
-npm run tauri -- build --bundles app
-```
-
-Built and checksum-verified release artifacts are produced locally. The app bundle
-and portable installers are intentionally published as GitHub Release assets,
-not committed to this source repository; see docs/RELEASE_CHECKLIST.md.
-
-The macOS app bundle is arm64, ad-hoc signed for local testing, and passes
-`codesign --verify --deep --strict` before and after ZIP extraction. The
-Windows portable artifact is a PE32+ x86-64 GUI executable with embedded
-matching `FileVersion` and `ProductVersion`; it is unsigned and still requires a
-target-Windows/WebView2 smoke test.
-
-## Public-beta package
-
-- Safe synthetic inputs are in examples/ and the walkthrough is in docs/DEMO.md.
-- Reproducible commands and limitations are in docs/REPRODUCIBILITY.md.
-- GitHub Actions runs JavaScript, Origin bridge, build, and Rust checks on push.
-- Release notes are in CHANGELOG.md; large installers belong in GitHub Releases.
-- The project is released under the MIT License. See LICENSE.
-- Citation metadata is in CITATION.cff. The archived release is available at
-  [Zenodo DOI 10.5281/zenodo.21839697](https://doi.org/10.5281/zenodo.21839697).
-
-## Run Frontend
-
-```bash
-cd /Volumes/MacData/Work/Software-dev/SpecFlowLab/SpecFlowLab-app
-npm install
-npm run dev
-```
-
-Open the Vite URL printed by the command.
-
-## Run Tauri Shell
-
-Rust is installed on this Mac. In a fresh shell, load Cargo if needed:
-
-```bash
-source "$HOME/.cargo/env"
-```
-
-Then:
-
-```bash
-cd /Volumes/MacData/Work/Software-dev/SpecFlowLab/SpecFlowLab-app
-npm install
+npm ci
 npm run tauri:dev
 ```
 
-## Build Installers
+To run only the browser-based interface:
+
+```bash
+npm run dev
+```
+
+Useful checks for contributors:
+
+```bash
+npm test
+npm run test:origin
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Build the desktop package with:
 
 ```bash
 npm run tauri:build
 ```
 
-The current config targets:
+## Learn more
 
-- macOS `.app` and `.dmg`
-- Windows NSIS installer
+- [60-second example walkthrough](docs/DEMO.md)
+- [Example datasets](examples/README.md)
+- [Reproducibility and scientific limits](docs/REPRODUCIBILITY.md)
+- [OriginPro integration](integrations/origin/README.md)
+- [Release notes](CHANGELOG.md)
 
-For early macOS local testing, `src-tauri/tauri.conf.json` uses ad-hoc signing:
-
-```json
-"signingIdentity": "-"
-```
-
-For public distribution, replace this with Developer ID signing and notarization.
-
-Current DMG status: the `.app` target builds successfully. Full `npm run tauri:build` reaches DMG packaging but the generated `bundle_dmg.sh` currently exits with an error without detailed output. Use `npm run tauri -- build --bundles app` for local macOS testing.
-
-## Notes
-
-- Keep the portable HTML demo in the parent development workspace only; the
-  reproducible public demo is documented in docs/DEMO.md.
-- See `integrations/origin/README.md` for the `.sflorigin` format, Origin
-  commands, scientific data mapping, and Windows integration boundary.
-- Use this desktop shell to test the real project workflow, native file
-  destinations, coordinated comparison, and focused analysis workspaces.
-- The next numerical milestone is external reference and uncertainty-coverage
-  validation, followed by simultaneous multi-dataset fitting with shared
-  lifetimes and dataset-specific amplitudes/noise models.
-
-A provenance-preserving desktop workspace for time-resolved spectroscopy.
+SpecFlowLab is released under the [MIT License](LICENSE). Citation information
+is available in [CITATION.cff](CITATION.cff).
