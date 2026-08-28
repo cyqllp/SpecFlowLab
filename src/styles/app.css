@@ -975,11 +975,19 @@ input[type="checkbox"] {
 }
 
 .treatment-actions button {
+  min-width: 0;
+  min-height: 42px;
   overflow: hidden;
-  padding-inline: 4px;
+  padding-inline: 7px;
   font-size: var(--fs-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.treatment-actions .reset-command {
+  border-color: #b8c5c8;
+  background: #f8fafb;
+  color: #34484d;
 }
 
 /* Treatment history */
@@ -1203,6 +1211,15 @@ canvas.zoom-selecting {
   font-size: 9px;
   font-weight: 750;
   white-space: nowrap;
+  min-height: 23px;
+  cursor: pointer;
+}
+
+.feature-tag:hover:not(:disabled),
+.feature-tag:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .feature-tag.positive {
@@ -2414,40 +2431,6 @@ canvas.zoom-selecting {
   text-transform: uppercase;
 }
 
-.feature-time-panel {
-  grid-column: 1 / -1;
-  min-height: 320px !important;
-}
-
-.feature-time-summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin: 3px 7px 7px;
-  font-size: 9px;
-}
-
-.feature-time-summary span {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: #fff;
-  padding: 3px 7px;
-  color: var(--muted);
-}
-
-.feature-time-summary strong {
-  color: var(--ink);
-}
-
-.feature-time-summary em,
-.feature-time-unavailable {
-  color: #8a6224;
-  font-size: 9px;
-  font-style: normal;
-  font-weight: 700;
-}
-
 @media (max-width: 760px) {
   .evidence-import-layout,
   .feature-candidate-grid {
@@ -2622,9 +2605,15 @@ canvas.zoom-selecting {
 .lifetime-editor-head {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: 8px;
   margin-bottom: 6px;
+}
+
+.lifetime-editor-head button {
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 9px;
 }
 
 .lifetime-grid {
@@ -2722,11 +2711,8 @@ canvas.zoom-selecting {
   min-height: 0;
 }
 
-.fit-residual { grid-column: 1 / -1; }
-
 .fit-summary-diagnostic {
   display: flex;
-  grid-column: 1 / -1;
   flex-direction: column;
 }
 
@@ -2743,53 +2729,92 @@ canvas.zoom-selecting {
   font-weight: 800;
 }
 
-.feature-finder-controls {
-  display: grid;
-  grid-template-columns: minmax(190px, 1.3fr) repeat(3, minmax(130px, 0.72fr)) auto;
-  align-items: end;
-  gap: 7px;
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
-  border-radius: var(--r-sm);
-  background: color-mix(in srgb, var(--accent) 5%, white);
-  margin-bottom: 9px;
-  padding: 8px;
+.signature-detail-title,
+.signature-detail-title > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.feature-finder-controls > div,
-.feature-finder-controls label {
+.signature-detail-title > div {
+  justify-content: flex-start;
+}
+
+.signature-detail-title span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.signature-detail-title .icon-button {
+  width: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  text-align: center;
+}
+
+.app-context-menu.signature-editor-popover {
+  display: grid;
+  width: min(420px, calc(100vw - 16px));
+  gap: 8px;
+  padding: 10px;
+}
+
+.signature-editor-popover > code {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signature-editor-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.signature-editor-fields > label {
   display: grid;
   gap: 2px;
 }
 
-.feature-finder-controls > div span,
-.feature-finder-controls label span,
-.feature-finder-controls label small {
-  color: var(--muted);
-  font-size: 9px;
+.signature-editor-fields > label:first-child,
+.signature-editor-fields > .signature-note-field {
+  grid-column: 1 / -1;
 }
 
-.feature-finder-controls label span {
+.signature-editor-fields > label > span {
+  color: var(--muted);
+  font-size: 9px;
   font-weight: 800;
 }
 
-.feature-finder-controls input {
-  min-height: 28px;
+.signature-editor-fields input,
+.signature-editor-fields select { min-width: 0; min-height: 30px; }
+
+.signature-unit-input {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px;
 }
 
-.feature-finder-controls > p {
-  grid-column: 1 / -1;
+.signature-unit-input small { color: var(--muted); font-size: 9px; }
+
+.signature-detail-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 5px;
+}
+
+.signature-editor-popover > p {
   margin: 0;
   color: var(--muted);
   font-size: 9px;
+  line-height: 1.4;
 }
-
-@media (max-width: 900px) {
-  .feature-finder-controls {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
 
 /* ── Merge Workspace ───────────────────────────────────────────────────── */
 
@@ -3526,6 +3551,14 @@ canvas.capture-target {
   .comparison-components,
   .fit-residual {
     grid-column: auto;
+  }
+
+  .feature-assignment-row {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .feature-assignment-row .assignment-wavelength {
+    display: none;
   }
 
   .style-list {

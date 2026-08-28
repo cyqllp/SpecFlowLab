@@ -4,6 +4,47 @@ All notable changes to SpecFlowLab are recorded here.
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-08-28
+
+- **Plot-native fsTA signatures** — every automatic and user-defined signature
+  is labeled directly on the EAS plot. Double-clicking or right-clicking a
+  label opens its focused name/type/wavelength/component/note editor; clicking
+  a specific EAS curve creates a user-defined signature at that wavelength.
+  The same labels are selectable from Global Fit Summary.
+- **Focused EAS suggestions** — automatic discovery presents the two strongest
+  SNR-ranked signature candidates per EAS component; user-defined signatures
+  remain unlimited and are never removed by this presentation limit.
+- **Exact signature markers** — EAS/DAS annotations are dashed vertical lines
+  at the peak coordinate instead of colored wavelength regions. Signature
+  edits remain authored interpretation and do not alter the global fit.
+- **Finder controls removed** — the Gaussian model remains an internal source
+  of initial suggestions, but the standalone Lineshape Finder panel and its
+  thresholds are no longer exposed now that users control signature positions.
+- **Improved multi-peak sensitivity** — iterative residual re-seeding finds
+  shoulder and weak peaks that the initial pass misses or misplaces, with
+  backward pruning of redundant peaks. Default minimum SNR reduced from 4 to 3,
+  minimum BIC improvement from 6 to 4, and the decimation cap raised from 360
+  to 480 points to preserve narrow features. The information criterion now
+  floors SSE at the noise level so sub-noise artifacts are no longer rewarded
+  on near-noiseless spectra.
+- **Simplified fitting diagnostics** — Signature Evolution is removed from the
+  fitting window. Global Fit Summary and Fit Residual Map now share the first
+  left/right row, with EAS and DAS below.
+- **Reset control sizing** — Reset Dataset and Reset Folder now occupy a shared
+  single-row action grid so neither label is clipped.
+- **Smooth slice navigation** — spectrum/kinetics slider and heatmap dragging
+  are coalesced to animation frames and repaint only the affected slices and
+  crosshair instead of every chart in the application.
+- **Origin heatmap presentation** — modern Origin output plots wavelength
+  across the row and log10 time from 0.1 ps, uses 8 major and 5 minor color
+  levels with blue-to-red mixed colors, and no longer creates a residual graph.
+  Residual matrices remain in worksheets and bundles for numerical audit.
+- **Reset scoping** — the single Reset button is replaced by "Reset Dataset"
+  (preserves the selected range but removes baseline, chirp, and fit only from
+  the active dataset) and "Reset Folder" (clears treatments and cropping for
+  every folder member). A separate Reset Fit Inputs restores fitting defaults
+  without deleting the last fit result.
+
 ## [1.0.6] - 2026-08-21
 
 - **Variable-projection global-analysis core** — replaces coordinate-wise

@@ -105,7 +105,7 @@ jobs:
         run: |
           mkdir -p releases
           ARCH="$(uname -m)"
-          ARCHIVE="releases/SpecFlowLab-1.0.6-macOS-${ARCH}-portable.zip"
+          ARCHIVE="releases/SpecFlowLab-1.0.7-macOS-${ARCH}-portable.zip"
           ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/release/bundle/macos/SpecFlowLab.app" "$ARCHIVE"
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
 
@@ -113,5 +113,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SpecFlowLab-macOS
-          path: releases/SpecFlowLab-1.0.6-macOS-*-portable.zip*
+          path: releases/SpecFlowLab-1.0.7-macOS-*-portable.zip*
           retention-days: 30

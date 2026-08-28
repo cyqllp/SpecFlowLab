@@ -43,7 +43,14 @@ test("Origin bundle carries exact source, treated arrays, selections, and plot-r
     decodeFloat64(entries[dataset.fit.residualMatrix.entry]),
     [0.1, 0.2, 0.3, -0.1, -0.2, -0.3],
   );
-  assert.equal(dataset.plotPlan.some((plot) => plot.id === "residual-heatmap"), true);
+  assert.equal(dataset.plotPlan.some((plot) => plot.id === "residual-heatmap"), false);
+  assert.deepEqual(dataset.plotPlan.find((plot) => plot.id === "treated-heatmap").colorMap, {
+    majorLevels: 8,
+    minorLevels: 5,
+    lowColor: "blue",
+    highColor: "red",
+    mixing: "introduce-other-colors",
+  });
   assert.equal("fittedMatrix" in dataset.fit.metadata, false);
 });
 
@@ -111,6 +118,13 @@ test("Origin output completely excludes IRF-limited component spectra and lifeti
       yScale: "log10",
       yMinimum: 0.1,
       z: "signal",
+      colorMap: {
+        majorLevels: 8,
+        minorLevels: 5,
+        lowColor: "blue",
+        highColor: "red",
+        mixing: "introduce-other-colors",
+      },
     },
   );
 });
@@ -142,7 +156,7 @@ test("Origin bundle preserves merge lineage and marks every spectral plot with i
   assert.equal(dataset.kind, "merged");
   assert.deepEqual(dataset.merge, merge);
   assert.deepEqual(dataset.analysis.metadata.wavelengthBreaks, merge.wavelengthBreaks);
-  for (const id of ["treated-heatmap", "selected-spectrum", "residual-heatmap", "das", "eas"]) {
+  for (const id of ["treated-heatmap", "selected-spectrum", "das", "eas"]) {
     const plot = dataset.plotPlan.find((item) => item.id === id);
     assert.equal(plot.spectralSegments, "analysis.metadata.spectralSegments");
     assert.equal(plot.wavelengthBreaks, "analysis.metadata.wavelengthBreaks");

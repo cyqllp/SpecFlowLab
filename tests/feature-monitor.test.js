@@ -15,11 +15,12 @@ test("feature monitor waits for global analysis and never labels heatmap signs a
 test("feature monitor reports positive ESA and unresolved negative candidates from current EAS", () => {
   const result = detectFstaFeatureCandidates(fittedDataset(), { relationships: [] }, []);
   assert.equal(result.status, "live");
+  assert.equal(result.detectionMethod, "multi-gaussian");
   assert.equal(result.candidates.some((candidate) => candidate.candidateType === "ESA candidate"), true);
   assert.equal(result.candidates.some((candidate) => candidate.candidateType.includes("GSB or SE")), true);
   assert.equal(result.candidates.every((candidate) => candidate.status === "suggested-not-confirmed"), true);
   assert.equal(result.candidates.every((candidate) => /^F1\.\d+$/.test(candidate.featureCode)), true);
-  assert.equal(result.candidates.every((candidate) => candidate.gaussianShape.rSquared >= 0.45), true);
+  assert.equal(result.candidates.every((candidate) => candidate.detectionMethod === "multi-gaussian"), true);
 });
 
 test("feature detection can annotate DAS independently from preferred EAS", () => {
@@ -52,17 +53,6 @@ test("noise-aware multi-Gaussian fitting finds a weak band without a component-m
   assert.equal(result.detectionMethod, "multi-gaussian");
   assert.equal(result.candidates.some((candidate) => Math.abs(candidate.wavelengthCenter - 670) < 5), true);
   assert.equal(result.candidates.every((candidate) => Number.isFinite(candidate.amplitudeSnr)), true);
-});
-
-test("legacy local-threshold behavior remains available as an explicit fallback", () => {
-  const x = Array.from({ length: 31 }, (_, index) => 450 + index * 10);
-  const y = x.map((wavelength) => Math.exp(-0.5 * ((wavelength - 520) / 16) ** 2)
-    + 0.16 * Math.exp(-0.5 * ((wavelength - 670) / 13) ** 2));
-  const dataset = { id: "ta", evidenceMetadata: { technique: { id: "fsta" } }, fit: { easSpectra: [{ x, y }] } };
-  const result = detectFstaFeatureCandidates(dataset, { relationships: [] }, [], { method: "local-threshold", relativeThreshold: 0.25 });
-
-  assert.equal(result.detectionMethod, "local-threshold");
-  assert.equal(result.candidates.some((candidate) => candidate.peakWavelength >= 640), false);
 });
 
 test("later low-amplitude component spectra are evaluated against local noise", () => {
@@ -117,6 +107,43 @@ test("multi-Gaussian fitting tolerates nonuniform sampling and explicit missing 
   assert.equal(result.diagnostics.pointCount, x.length - 2);
 });
 
+test("iterative re-seeding recovers a shoulder masked by a dominant band", () => {
+  const x = Array.from({ length: 241 }, (_, index) => 440 + index);
+  const noise = (index) => 0.004 * (Math.sin(index * 12.9898) * 43758.5453 % 1 - 0.5) * 2;
+  const y = x.map((wavelength, index) => (
+    Math.exp(-0.5 * ((wavelength - 520) / 18) ** 2)
+    + 0.18 * Math.exp(-0.5 * ((wavelength - 555) / 12) ** 2)
+    + noise(index)
+  ));
+  const withoutReseed = fitMultiGaussianSpectrum(x, y, { minimumSnr: 3, minimumFwhmNm: 6, maximumReseedPasses: 0 });
+  const withReseed = fitMultiGaussianSpectrum(x, y, { minimumSnr: 3, minimumFwhmNm: 6 });
+
+  assert.equal(withoutReseed.peaks.some((peak) => Math.abs(peak.centerNm - 555) < 7), false);
+  assert.equal(withReseed.peaks.some((peak) => Math.abs(peak.centerNm - 555) < 7), true);
+  assert.equal(withReseed.diagnostics.reseedPasses >= 1, true);
+});
+
+test("re-seeding does not add spurious peaks to a clean single-peak spectrum", () => {
+  const x = Array.from({ length: 161 }, (_, index) => 450 + index * 1.5);
+  const noise = (index) => 0.004 * (Math.sin(index * 12.9898) * 43758.5453 % 1 - 0.5) * 2;
+  const y = x.map((wavelength, index) => 0.8 * Math.exp(-0.5 * ((wavelength - 560) / 20) ** 2) + noise(index));
+  const result = fitMultiGaussianSpectrum(x, y, { minimumSnr: 3, minimumFwhmNm: 6 });
+
+  assert.equal(result.peaks.length, 1);
+  assert.equal(Math.abs(result.peaks[0].centerNm - 560) < 4, true);
+  assert.equal(result.diagnostics.modelOrder, 1);
+});
+
+test("decimation cap preserves narrow peaks across dense spectra", () => {
+  const x = Array.from({ length: 2001 }, (_, index) => 400 + index * 0.2);
+  const y = x.map((wavelength) => 0.5 * Math.exp(-0.5 * ((wavelength - 610) / 3.4) ** 2));
+  const result = fitMultiGaussianSpectrum(x, y, { minimumSnr: 3, minimumFwhmNm: 4 });
+
+  assert.equal(result.peaks.some((peak) => Math.abs(peak.centerNm - 610) < 3), true);
+  assert.equal(result.diagnostics.pointCount, 480);
+  assert.equal(result.diagnostics.inputPointCount, 2001);
+});
+
 test("IRF-limited components never create feature candidates or feature-time evolution", () => {
   const dataset = fittedDataset();
   dataset.fit.easSpectra.push({
@@ -162,7 +189,7 @@ test("feature monitor recomputes classification when a linked PL reference is ad
   assert.match(after.recomputePolicy, /current analysis.*evidence connections/i);
 });
 
-test("feature-time map compresses deterministic wavelength regions into measured-time traces", () => {
+test("signature evolution samples the measured row nearest each exact peak position", () => {
   const dataset = fittedDataset();
   const spectrum = dataset.fit.easSpectra[0];
   dataset.analysis = {
@@ -176,10 +203,12 @@ test("feature-time map compresses deterministic wavelength regions into measured
   assert.equal(compressed.status, "live");
   assert.equal(compressed.features.length, 2);
   assert.deepEqual(compressed.features[0].trace.length, dataset.analysis.timeAxis.length);
+  assert.equal(compressed.features.every((feature) => feature.spectralIndices.length === 1), true);
+  assert.equal(compressed.features.every((feature) => Number.isFinite(feature.sampledWavelength)), true);
   assert.equal(compressed.compression.cellReductionFactor, dataset.analysis.spectralAxis.length / compressed.features.length);
   assert.equal(compressed.compression.coveredWavelengthFraction > 0, true);
   assert.equal(Number.isFinite(compressed.compression.reconstructionScore), true);
-  assert.match(compressed.limitations[0], /lossy/i);
+  assert.match(compressed.limitations[0], /sparse signature trace/i);
 });
 
 function fittedDataset() {

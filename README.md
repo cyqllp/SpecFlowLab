@@ -96,9 +96,12 @@ Implemented version 1.0 scope:
   both paths
   require the expected workbook count and a non-empty saved project before
   reporting success, and OriginPro 8.5 or older is rejected;
-- Origin heatmaps place wavelength on the horizontal axis and log-scaled time
-  on the vertical axis from 0.1 ps to the measured maximum; line graphs are
-  created on independent one-layer pages, and IRF-limited components are
+- Origin heatmaps place wavelength values across the worksheet row and on the
+  horizontal graph axis, with log-scaled time down the first column and on the
+  vertical graph axis from 0.1 ps to the measured maximum; treated heatmaps use
+  8 major and 5 minor blue-to-red mixed-color levels, residual data is retained
+  without creating a residual graph, line graphs are created on independent
+  one-layer pages, and IRF-limited components are
   always omitted from interpreted lifetime/component sheets and plots while
   retained only in the internal fit provenance and full fitted/residual data;
 - comparison starts with dataset checkboxes and opens a coordinated
@@ -106,20 +109,15 @@ Implemented version 1.0 scope:
   style, and legend name per sample;
 - completed fits reveal a lifetime summary and switchable EAS/DAS panel on the
   main screen, with EAS selected by default;
-- deterministic feature labels are drawn directly on their EAS/DAS regions and
-  repeated inside the corresponding lifetime-table row; positive regions are
-  ESA candidates, negative regions remain GSB/SE candidates, and only explicit
-  absorption/PL connections refine their context;
-- a noise-aware Gaussian Lineshape Finder fits signed Gaussian mixtures to each
-  EAS/DAS component, selects additional peaks from robust local noise and BIC
-  improvement, and exposes minimum amplitude SNR, maximum peaks per component,
-  and minimum FWHM; the previous local-threshold method remains an explicit
-  fallback and neither method proves an assignment;
-- the derived Feature × Time Map compresses every candidate wavelength band
-  into a measured-time trace and reports cell reduction, wavelength coverage,
-  and a piecewise reconstruction score instead of claiming that the lossy map
-  replaces the authoritative treated fsTA heatmap; both candidates and the
-  compressed map are available to AI Investigation export;
+- every signature is labeled directly on the EAS plot; clicking a specific EAS
+  curve adds a user-defined signature at the exact measured wavelength, while
+  double-clicking or right-clicking a label opens its focused details editor;
+  the same labels are editable from Global Fit Summary, and automatic EAS
+  suggestions are limited to the two strongest SNR-ranked peaks per component;
+- EAS/DAS signatures render as dashed vertical peak-position markers and repeat
+  in the corresponding lifetime row. The internal noise-aware Gaussian model
+  only seeds suggestions; ESA/GSB/SE types and edited positions are authored
+  interpretations, not fit constraints or proof of identity;
 - IRF-limited components are excluded permanently from interpreted lifetime
   tables, EAS/DAS, comparisons, feature labels, Feature x Time maps, AI feature
   evidence, and Origin outputs; the fit retains them internally only to
@@ -203,7 +201,7 @@ Remaining production gaps:
 
 ## Current State
 
-The `1.0.6` desktop application is implemented and syntax-checked, and its
+The `1.0.7` desktop application is implemented and syntax-checked, and its
 spectroscopy and archive workflows are exercised with synthetic regressions
 and the real 20-dataset example project.
 

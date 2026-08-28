@@ -13,6 +13,8 @@ import { buildUfsFixture } from "./ufs-fixture.js";
 import { spectroscopySourceToCsv } from "../src/lib/source-data.js";
 import { upsertEvidenceConnection } from "../src/lib/evidence-graph/connections.js";
 import { migrateEvidenceGraph } from "../src/lib/evidence-graph/schema.js";
+import { upsertFeatureAssignment, upsertFeatureSignature } from "../src/lib/evidence-graph/entities.js";
+import { createManualSignature } from "../src/lib/feature-monitor/signatures.js";
 
 const Parser = globalThis.SpecFlowLabParser;
 
@@ -188,6 +190,88 @@ test("project archive round-trips evidence graph metadata without changing numer
   assert.equal(restored.datasets[0].evidenceMetadata.conditions.solvent, "toluene");
   assert.equal(restored.datasets[1].evidenceMetadata.technique.id, "absorption");
   assert.deepEqual(restored.datasets.map((dataset) => dataset.analysis.matrix), matricesBefore);
+});
+
+test("project archive round-trips user feature assignments as feature entities", () => {
+  const rawText = buildCsvFixture();
+  const source = Parser.parseSpectroscopyCsv(rawText, "feature-a.csv");
+  source.rawText = rawText;
+  const baseAnalysis = Parser.createAnalysisDataset(source);
+  const project = buildProject({ source, baseAnalysis, analysis: Parser.cloneAnalysisDataset(baseAnalysis), fit: null });
+  project.evidenceGraph = upsertFeatureAssignment(
+    migrateEvidenceGraph(null, project.datasets, { createdAt: project.savedAt }),
+    {
+      id: "feature-candidate:dataset-1:eas:c02:r01",
+      featureCode: "F2.1",
+      componentIndex: 1,
+      wavelengthMin: 473,
+      wavelengthMax: 598,
+      wavelengthCenter: 535.6,
+      candidateType: "Negative feature: GSB or SE candidate",
+      datasetId: "dataset-1",
+      mode: "EAS",
+    },
+    "GSB",
+    "consistent with reference ground-state bleach",
+    project.datasets,
+    { createdAt: project.savedAt },
+  );
+
+  const restored = hydrateProjectArchive(readProjectArchive(createProjectArchive(project)), Parser);
+  const entity = restored.evidenceGraph.entities.find((item) => item.id === "feature-candidate:dataset-1:eas:c02:r01");
+
+  assert.ok(entity);
+  assert.equal(entity.kind, "feature");
+  assert.equal(entity.assignment, "GSB");
+  assert.equal(entity.note, "consistent with reference ground-state bleach");
+  assert.equal(entity.datasetId, "dataset-1");
+  assert.equal(restored.datasets[0].analysis.matrix.length, project.datasets[0].analysis.matrix.length);
+});
+
+test("project archive preserves a user-defined signature peak and editor details", () => {
+  const rawText = buildCsvFixture();
+  const source = Parser.parseSpectroscopyCsv(rawText, "manual-signature.csv");
+  source.rawText = rawText;
+  const baseAnalysis = Parser.createAnalysisDataset(source);
+  const project = buildProject({ source, baseAnalysis, analysis: Parser.cloneAnalysisDataset(baseAnalysis), fit: null });
+  project.datasets[0].treatmentOverrides = { baseline: true, chirp: true };
+  const signature = createManualSignature(project.datasets[0], 0, 512.75, 0.02, {
+    idSuffix: "archive-test",
+    createdAt: project.savedAt,
+  });
+  project.evidenceGraph = upsertFeatureSignature(
+    migrateEvidenceGraph(null, project.datasets, { createdAt: project.savedAt }),
+    signature,
+    { assignment: "ESA", label: "blue ESA shoulder", note: "clicked on EAS 1" },
+    project.datasets,
+    { createdAt: project.savedAt },
+  );
+
+  const restored = hydrateProjectArchive(readProjectArchive(createProjectArchive(project)), Parser);
+  const entity = restored.evidenceGraph.entities.find((item) => item.id === signature.id);
+
+  assert.equal(entity.signatureSource, "manual");
+  assert.equal(entity.wavelengthCenter, 512.75);
+  assert.equal(entity.componentIndex, 0);
+  assert.equal(entity.assignment, "ESA");
+  assert.equal(entity.label, "blue ESA shoulder");
+  assert.equal(entity.note, "clicked on EAS 1");
+  assert.deepEqual(restored.datasets[0].treatmentOverrides, { baseline: true, chirp: true });
+});
+
+test("older archives without feature entities load cleanly", () => {
+  const rawText = buildCsvFixture();
+  const source = Parser.parseSpectroscopyCsv(rawText, "legacy-a.csv");
+  source.rawText = rawText;
+  const baseAnalysis = Parser.createAnalysisDataset(source);
+  const project = buildProject({ source, baseAnalysis, analysis: Parser.cloneAnalysisDataset(baseAnalysis), fit: null });
+  delete project.evidenceGraph;
+
+  const restored = hydrateProjectArchive(readProjectArchive(createProjectArchive(project)), Parser);
+
+  assert.equal(restored.evidenceGraph.schema, "specflowlab.evidence_graph.v1");
+  assert.equal(restored.evidenceGraph.entities.filter((entity) => entity.kind === "feature").length, 0);
+  assert.equal(restored.datasets[0].id, "dataset-1");
 });
 
 test("project archive preserves external evidence bytes, citations, and graph nodes", () => {

@@ -45,6 +45,7 @@ export function createProjectArchive(project) {
       kind: dataset.kind ?? "imported",
       projectLabel: dataset.projectLabel,
       sampleNote: dataset.sampleNote ?? "",
+      treatmentOverrides: dataset.treatmentOverrides ?? null,
       evidenceMetadata: dataset.evidenceMetadata ?? null,
       merge: dataset.merge ?? null,
       source,
@@ -115,6 +116,7 @@ export function readProjectArchive(bytes) {
     kind: dataset.kind ?? "imported",
     projectLabel: dataset.projectLabel,
     sampleNote: dataset.sampleNote ?? "",
+    treatmentOverrides: dataset.treatmentOverrides ?? null,
     evidenceMetadata: dataset.evidenceMetadata ?? null,
     merge: dataset.merge ?? null,
     archivedSource: {
@@ -202,6 +204,7 @@ export function hydrateProjectArchive(project, parser) {
         kind: dataset.kind ?? "imported",
         projectLabel: dataset.projectLabel,
         sampleNote: dataset.sampleNote ?? "",
+        treatmentOverrides: dataset.treatmentOverrides ?? null,
         evidenceMetadata: dataset.evidenceMetadata ?? null,
         merge: dataset.merge ?? null,
         source,

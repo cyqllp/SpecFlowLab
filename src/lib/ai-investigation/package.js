@@ -13,6 +13,7 @@ import { buildComparabilityRows } from "../evidence-graph/comparability.js";
 import { resolveConnectedEvidenceScope } from "../evidence-graph/traversal.js";
 import { detectFstaFeatureCandidates } from "../feature-monitor/detector.js";
 import { buildFeatureTimeMap } from "../feature-monitor/compression.js";
+import { mergeFeatureSignatures } from "../feature-monitor/signatures.js";
 import { chartCaptureMetadata, validateChartCapture } from "../chart-capture/schema.js";
 
 const TEXT_ENCODER = new TextEncoder();
@@ -230,18 +231,42 @@ export async function inspectAiInvestigation(project, spec, options = {}) {
     }, [(id) => ({ path: "evidence/{id}-fit-summary.csv", text: fitSummaryCsv(fitted, id) })]);
     fitted.forEach((dataset) => {
       const monitor = detectFstaFeatureCandidates(dataset, project.evidenceGraph, project.evidenceAssets ?? [], project.state?.featureFinding ?? {});
-      if (monitor.status !== "live" || !monitor.candidates.length) return;
-      const featureTimeMap = buildFeatureTimeMap(dataset, monitor);
+      if (monitor.status !== "live") return;
+      const featureAssignments = featureAssignmentsForDataset(dataset.id, project.evidenceGraph);
+      const annotatedCandidates = mergeFeatureSignatures(dataset, monitor, project.evidenceGraph?.entities);
+      if (!annotatedCandidates.length) return;
+      const signatureMonitor = { ...monitor, candidates: annotatedCandidates, detectionMethod: "editable-signatures" };
+      const featureTimeMap = buildFeatureTimeMap(dataset, signatureMonitor);
       addEvidence({
         kind: "feature-monitor",
-        title: `${datasetLabel(dataset)} live fsTA feature candidates`,
+        title: `${datasetLabel(dataset)} editable fsTA signatures`,
         datasetIds: [dataset.id],
         entityIds: monitor.references.map((reference) => reference.id),
         selectionReasons: ["current-global-analysis-feature-monitor"],
-        transformations: [`Deterministic ${monitor.detectionMethod} candidate regions; assignments remain suggested-not-confirmed`, "Feature-time traces are lossy finite means over candidate wavelength regions"],
+        transformations: [
+          "Automatic suggestions seed editable signatures; user-defined peak positions and ESA/GSB/SE types are authored interpretations",
+          "Deleted automatic suggestions are persistently suppressed and excluded from evidence",
+          "Signature evolution samples the treated wavelength row nearest each exact signature peak position",
+        ],
       }, [(id) => ({
         path: "evidence/{id}-feature-monitor.json",
-        text: JSON.stringify({ ...monitor, featureTimeMap, evidenceId: id }, null, 2),
+        text: JSON.stringify({
+          ...signatureMonitor,
+          candidates: annotatedCandidates,
+          featureAssignments: featureAssignments.map((entity) => ({
+            id: entity.id,
+            featureCode: entity.featureCode,
+            componentIndex: entity.componentIndex,
+            assignment: entity.assignment,
+            note: entity.note ?? "",
+            wavelengthCenter: entity.wavelengthCenter,
+            signatureSource: entity.signatureSource,
+            author: entity.author,
+            updatedAt: entity.updatedAt,
+          })),
+          featureTimeMap,
+          evidenceId: id,
+        }, null, 2),
       })]);
     });
   } else {
@@ -805,6 +830,12 @@ function axisMin(axis = []) {
 function axisMax(axis = []) {
   const finite = axis.filter(Number.isFinite);
   return finite.length ? Math.max(...finite) : null;
+}
+
+function featureAssignmentsForDataset(datasetId, graph) {
+  return (graph?.entities ?? [])
+    .filter((entity) => entity.kind === "feature" && entity.datasetId === datasetId && !entity.signatureDeleted)
+    .sort((left, right) => String(left.featureCode).localeCompare(String(right.featureCode), undefined, { numeric: true }));
 }
 
 function datasetLabel(dataset) {

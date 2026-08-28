@@ -178,6 +178,13 @@ function buildPlotPlan(fit, hideIrfLimited, analysis = {}) {
       yScale: "log10",
       yMinimum: 0.1,
       z: "signal",
+      colorMap: {
+        majorLevels: 8,
+        minorLevels: 5,
+        lowColor: "blue",
+        highColor: "red",
+        mixing: "introduce-other-colors",
+      },
       ...spectralDisplay,
     },
     {
@@ -196,19 +203,6 @@ function buildPlotPlan(fit, hideIrfLimited, analysis = {}) {
       y: "signal-at-selected-wavelength",
     },
   ];
-  if (fit?.residualMatrix) {
-    plots.push({
-      id: "residual-heatmap",
-      kind: "virtual-matrix-heatmap",
-      source: "fit.residualMatrix",
-      x: "spectral",
-      y: "time",
-      yScale: "log10",
-      yMinimum: 0.1,
-      z: "residual",
-      ...spectralDisplay,
-    });
-  }
   const componentFilter = hideIrfLimited ? "exclude-irf-limited" : "all";
   if (fit?.dasSpectra?.length) {
     plots.push({

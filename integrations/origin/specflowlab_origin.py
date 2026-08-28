@@ -582,19 +582,9 @@ def import_project_into_origin(
                     continue
                 matrix_sheet = book.add_sheet(sheet_name)
                 _fill_virtual_matrix_sheet(matrix_sheet, dataset, matrix, title)
-                if create_plots and sheet_name == "ResidualVM":
-                    if _try_origin_plot(
-                        warnings,
-                        dataset.label,
-                        "residual heatmap",
-                        lambda sheet=matrix_sheet: _plot_virtual_heatmap(
-                            op,
-                            sheet,
-                            dataset,
-                            "Fit residual",
-                        ),
-                    ):
-                        graph_count += 1
+                # Residual values remain available as a worksheet for audit and
+                # downstream analysis, but SpecFlowLab does not create a
+                # residual graph in Origin.
 
             for sheet_name, spectra in (("DAS", dataset.fit.das), ("EAS", dataset.fit.eas)):
                 if not spectra:
@@ -875,6 +865,16 @@ def _plot_virtual_heatmap(op: Any, sheet: Any, dataset: DatasetData, z_title: st
         maximum_time = 1.0
     layer.yscale = "log10"
     layer.set_ylim(0.1, maximum_time)
+    op.lt_exec(
+        "layer.cmap.type=0; "
+        "layer.cmap.numMajorLevels=8; "
+        "layer.cmap.numMinorLevels=5; "
+        "layer.cmap.colorLow=3; "
+        "layer.cmap.colorHigh=1; "
+        "layer.cmap.colorMixMode=1; "
+        "layer.cmap.setLevels(1); "
+        "layer.cmap.updateScale();"
+    )
 
 
 def _plot_line(op: Any, sheet: Any, colx: int, coly: int, title: str) -> None:
