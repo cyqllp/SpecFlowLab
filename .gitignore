@@ -1,5 +1,6 @@
 # JavaScript / Vite
 node_modules/
+/node_modules
 dist/
 .vite/
 *.log

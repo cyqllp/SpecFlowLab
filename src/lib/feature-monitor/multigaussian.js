@@ -4,7 +4,7 @@ export const MULTI_GAUSSIAN_SCHEMA = "specflowlab.multi_gaussian_fit.v1";
 
 export function fitMultiGaussianSpectrum(xValues, yValues, options = {}) {
   const finitePoints = pairedFinitePoints(xValues, yValues);
-  const points = decimatePoints(finitePoints, Math.max(50, options.maximumFitPoints ?? 360));
+  const points = decimatePoints(finitePoints, Math.max(50, options.maximumFitPoints ?? 480));
   if (points.length < 7) return unavailable("At least seven finite wavelength points are required.");
 
   const x = points.map((point) => point.x);
@@ -17,36 +17,61 @@ export function fitMultiGaussianSpectrum(xValues, yValues, options = {}) {
   const minimumSigma = minimumFwhmNm / GAUSSIAN_FWHM_FACTOR;
   const maximumSigma = Math.max(minimumSigma, span / 2);
   const maximumPeaks = clampInteger(options.maximumPeaks ?? 6, 1, 12);
-  const minimumSnr = Math.max(1, options.minimumSnr ?? 4);
-  const minimumBicImprovement = Math.max(0, options.minimumBicImprovement ?? 6);
+  const minimumSnr = Math.max(1, options.minimumSnr ?? 3);
+  const minimumBicImprovement = Math.max(0, options.minimumBicImprovement ?? 4);
   const baseline = solveMixture(x, y, []);
   const signalScale = Math.max(...y) - Math.min(...y);
   const initialNoise = robustNoise(baseline.residuals, signalScale);
-  const seeds = discoverSeeds(x, baseline.residuals, initialNoise, {
+  // Floor the SSE used by the information criterion at the irreducible noise
+  // energy. On near-noiseless spectra this stops BIC from rewarding the fitting
+  // of numerical/curvature artifacts that sit below the noise level.
+  const noiseSseFloor = x.length * initialNoise * initialNoise;
+  const bicFor = (sse, peakCount) => informationCriterion(Math.max(sse, noiseSseFloor), x.length, 2 + peakCount * 3);
+  const seedOptions = {
     minimumSigma,
     maximumSigma,
     minimumSeedSnr: Math.max(1.5, Math.min(minimumSnr * 0.55, 3)),
     maximumSeeds: Math.max(maximumPeaks * 3, 8),
-  });
+  };
 
-  let model = { ...baseline, peaks: [], bic: informationCriterion(baseline.sse, x.length, 2) };
-  for (const seed of seeds) {
-    if (model.peaks.length >= maximumPeaks) break;
-    if (model.peaks.some((peak) => {
-      const distance = Math.abs(peak.centerNm - seed.centerNm);
-      const signedSeparation = peak.sign === seed.sign
-        ? Math.max(minimumSigma, Math.max(peak.sigmaNm, seed.sigmaNm) * GAUSSIAN_FWHM_FACTOR * 0.55)
-        : minimumSigma * 0.7;
-      return distance < signedSeparation;
-    })) continue;
-    const candidate = optimizeMixture(x, y, [...model.peaks, seed], { minimumSigma, maximumSigma, spacing });
-    const addedPeak = candidate.peaks.reduce((closest, peak) => (
-      Math.abs(peak.centerNm - seed.centerNm) < Math.abs(closest.centerNm - seed.centerNm) ? peak : closest
-    ), candidate.peaks[0]);
-    const candidateNoise = Math.max(initialNoise, robustNoise(candidate.residuals, signalScale));
-    const improvement = model.bic - candidate.bic;
-    if (!addedPeak || addedPeak.amplitudeAbs / candidateNoise < minimumSnr || improvement < minimumBicImprovement) continue;
-    model = candidate;
+  let model = { ...baseline, peaks: [], bic: bicFor(baseline.sse, 0) };
+  const acceptSeeds = (seedList) => {
+    let acceptedCount = 0;
+    for (const seed of seedList) {
+      if (model.peaks.length >= maximumPeaks) break;
+      if (model.peaks.some((peak) => {
+        const distance = Math.abs(peak.centerNm - seed.centerNm);
+        const signedSeparation = peak.sign === seed.sign
+          ? Math.max(minimumSigma, Math.max(peak.sigmaNm, seed.sigmaNm) * GAUSSIAN_FWHM_FACTOR * 0.55)
+          : minimumSigma * 0.7;
+        return distance < signedSeparation;
+      })) continue;
+      const candidate = optimizeMixture(x, y, [...model.peaks, seed], { minimumSigma, maximumSigma, spacing });
+      const addedPeak = candidate.peaks.reduce((closest, peak) => (
+        Math.abs(peak.centerNm - seed.centerNm) < Math.abs(closest.centerNm - seed.centerNm) ? peak : closest
+      ), candidate.peaks[0]);
+      const candidateNoise = Math.max(initialNoise, robustNoise(candidate.residuals, signalScale));
+      candidate.bic = bicFor(candidate.sse, candidate.peaks.length);
+      const improvement = model.bic - candidate.bic;
+      if (!addedPeak || addedPeak.amplitudeAbs / candidateNoise < minimumSnr || improvement < minimumBicImprovement) continue;
+      model = candidate;
+      acceptedCount += 1;
+    }
+    return acceptedCount;
+  };
+
+  acceptSeeds(discoverSeeds(x, baseline.residuals, initialNoise, seedOptions));
+
+  // Iterative re-seeding: weaker peaks masked under accepted peaks' tails only
+  // become visible once those peaks are subtracted. Re-discover seeds on the
+  // current model residuals until a pass accepts nothing new.
+  const maximumReseedPasses = clampInteger(options.maximumReseedPasses ?? 3, 0, 8);
+  let reseedPasses = 0;
+  for (let pass = 0; pass < maximumReseedPasses && model.peaks.length < maximumPeaks; pass += 1) {
+    const reseedNoise = Math.max(initialNoise, robustNoise(model.residuals, signalScale));
+    const reseeded = discoverSeeds(x, model.residuals, reseedNoise, { ...seedOptions, maximumSeeds: Math.max(maximumPeaks * 2, 6) });
+    reseedPasses += 1;
+    if (!acceptSeeds(reseeded)) break;
   }
 
   if (!model.peaks.length) {
@@ -55,7 +80,7 @@ export function fitMultiGaussianSpectrum(xValues, yValues, options = {}) {
       status: "no-supported-peaks",
       peaks: [],
       diagnostics: {
-        ...diagnostics(model, initialNoise, x.length),
+        ...diagnostics(model, initialNoise, x.length, reseedPasses),
         inputPointCount: finitePoints.length,
         fitPointPolicy: fitPointPolicy(finitePoints.length, points.length),
       },
@@ -63,6 +88,7 @@ export function fitMultiGaussianSpectrum(xValues, yValues, options = {}) {
   }
 
   model = optimizeMixture(x, y, model.peaks, { minimumSigma, maximumSigma, spacing });
+  model = pruneRedundantPeaks(model, x, y, { minimumSigma, maximumSigma, spacing }, minimumBicImprovement, bicFor);
   const finalNoise = Math.max(initialNoise, robustNoise(model.residuals, signalScale));
   const peaks = model.peaks
     .map((peak, index) => describePeak(peak, index, model, x, y, finalNoise, minimumFwhmNm))
@@ -76,7 +102,8 @@ export function fitMultiGaussianSpectrum(xValues, yValues, options = {}) {
     status: peaks.length ? "fit" : "no-supported-peaks",
     peaks,
     diagnostics: {
-      ...diagnostics(model, finalNoise, x.length),
+      ...diagnostics(model, finalNoise, x.length, reseedPasses),
+      modelOrder: peaks.length,
       inputPointCount: finitePoints.length,
       fitPointPolicy: fitPointPolicy(finitePoints.length, points.length),
     },
@@ -176,6 +203,29 @@ function optimizeMixture(x, y, initialPeaks, limits) {
   return { ...best, bic: informationCriterion(best.sse, x.length, parameterCount) };
 }
 
+// Backward pruning: once every peak has been refit together, drop any peak
+// whose removal does not worsen BIC by at least the acceptance threshold. This
+// eliminates compensation artifacts and numerical-noise peaks that the greedy
+// forward/re-seed passes can accept on near-noiseless data.
+function pruneRedundantPeaks(model, x, y, limits, minimumBicImprovement, bicOf) {
+  let current = { ...model, bic: bicOf(model.sse, model.peaks.length) };
+  let changed = true;
+  while (changed && current.peaks.length > 1) {
+    changed = false;
+    for (let index = 0; index < current.peaks.length; index += 1) {
+      const reducedPeaks = current.peaks.filter((_peak, peakIndex) => peakIndex !== index);
+      const reduced = optimizeMixture(x, y, reducedPeaks, limits);
+      const reducedBic = bicOf(reduced.sse, reduced.peaks.length);
+      if (reducedBic - current.bic < minimumBicImprovement) {
+        current = { ...reduced, bic: reducedBic };
+        changed = true;
+        break;
+      }
+    }
+  }
+  return current;
+}
+
 function solveMixture(x, y, peaks) {
   const xMid = (x[0] + x.at(-1)) / 2;
   const xScale = Math.max((x.at(-1) - x[0]) / 2, 1);
@@ -254,7 +304,7 @@ function describePeak(peak, index, model, x, y, noise, minimumFwhmNm) {
   };
 }
 
-function diagnostics(model, noise, pointCount) {
+function diagnostics(model, noise, pointCount, reseedPasses = 0) {
   return {
     modelOrder: model.peaks.length,
     baseline: model.baseline,
@@ -263,7 +313,8 @@ function diagnostics(model, noise, pointCount) {
     robustNoise: noise,
     bic: model.bic ?? informationCriterion(model.sse, pointCount, 2 + model.peaks.length * 3),
     pointCount,
-    selectionRule: "forward signed Gaussian addition; minimum amplitude SNR and BIC improvement",
+    reseedPasses,
+    selectionRule: "forward signed Gaussian addition with iterative residual re-seeding; minimum amplitude SNR and BIC improvement",
   };
 }
 

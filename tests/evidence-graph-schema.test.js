@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { removeEvidenceConnection, upsertEvidenceConnection } from "../src/lib/evidence-graph/connections.js";
+import { connectionsForEntity, removeEvidenceConnection, upsertEvidenceConnection } from "../src/lib/evidence-graph/connections.js";
 import { updateDatasetEvidenceEntities } from "../src/lib/evidence-graph/entities.js";
 import {
   EVIDENCE_GRAPH_SCHEMA,
@@ -98,6 +98,29 @@ test("external evidence becomes typed graph entities and duplicate bulk assertio
   assert.equal(graph.relationships.length, 1);
   assert.equal(graph.relationships[0].rationale, "Updated authored rationale");
   assert.equal(graph.relationships[0].updatedAt, "2026-08-13T00:01:00.000Z");
+});
+
+test("symmetric dataset connections are visible from both datasets and reverse saves update in place", () => {
+  const datasets = [dataset("a", ""), dataset("b", "")];
+  let graph = upsertEvidenceConnection(null, {
+    fromId: "b", toId: "a", type: "same-sample", rationale: "One physical sample",
+  }, datasets, { createdAt: "2026-08-31T00:00:00.000Z" });
+  graph = upsertEvidenceConnection(graph, {
+    fromId: "a", toId: "b", type: "same-sample", rationale: "Same sample, reviewed from B",
+  }, datasets, { createdAt: "2026-08-31T00:01:00.000Z" });
+
+  assert.equal(graph.relationships.length, 1);
+  assert.deepEqual([graph.relationships[0].fromId, graph.relationships[0].toId], ["a", "b"]);
+  assert.equal(graph.relationships[0].rationale, "Same sample, reviewed from B");
+  assert.deepEqual(connectionsForEntity(graph, "a").map((item) => item.id), connectionsForEntity(graph, "b").map((item) => item.id));
+});
+
+test("directional dataset connections retain their authored direction", () => {
+  const datasets = [dataset("a", ""), dataset("b", "")];
+  const graph = upsertEvidenceConnection(null, {
+    fromId: "b", toId: "a", type: "control-for", rationale: "B is the control for A",
+  }, datasets);
+  assert.deepEqual([graph.relationships[0].fromId, graph.relationships[0].toId], ["b", "a"]);
 });
 
 function dataset(id, sampleNote) {

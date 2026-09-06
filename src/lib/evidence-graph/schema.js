@@ -33,24 +33,24 @@ export const CONDITION_FIELDS = Object.freeze([
 ]);
 
 export const RELATIONSHIP_DEFINITIONS = Object.freeze({
-  "same-sample": { category: "factual", pairs: datasetPairs() },
-  "same-preparation": { category: "factual", pairs: datasetPairs() },
-  "same-molecular-system": { category: "factual", pairs: datasetPairs() },
+  "same-sample": { category: "factual", symmetric: true, pairs: datasetPairs() },
+  "same-preparation": { category: "factual", symmetric: true, pairs: datasetPairs() },
+  "same-molecular-system": { category: "factual", symmetric: true, pairs: datasetPairs() },
   "aliquot-of": { category: "factual", pairs: [["dataset", "dataset"], ["sample", "sample"]] },
   "before-after": { category: "factual", pairs: [["dataset", "dataset"], ["sample", "sample"]] },
   "control-for": { category: "factual", pairs: [["dataset", "dataset"]] },
-  "replicate-of": { category: "factual", pairs: [["dataset", "dataset"]] },
+  "replicate-of": { category: "factual", symmetric: true, pairs: [["dataset", "dataset"]] },
   "parent-of": { category: "factual", pairs: [["dataset", "dataset"]] },
   "derived-from": { category: "factual", pairs: [["dataset", "dataset"]] },
   "merged-from": { category: "factual", pairs: [["dataset", "dataset"]] },
   "reference-for": { category: "factual", pairs: [...datasetPairs(), ["dataset", "species-hypothesis"], ["external-dataset", "species-hypothesis"]] },
   "generated-species-reference": { category: "factual", pairs: [["dataset", "species-hypothesis"]] },
-  "measured-under-comparable-conditions": { category: "factual", pairs: datasetPairs() },
+  "measured-under-comparable-conditions": { category: "factual", symmetric: true, pairs: datasetPairs() },
   "supplemented-by": { category: "factual", pairs: supportingEvidencePairs() },
   "documented-by": { category: "factual", pairs: documentEvidencePairs() },
   "supports-assignment": { category: "interpretive", pairs: assignmentEvidencePairs() },
   "challenges-assignment": { category: "interpretive", pairs: assignmentEvidencePairs() },
-  "alternative-to": { category: "interpretive", pairs: [["species-hypothesis", "species-hypothesis"], ["dataset", "dataset"]] },
+  "alternative-to": { category: "interpretive", symmetric: true, pairs: [["species-hypothesis", "species-hypothesis"], ["dataset", "dataset"]] },
 });
 
 export function createEmptyEvidenceGraph() {

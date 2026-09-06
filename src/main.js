@@ -6,9 +6,17 @@ import {
   readProjectArchive,
 } from "./lib/project-archive.js";
 import { createOriginBundle } from "./lib/origin-bundle.js";
+import { originVersionLabel } from "./lib/origin-display.js";
 import { getUnfittedDatasetsInFolder } from "./lib/dataset-scope.js";
 import { isEligibleForMode, SELECTION_MODES, toggleSelection, validateSelection } from "./lib/dataset-selection.js";
 import { moveDataset } from "./lib/dataset-order.js";
+import { moveFolder } from "./lib/folder-order.js";
+import { componentColor } from "./lib/component-colors.js";
+import {
+  changedTreatmentDatasetIds,
+  snapshotTreatmentStates,
+  treatmentEnabled,
+} from "./lib/treatment-plan.js";
 import {
   createMergedAnalysis,
   mergePreviewSeries,
@@ -32,7 +40,10 @@ import {
   removeEvidenceConnection,
   upsertEvidenceConnection,
 } from "./lib/evidence-graph/connections.js";
-import { updateDatasetEvidenceEntities } from "./lib/evidence-graph/entities.js";
+import {
+  deleteFeatureSignature,
+  upsertFeatureSignature,
+} from "./lib/evidence-graph/entities.js";
 import { compareDatasetConditions } from "./lib/evidence-graph/comparability.js";
 import {
   EVIDENCE_ASSET_KINDS,
@@ -43,7 +54,11 @@ import {
 } from "./lib/evidence-assets/schema.js";
 import { getTechnique, listTechniques } from "./lib/modalities/registry.js";
 import { detectFstaFeatureCandidates } from "./lib/feature-monitor/detector.js";
-import { buildFeatureTimeMap } from "./lib/feature-monitor/compression.js";
+import {
+  SIGNATURE_TYPES,
+  createManualSignature,
+  mergeFeatureSignatures,
+} from "./lib/feature-monitor/signatures.js";
 import { createChartCapture } from "./lib/chart-capture/schema.js";
 import {
   SUPPORTED_LOCALES,
@@ -58,8 +73,33 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.6";
+const APP_VERSION = "1.0.8";
 const plotGeometry = new WeakMap();
+const signatureHitRegions = new WeakMap();
+
+const DEFAULT_FEATURE_FINDING = Object.freeze({
+  minimumSnr: 3,
+  maximumPeaksPerComponent: 2,
+  minimumBicImprovement: 4,
+  minimumFwhmNm: 6,
+});
+
+// Older projects may persist legacy local-threshold keys (method,
+// relativeThreshold, minimumGaussianR2). Keep only the live multi-Gaussian
+// controls so stale values cannot resurrect the removed method.
+function sanitizeFeatureFinding(value = {}) {
+  const merged = { ...DEFAULT_FEATURE_FINDING, ...(value && typeof value === "object" ? value : {}) };
+  return {
+    minimumSnr: numberOr(merged.minimumSnr, DEFAULT_FEATURE_FINDING.minimumSnr),
+    maximumPeaksPerComponent: Math.min(2, Math.max(1, Math.round(numberOr(merged.maximumPeaksPerComponent, DEFAULT_FEATURE_FINDING.maximumPeaksPerComponent)))),
+    minimumBicImprovement: numberOr(merged.minimumBicImprovement, DEFAULT_FEATURE_FINDING.minimumBicImprovement),
+    minimumFwhmNm: numberOr(merged.minimumFwhmNm, DEFAULT_FEATURE_FINDING.minimumFwhmNm),
+  };
+}
+
+function numberOr(value, fallback) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
 
 const state = {
   locale: preferredLocale(),
@@ -103,13 +143,7 @@ const state = {
     fixedLifetimes: [],
   },
   featureFinding: {
-    method: "multi-gaussian",
-    minimumSnr: 4,
-    maximumPeaksPerComponent: 6,
-    minimumBicImprovement: 6,
-    relativeThreshold: 0.12,
-    minimumGaussianR2: 0.45,
-    minimumFwhmNm: 6,
+    ...DEFAULT_FEATURE_FINDING,
   },
   project: {
     dirty: false,
@@ -150,6 +184,8 @@ const state = {
   datasetMenu: null,
   folderMenu: null,
   plotMenu: null,
+  selectedSignatureId: null,
+  signatureEditor: null,
   datasetClipboard: null,
   importTargetFolderId: null,
   job: null,
@@ -235,14 +271,15 @@ function render() {
         </div>
         ${state.origin.installation ? `
           <div class="origin-status-block">
-            <span class="origin-version">${escapeHtml(state.origin.installation.displayName ?? state.origin.installation.executablePath)}${state.origin.installation.bitness ? ` (${state.origin.installation.bitness}-bit)` : ""}</span>
-            <span class="origin-support ${state.origin.installation.supportLevel}">${state.origin.installation.supportLevel === "experimental" ? "Origin 8.6+ · Worksheets only" : `${state.origin.installation.supportLevel} · ${escapeHtml(state.origin.installation.backend)} · ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat || "opju").toUpperCase()}`}</span>
+            <span class="origin-version">${escapeHtml(originVersionLabel(state.origin.installation))}</span>
+            ${state.origin.installation.capabilities?.worksheets && !state.origin.installation.capabilities?.linePlots ? `<span class="origin-support experimental">Worksheets only</span>` : ""}
+            ${state.origin.installation.supportLevel === "unsupported" ? `<span class="origin-support unsupported">Unsupported executable</span>` : ""}
           </div>
-          ${state.origin.installation.supportLevel !== "experimental" ? `<label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
+          ${state.origin.installation.capabilities?.linePlots ? `<label class="origin-mode-select"><span class="visually-hidden">OriginPro output mode</span><select id="origin-output-mode" aria-label="OriginPro output mode" ${busy ? "disabled" : ""}>
             <option value="sheets-plots" ${state.origin.outputMode === "sheets-plots" && state.origin.installation.capabilities?.linePlots ? "selected" : ""} ${state.origin.installation.capabilities?.linePlots ? "" : "disabled"}>Sheets and supported plots</option>
             <option value="sheets-only" ${state.origin.outputMode === "sheets-only" ? "selected" : ""}>Only sheets</option>
           </select></label>` : ""}
-          ${state.origin.installation.supportLevel !== "experimental" && (state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
+          ${(state.origin.installation.projectFormats?.length ?? 0) > 1 ? `<label class="origin-mode-select"><span class="visually-hidden">Project format</span><select id="origin-format" aria-label="Project format" ${busy ? "disabled" : ""}>
             ${state.origin.installation.projectFormats.map((fmt) => `<option value="${fmt}" ${(state.origin.outputFormat || state.origin.installation.defaultProjectFormat) === fmt ? "selected" : ""}>${fmt.toUpperCase()}</option>`).join("")}
           </select></label>` : ""}
         ` : `<p class="origin-placeholder">Select an OriginPro installation to enable direct export.</p>`}
@@ -261,6 +298,7 @@ function render() {
     ${state.datasetMenu ? renderDatasetContextMenu() : ""}
     ${state.folderMenu ? renderFolderContextMenu() : ""}
     ${state.plotMenu ? renderPlotContextMenu() : ""}
+    ${state.signatureEditor ? renderSignatureEditorPopover() : ""}
     ${renderCaptureStation()}
   `;
   localizeDom(app, state.locale);
@@ -268,7 +306,7 @@ function render() {
   const datasetTree = document.querySelector(".dataset-tree-scroll");
   if (datasetTree) datasetTree.scrollTop = datasetTreeScrollTop;
   positionContextMenus();
-  paintCanvases();
+  scheduleFullPaint();
 }
 
 function renderDatasetFolders() {
@@ -280,6 +318,7 @@ function renderDatasetFolders() {
         return `
           <li class="folder-node ${folder.collapsed ? "collapsed" : ""}" data-folder-drop="${escapeHtml(folder.id)}">
             <div class="folder-heading" data-folder-id="${escapeHtml(folder.id)}">
+              <button type="button" class="folder-drag-handle" title="Drag to reorder folder" aria-label="Drag ${escapeHtml(folder.name)} to reorder">&#8942;&#8942;</button>
               <button class="folder-toggle" data-action="toggle-folder" data-folder-id="${escapeHtml(folder.id)}" aria-label="${folder.collapsed ? "Expand" : "Collapse"} ${escapeHtml(folder.name)}">${folder.collapsed ? "\u25b8" : "\u25be"}</button>
               ${state.editingFolderId === folder.id
                 ? `<input class="folder-name-input" data-folder-id="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}" aria-label="Rename folder" />`
@@ -372,14 +411,15 @@ function renderOverview() {
             <span><small>Source</small><strong>${dataset.source.sourceShape.rows} x ${dataset.source.sourceShape.cols}</strong></span>
             <span><small>Analysis</small><strong>${analysis.spectralAxis.length} x ${analysis.timeAxis.length}</strong></span>
             <span><small>Time</small><strong>${formatCoordinate(analysis.timeAxis[0])} to ${formatCoordinate(analysis.timeAxis.at(-1))} ps</strong></span>
-            <span><small>Folder treatment</small><strong>${treatmentLabel(folder)}</strong></span>
+            <span><small>Active treatment</small><strong>${treatmentLabel(folder, dataset)}</strong></span>
           </div>
           <div class="treatment-layout">
             <div>${renderRangeControls(dataset, folder)}</div>
             <div class="treatment-actions">
-              <button data-action="baseline" class="${folder?.treatments?.baseline ? "active" : ""}" ${state.job ? "disabled" : ""}>Baseline</button>
-              <button data-action="chirp" class="${folder?.treatments?.chirp ? "active" : ""}" ${state.job ? "disabled" : ""}>Chirp</button>
-              <button data-action="reset" ${state.job ? "disabled" : ""}>Reset</button>
+              <button data-action="baseline" class="${treatmentEnabled(dataset, folder, "baseline") ? "active" : ""}" ${state.job ? "disabled" : ""}>Baseline</button>
+              <button data-action="chirp" class="${treatmentEnabled(dataset, folder, "chirp") ? "active" : ""}" ${state.job ? "disabled" : ""}>Chirp</button>
+              <button data-action="reset-dataset" class="reset-command" ${state.job ? "disabled" : ""} title="Reset the active dataset to its selected source range and remove its baseline, chirp, and fit">Reset Dataset</button>
+              <button data-action="reset-folder" class="reset-command" ${state.job ? "disabled" : ""} title="Reset every dataset in the folder and clear treatments and cropping">Reset Folder</button>
             </div>
           </div>
           ${renderTreatmentHistory(dataset)}
@@ -467,7 +507,7 @@ function renderMainFitSummary(dataset, includeSupportingDetails = false) {
   return `
     ${limitedCount ? `<div class="fit-summary-header"><span>${limitedCount} IRF-limited component${limitedCount === 1 ? "" : "s"} excluded from interpreted outputs</span></div>` : ""}
     <table class="fit-table">
-      <thead><tr><th>Component</th><th>Time constant</th>${showFeatures ? "<th>Feature regions</th>" : ""}</tr></thead>
+      <thead><tr><th>Component</th><th>Time constant</th>${showFeatures ? "<th>EAS signatures</th>" : ""}</tr></thead>
       <tbody>
         ${visibleLifetimes.map(({ lifetime, index }) => `
           <tr>
@@ -527,35 +567,32 @@ function renderMainComponentSpectra(dataset) {
         </select></label>
       </div>
       <canvas id="main-components" data-plot-key="main-components" width="760" height="340" aria-label="${state.fitting.spectrumMode} component spectra"></canvas>
-      ${renderFeaturePlotNote(dataset, state.fitting.spectrumMode)}
     </article>`;
 }
 
 function featureMonitorFor(dataset, mode = null) {
-  return detectFstaFeatureCandidates(dataset, state.evidenceGraph, state.evidenceAssets, {
+  const requestedMode = String(mode ?? "EAS").toUpperCase() === "DAS" ? "DAS" : "EAS";
+  const automatic = detectFstaFeatureCandidates(dataset, state.evidenceGraph, state.evidenceAssets, {
     ...state.featureFinding,
-    ...(mode ? { spectrumMode: mode } : {}),
+    spectrumMode: requestedMode,
+    maximumPeaksPerComponent: 2,
   });
+  if (automatic.status !== "live") return automatic;
+  return {
+    ...automatic,
+    candidates: mergeFeatureSignatures(dataset, automatic, state.evidenceGraph?.entities),
+    detectionMethod: "editable-signatures",
+    recomputePolicy: "automatic suggestions are regenerated from the current fit, while user edits and manual signatures persist in the evidence graph",
+  };
 }
 
 function renderFeatureTag(candidate) {
-  const range = `${formatWavelength(candidate.wavelengthMin)}–${formatWavelength(candidate.wavelengthMax)} nm`;
-  const gaussian = candidate.gaussianShape;
-  const shape = candidate.detectionMethod === "multi-gaussian"
-    ? `Fitted center ${formatWavelength(candidate.wavelengthCenter)} nm; amplitude SNR ${format(candidate.amplitudeSnr)}; FWHM ${formatWavelength(gaussian?.fwhmNm)} nm${gaussian?.qualityFlags?.length ? `; ${gaussian.qualityFlags.join(", ")}` : ""}`
-    : Number.isFinite(gaussian?.rSquared) ? `Gaussian R² ${(gaussian.rSquared * 100).toFixed(0)}%; FWHM ${formatWavelength(gaussian.fwhmNm)} nm` : "Gaussian score unavailable";
-  const score = candidate.detectionMethod === "multi-gaussian" ? `SNR ${format(candidate.amplitudeSnr)}` : `G${Number.isFinite(gaussian?.rSquared) ? Math.round(gaussian.rSquared * 100) : "-"}%`;
-  return `<span class="feature-tag ${candidate.sign}" title="${escapeHtml(`${candidate.candidateType}; ${range}; ${shape}; ${candidate.supportSummary}; suggested, not confirmed`)}"><b>${escapeHtml(candidate.featureCode)}</b>${escapeHtml(shortFeatureType(candidate.candidateType))}<small>${range} · ${escapeHtml(score)}</small></span>`;
-}
-
-function renderFeaturePlotNote(dataset, mode) {
-  const monitor = featureMonitorFor(dataset, mode);
-  if (monitor.status !== "live" || !monitor.candidates.length) return "";
-  const context = monitor.references.length
-    ? `${monitor.references.length} explicitly connected Abs/PL reference${monitor.references.length === 1 ? "" : "s"} supplies overlap context.`
-    : "No linked Abs/PL reference: negative regions remain unresolved GSB/SE candidates.";
-  const method = monitor.detectionMethod === "multi-gaussian" ? "noise-aware Gaussian-mixture" : "legacy local-threshold";
-  return `<p class="feature-plot-note"><span><i></i>Labels are live ${escapeHtml(mode)} ${escapeHtml(method)} candidate regions.</span><span>${escapeHtml(context)}</span><strong>Suggested, not confirmed</strong></p>`;
+  const position = `${formatWavelength(candidate.wavelengthCenter)} nm`;
+  const assignment = featureAssignmentForCandidate(candidate);
+  const typeLabel = candidate.assignment ?? assignment?.assignment ?? shortFeatureType(candidate.candidateType);
+  const assignmentNote = assignment ? `; user assignment: ${assignment.assignment}${assignment.note ? ` — ${assignment.note}` : ""}` : "";
+  const confidence = candidate.signatureSource === "manual" || assignment ? "user-defined" : "automatic suggestion";
+  return `<button type="button" data-action="edit-summary-signature" data-signature-id="${escapeHtml(candidate.id)}" class="feature-tag ${candidate.sign} ${candidate.signatureSource === "manual" || assignment ? "user-assigned" : ""}" title="${escapeHtml(`Edit signature: ${typeLabel}; exact position ${position}${assignmentNote}; ${confidence}`)}"><b>${escapeHtml(candidate.featureCode)}</b>${escapeHtml(typeLabel)}<small>${position}</small></button>`;
 }
 
 function shortFeatureType(candidateType) {
@@ -803,7 +840,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.6 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.8 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -818,7 +855,7 @@ function renderManualModal() {
           <li><div><strong>Merge treated spectral ranges</strong><p>Select exactly two treated datasets, click Merge between Chirp and Reset, choose clean retained wavelength ranges, review the spectral preview, and create the derived dataset.</p></div></li>
           <li><div><strong>Compare datasets</strong><p>Use Compare to inspect coordinated kinetics, spectra, EAS, and DAS views with reusable sample styles.</p></div></li>
           <li><div><strong>Run global fitting</strong><p>Open Global Fitting, set component starts and IRF options, and review lifetimes, residuals, DAS, EAS, and fit diagnostics.</p></div></li>
-          <li><div><strong>Interpret fsTA features</strong><p>After fitting, match feature labels on EAS/DAS with their lifetime-row tags, then inspect the lossy Feature × Time Map. Abs/PL evidence can refine context, but every candidate remains suggested—not confirmed.</p></div></li>
+          <li><div><strong>Define fsTA signatures</strong><p>After fitting, inspect every signature label directly on the EAS plot. Click an EAS curve to add a peak position; double-click or right-click a label to edit its name, type, wavelength, component, and note.</p></div></li>
           <li><div><strong>Save and export</strong><p>Save the complete .sflproj archive, build a question-driven local .sflai evidence package, or create OriginPro output on Windows. AI raw sources and full matrices are opt-in; no provider upload occurs.</p></div></li>
         </ol>
         <div class="manual-integrity-note"><strong>Data integrity</strong><span>Original CSV text and UFS bytes remain unchanged. Treatments, fits, merges, warnings, and provenance are stored separately and reproducibly.</span></div>
@@ -875,6 +912,7 @@ function renderDatasetContextMenu() {
 function renderFolderContextMenu() {
   const folder = state.folders.find((item) => item.id === state.folderMenu?.folderId);
   if (!folder) return "";
+  const folderIndex = state.folders.indexOf(folder);
   const canPaste = Boolean(state.datasetClipboard);
   const empty = folderDatasets(folder.id).length === 0;
   return `
@@ -886,6 +924,8 @@ function renderFolderContextMenu() {
       <li class="context-separator"></li>
       <li><button data-action="rename-folder-menu" data-folder-id="${escapeHtml(folder.id)}">Rename...</button></li>
       <li><button data-action="toggle-folder" data-folder-id="${escapeHtml(folder.id)}">${folder.collapsed ? "Expand" : "Collapse"}</button></li>
+      <li><button data-action="move-folder-up" data-folder-id="${escapeHtml(folder.id)}" ${folderIndex > 0 ? "" : "disabled"}>Move folder up</button></li>
+      <li><button data-action="move-folder-down" data-folder-id="${escapeHtml(folder.id)}" ${folderIndex < state.folders.length - 1 ? "" : "disabled"}>Move folder down</button></li>
       <li class="context-separator"></li>
       <li><button class="context-danger" data-action="delete-folder" data-folder-id="${escapeHtml(folder.id)}" ${empty ? "" : "disabled"}>Delete empty folder</button></li>
     </menu>`;
@@ -1096,7 +1136,6 @@ function renderFitModal() {
           ${limitedCount ? `<span class="irf-exclusion-note">${limitedCount} IRF-limited component${limitedCount === 1 ? "" : "s"} excluded from all interpreted outputs</span>` : ""}
         </section>
         ${renderLifetimeControls()}
-        ${dataset?.fit ? renderFeatureFindingControls() : ""}
         ${dataset?.fit ? renderFitDiagnostics(dataset) : "<section class=\"empty compact\"><h3>No fit yet</h3><p>Run a fit to create lifetime, DAS, EAS-preview, overlay, and residual results.</p></section>"}
       </div>
     </section>
@@ -1109,6 +1148,7 @@ function renderLifetimeControls() {
     <section class="lifetime-editor" aria-label="Lifetime starts and constraints">
       <div class="lifetime-editor-head">
         <strong>Lifetime starts</strong>
+        <button type="button" data-action="reset-fit-parameters" title="Restore default fitting inputs without deleting the last fit result">Reset Fit Inputs</button>
       </div>
       <div class="lifetime-grid">
         ${Array.from({ length: count }, (_, index) => `
@@ -1134,18 +1174,27 @@ function renderLifetimeControls() {
     </section>`;
 }
 
-function renderFeatureFindingControls() {
-  const finder = state.featureFinding;
-  return `<section class="feature-finder-controls" aria-label="Feature finding controls">
-    <div><strong>Gaussian Lineshape Finder</strong><span>Fit signed Gaussian mixtures to each EAS/DAS component</span></div>
-    <label><span>Method</span><select id="feature-method"><option value="multi-gaussian" ${finder.method !== "local-threshold" ? "selected" : ""}>Noise-aware multi-Gaussian</option><option value="local-threshold" ${finder.method === "local-threshold" ? "selected" : ""}>Legacy local threshold</option></select></label>
-    ${finder.method === "local-threshold"
-      ? `<label><span>Relative peak threshold</span><input id="feature-relative-threshold" type="number" min="1" max="80" step="1" value="${Math.round(finder.relativeThreshold * 100)}" /><small>% of component maximum</small></label><label><span>Minimum Gaussian R²</span><input id="feature-gaussian-r2" type="number" min="0" max="0.99" step="0.05" value="${finder.minimumGaussianR2}" /></label>`
-      : `<label><span>Minimum amplitude SNR</span><input id="feature-minimum-snr" type="number" min="1" max="50" step="0.5" value="${finder.minimumSnr}" /><small>relative to robust local noise</small></label><label><span>Maximum peaks</span><input id="feature-maximum-peaks" type="number" min="1" max="12" step="1" value="${finder.maximumPeaksPerComponent}" /><small>per component spectrum</small></label>`}
-    <label><span>Minimum FWHM</span><input id="feature-minimum-fwhm" type="number" min="0" max="500" step="1" value="${finder.minimumFwhmNm}" /><small>nm</small></label>
-    <button data-action="reset-feature-finder" class="secondary-command">Reset finder</button>
-    <p>${finder.method === "local-threshold" ? "A lower threshold finds weaker peaks but a dominant band can suppress minor bands." : "Model order is selected from local noise and residual improvement rather than the strongest peak."} Neither method confirms ESA, GSB, SE, or species identity.</p>
-  </section>`;
+function renderSignatureEditorPopover() {
+  const dataset = activeDataset();
+  const selected = selectedSignatureForDataset(dataset);
+  if (!dataset?.fit || !selected) return "";
+  const interpretedComponents = (dataset.fit?.easSpectra ?? [])
+    .map((spectrum, componentIndex) => ({ spectrum, componentIndex }))
+    .filter(({ componentIndex }) => !dataset.fit.irfLimited?.[componentIndex]);
+  return `<button class="context-menu-dismiss" data-action="close-signature-editor" aria-label="Close signature details"></button>
+    <aside class="app-context-menu signature-editor-popover" aria-label="Signature details">
+      <div class="signature-detail-title"><div><strong>Signature details</strong><span>${selected.signatureSource === "manual" ? "User-defined" : selected.status === "user-edited" ? "Edited automatic suggestion" : "Automatic suggestion"}</span></div><button class="icon-button" data-action="close-signature-editor" aria-label="Close signature details">x</button></div>
+      <code>${escapeHtml(selected.id)}</code>
+      <div class="signature-editor-fields">
+      <label><span>Label</span><input id="signature-label" type="text" value="${escapeHtml(selected.label ?? `${selected.featureCode} ${selected.assignment ?? ""}`)}" /></label>
+      <label><span>Type</span><select id="signature-type">${SIGNATURE_TYPES.map((type) => `<option value="${type}" ${selected.assignment === type ? "selected" : ""}>${type}</option>`).join("")}</select></label>
+      <label><span>Peak position</span><div class="signature-unit-input"><input id="signature-position" type="number" step="any" value="${escapeHtml(conciseInputNumber(selected.wavelengthCenter))}" /><small>nm</small></div></label>
+      <label><span>EAS component</span><select id="signature-component">${interpretedComponents.map(({ spectrum, componentIndex }) => `<option value="${componentIndex}" ${selected.componentIndex === componentIndex ? "selected" : ""}>${escapeHtml(spectrum.label ?? `EAS ${componentIndex + 1}`)} · t${componentIndex + 1}</option>`).join("")}</select></label>
+      <label class="signature-note-field"><span>Note</span><input id="signature-note" type="text" placeholder="Interpretation or evidence note" value="${escapeHtml(selected.note ?? "")}" /></label>
+      </div>
+      <div class="signature-detail-actions"><button data-action="delete-signature" class="danger-button">Delete</button><button data-action="save-signature">Save changes</button></div>
+      <p>Position is an exact measured-wavelength marker. Type is user-authored interpretation; it does not alter the global fit.</p>
+    </aside>`;
 }
 
 function renderFitDiagnostics(dataset) {
@@ -1159,38 +1208,81 @@ function renderFitDiagnostics(dataset) {
       </article>
       <article class="plot-panel fit-residual">
         <div class="panel-head"><h3>Fit Residual Map</h3><div class="panel-head-actions"><span>Measured minus fitted</span>${enlargeButton("fit-residual")}</div></div>
-        <canvas id="fit-residual" data-plot-key="fit-residual" width="1180" height="420"></canvas>
+        <canvas id="fit-residual" data-plot-key="fit-residual" width="760" height="340"></canvas>
       </article>
-      <article class="plot-panel">
-        <div class="panel-head"><h3>EAS Preview</h3><div class="panel-head-actions">${enlargeButton("modal-eas")}</div></div>
-        <canvas id="modal-eas" data-plot-key="modal-eas" width="760" height="310"></canvas>
-        ${renderFeaturePlotNote(dataset, "EAS")}
-      </article>
-      <article class="plot-panel">
-        <div class="panel-head"><h3>DAS</h3><div class="panel-head-actions">${enlargeButton("modal-das")}</div></div>
-        <canvas id="modal-das" data-plot-key="modal-das" width="760" height="310"></canvas>
-        ${renderFeaturePlotNote(dataset, "DAS")}
-      </article>
-      <article class="plot-panel feature-time-panel">
-        <div class="panel-head"><div><h3>Feature × Time Map</h3><span>Lossy regional compression of the treated fsTA heatmap</span></div><div class="panel-head-actions">${enlargeButton("feature-time")}</div></div>
-        <canvas id="feature-time" data-plot-key="feature-time" width="1180" height="390" aria-label="Feature by time compressed fsTA map"></canvas>
-        ${renderFeatureTimeSummary(dataset)}
+      <article class="plot-panel fit-component-preview">
+        <div class="panel-head">
+          <div><h3>Component Spectra</h3><span id="fit-component-mode-copy">${state.fitting.spectrumMode} preview</span></div>
+          <div class="panel-head-actions">
+            <div class="segmented" role="group" aria-label="Global fit component spectra mode">
+              <button data-action="result-mode" data-mode="EAS" class="${state.fitting.spectrumMode === "EAS" ? "active" : ""}">EAS</button>
+              <button data-action="result-mode" data-mode="DAS" class="${state.fitting.spectrumMode === "DAS" ? "active" : ""}">DAS</button>
+            </div>
+            ${enlargeButton("modal-components")}
+          </div>
+        </div>
+        <canvas id="modal-components" data-plot-key="modal-components" width="1200" height="400" aria-label="${state.fitting.spectrumMode} preview"></canvas>
       </article>
     </section>
   `;
 }
 
-function renderFeatureTimeSummary(dataset) {
-  const compressed = buildFeatureTimeMap(dataset, featureMonitorFor(dataset));
-  if (compressed.status !== "live") return `<p class="feature-time-unavailable">${escapeHtml(compressed.limitations[0])}</p>`;
-  const score = compressed.compression.reconstructionScore;
-  return `<div class="feature-time-summary">
-    <span><strong>${compressed.features.length}</strong> feature traces</span>
-    <span><strong>${format(compressed.compression.cellReductionFactor)}×</strong> fewer signal cells</span>
-    <span><strong>${(compressed.compression.coveredWavelengthFraction * 100).toFixed(1)}%</strong> wavelength coverage</span>
-    <span><strong>${Number.isFinite(score) ? `${(score * 100).toFixed(1)}%` : "-"}</strong> reconstruction score</span>
-    <em>Derived summary only; raw heatmap remains authoritative.</em>
-  </div>`;
+function featureAssignmentsForDataset(dataset) {
+  const map = new Map();
+  (state.evidenceGraph?.entities ?? [])
+    .filter((entity) => entity.kind === "feature" && entity.datasetId === dataset.id)
+    .forEach((entity) => map.set(entity.id, entity));
+  return map;
+}
+
+function featureAssignmentForCandidate(candidate) {
+  const entity = (state.evidenceGraph?.entities ?? []).find((item) => item.id === candidate.id && item.kind === "feature");
+  return entity?.assignment && entity.assignment !== "unassigned" ? entity : null;
+}
+
+function selectedSignatureForDataset(dataset = activeDataset()) {
+  if (!dataset?.fit || !state.selectedSignatureId) return null;
+  return featureMonitorFor(dataset, "EAS").candidates.find((signature) => signature.id === state.selectedSignatureId) ?? null;
+}
+
+function saveSelectedSignature() {
+  const dataset = activeDataset();
+  const signature = selectedSignatureForDataset(dataset);
+  if (!dataset || !signature) return;
+  const wavelengthCenter = Number(document.getElementById("signature-position")?.value);
+  const spectralMin = Math.min(...dataset.analysis.spectralAxis.filter(Number.isFinite));
+  const spectralMax = Math.max(...dataset.analysis.spectralAxis.filter(Number.isFinite));
+  if (!Number.isFinite(wavelengthCenter) || wavelengthCenter < spectralMin || wavelengthCenter > spectralMax) {
+    throw new Error(`Signature position must be within the treated wavelength range (${formatWavelength(spectralMin)}–${formatWavelength(spectralMax)} nm).`);
+  }
+  const componentIndex = Number(document.getElementById("signature-component")?.value);
+  if (!Number.isInteger(componentIndex) || dataset.fit.irfLimited?.[componentIndex]) {
+    throw new Error("Select an interpreted, non-IRF-limited EAS component.");
+  }
+  state.evidenceGraph = upsertFeatureSignature(state.evidenceGraph, signature, {
+    label: document.getElementById("signature-label")?.value,
+    assignment: document.getElementById("signature-type")?.value,
+    wavelengthCenter,
+    componentIndex,
+    note: document.getElementById("signature-note")?.value,
+    mode: "EAS",
+  }, state.datasets, { author: "project-user" });
+  state.signatureEditor = null;
+  clearPlotZooms(["main-components", "modal-components"]);
+  markDirty();
+  render();
+}
+
+function deleteSelectedSignature() {
+  const dataset = activeDataset();
+  const signature = selectedSignatureForDataset(dataset);
+  if (!dataset || !signature) return;
+  state.evidenceGraph = deleteFeatureSignature(state.evidenceGraph, signature, state.datasets, { author: "project-user" });
+  state.selectedSignatureId = null;
+  state.signatureEditor = null;
+  clearPlotZooms(["main-components", "modal-components"]);
+  markDirty();
+  render();
 }
 
 function renderNewFolderModal() {
@@ -1231,13 +1323,13 @@ function renderDeleteDatasetModal() {
 function renderDatasetEditorModal() {
   const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
   const metadata = normalizeDatasetEvidence(dataset?.evidenceMetadata, "fsta");
-  const connections = connectionsForEntity(state.evidenceGraph, dataset?.id);
+  const connections = connectionsForEntity(state.evidenceGraph, dataset?.id)
+    .filter((connection) => {
+      const otherId = connection.fromId === dataset?.id ? connection.toId : connection.fromId;
+      return state.evidenceGraph.entities.find((entity) => entity.id === otherId)?.kind !== "species-hypothesis";
+    });
   const primaryConditions = primaryConditionFields(metadata.technique.id);
   const additionalConditions = CONDITION_FIELDS.filter((field) => !primaryConditions.includes(field));
-  const speciesLabels = metadata.speciesStateIds
-    .map((id) => state.evidenceGraph.entities.find((entity) => entity.id === id)?.label)
-    .filter(Boolean)
-    .join(", ");
   return `
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="Edit dataset details">
       <div class="modal dataset-details-modal">
@@ -1262,14 +1354,13 @@ function renderDatasetEditorModal() {
               <label class="dataset-tag-field"><span>Preparation ID</span><input id="dataset-preparation-id" value="${escapeHtml(metadata.preparationId)}" placeholder="Unknown" /></label>
               ${primaryConditions.map((field) => renderConditionField(field, metadata, true)).join("")}
             </div>
-            <label class="modal-field"><span>Candidate species or states</span><input id="dataset-species-states" value="${escapeHtml(speciesLabels)}" placeholder="Comma-separated; stored as proposed hypotheses" /></label>
             <details class="dataset-conditions-disclosure">
               <summary>More condition tags <span>${additionalConditions.filter((field) => metadata.conditions[field] != null).length} filled</span></summary>
               <div class="dataset-tag-editor additional-condition-tags">${additionalConditions.map((field) => renderConditionField(field, metadata, true)).join("")}</div>
             </details>
           </section>
           <section class="dataset-detail-section connected-evidence-section">
-            <div class="dataset-detail-section-head"><div><h3>Connected Evidence</h3><p>Select project evidence, create typed connections, and inspect the local relation map.</p></div><div class="evidence-toolbar"><button data-action="toggle-evidence-view">${state.evidenceViewMode === "map" ? "List view" : "Relation map"}</button><button data-action="open-evidence-import">Import evidence...</button><button data-action="open-literature-import">Import literature...</button></div></div>
+            <div class="dataset-detail-section-head"><div><h3>Imported Evidence</h3><p>Import supporting files and review existing links. Dataset links are visible from both connected datasets.</p></div><div class="evidence-toolbar"><button data-action="toggle-evidence-view">${state.evidenceViewMode === "map" ? "List view" : "Relation map"}</button><button data-action="open-evidence-import">Import evidence...</button><button data-action="open-literature-import">Import literature...</button></div></div>
             ${state.evidenceViewMode === "map" ? renderFocusedEvidenceMap(dataset, connections) : (connections.length ? `<div class="evidence-connection-list">${connections.map((connection) => renderEvidenceConnectionRow(dataset, connection)).join("")}</div>` : `<p class="empty-evidence-state">No explicit connections. Similar filenames, lifetimes, or spectra will not create one automatically.</p>`)}
             ${renderEvidenceLibrary(dataset)}
           </section>
@@ -1309,10 +1400,10 @@ function primaryConditionFields(techniqueId) {
 
 function renderEvidenceLibrary(dataset) {
   const choices = state.evidenceGraph.entities
-    .filter((entity) => entity.id !== dataset.id)
+    .filter((entity) => entity.id !== dataset.id && Boolean(entity.assetId))
     .sort((left, right) => left.label.localeCompare(right.label));
   return `<div class="evidence-library">
-    <div class="evidence-library-head"><div><strong>Project evidence library</strong><span>${state.evidenceSelectionIds.length} selected</span></div><button data-action="connect-selected-evidence" ${state.evidenceSelectionIds.length ? "" : "disabled"}>Connect selected...</button></div>
+    <div class="evidence-library-head"><div><strong>Imported evidence library</strong><span>${state.evidenceSelectionIds.length} selected</span></div><button data-action="connect-selected-evidence" ${state.evidenceSelectionIds.length ? "" : "disabled"}>Connect selected...</button></div>
     ${choices.length ? `<div class="evidence-library-grid">${choices.map((entity) => {
       const asset = state.evidenceAssets.find((item) => item.id === entity.assetId);
       return `<div class="evidence-library-item"><label><input class="evidence-library-check" type="checkbox" value="${escapeHtml(entity.id)}" ${state.evidenceSelectionIds.includes(entity.id) ? "checked" : ""} /><span><strong data-i18n-skip>${escapeHtml(entity.label)}</strong><small>${escapeHtml(titleCase(entity.kind))}${asset?.techniqueId ? ` · ${escapeHtml(getTechnique(asset.techniqueId).label)}` : ""}</small></span></label>${asset ? `<button type="button" data-action="open-evidence-asset" data-asset-id="${escapeHtml(asset.id)}">Details</button>` : ""}</div>`;
@@ -1324,7 +1415,7 @@ function renderFocusedEvidenceMap(dataset, connections) {
   const neighbors = connections.map((connection) => {
     const id = connection.fromId === dataset.id ? connection.toId : connection.fromId;
     return { connection, entity: state.evidenceGraph.entities.find((item) => item.id === id) };
-  }).filter((item) => item.entity).slice(0, 12);
+  }).filter((item) => item.entity && item.entity.kind !== "feature").slice(0, 12);
   if (!neighbors.length) return `<div class="evidence-map evidence-map-empty"><strong>${escapeHtml(datasetDisplayName(dataset))}</strong><span>No connected evidence yet</span></div>`;
   const cx = 400;
   const cy = 190;
@@ -1370,7 +1461,9 @@ function renderEvidenceConnectionModal() {
   const existing = state.evidenceGraph.relationships.find((item) => item.id === state.pendingConnectionId);
   const sourceId = existing?.fromId ?? dataset?.id;
   const source = state.evidenceGraph.entities.find((entity) => entity.id === sourceId);
-  const targets = state.evidenceGraph.entities.filter((entity) => entity.id !== sourceId);
+  const targets = state.evidenceGraph.entities.filter((entity) => (
+    entity.id !== sourceId && (existing ? entity.id === existing.toId : Boolean(entity.assetId))
+  ));
   const selectedTargetIds = existing ? [existing.toId] : state.pendingConnectionTargetIds.length
     ? state.pendingConnectionTargetIds
     : [targets[0]?.id].filter(Boolean);
@@ -1389,7 +1482,7 @@ function renderEvidenceConnectionModal() {
         <label class="modal-field"><span>Assertion status</span><select id="connection-status">${["recorded", "proposed", "contested"].map((status) => `<option value="${status}" ${existing?.assertionStatus === status ? "selected" : ""}>${escapeHtml(titleCase(status))}</option>`).join("")}</select></label>
         <label class="modal-field"><span>Authored rationale</span><textarea id="connection-rationale" rows="4" required placeholder="Why is this relationship scientifically relevant?">${escapeHtml(existing?.rationale ?? "")}</textarea></label>
         <label class="modal-field"><span>Author</span><input id="connection-author" value="${escapeHtml(existing?.author ?? "project-user")}" /></label>
-        <p class="scientific-note">Interpretive connections remain proposals or contested assertions. Adding one never changes a species-hypothesis status.</p>
+        <p class="scientific-note">A dataset-to-dataset connection is visible from both datasets. Directional relationship types retain their authored direction.</p>
       </div>
       <footer class="modal-footer"><button data-action="back-dataset-details">Back</button><span>${compatibleTypes.length ? "One authored relationship will be applied to every selected item." : "The selected evidence types have no shared valid relationship."}</span><button data-action="save-evidence-connection" ${compatibleTypes.length ? "" : "disabled"}>${existing ? "Save Connection" : selectedTargetIds.length > 1 ? `Add ${selectedTargetIds.length} Connections` : "Add Connection"}</button></footer>
     </div>
@@ -1521,7 +1614,7 @@ function renderExpandedCoordinateControl(plotKey) {
 function renderExpandedPlot() {
   const meta = expandedPlotMeta(state.expandedPlot);
   const coordinateControl = renderExpandedCoordinateControl(state.expandedPlot);
-  const componentPlot = ["main-components", "modal-eas", "modal-das", "compare-components"].includes(state.expandedPlot);
+  const componentPlot = ["main-components", "modal-components", "compare-components"].includes(state.expandedPlot);
   return `
     <section class="modal-shell expanded-shell" role="dialog" aria-modal="true" aria-label="${escapeHtml(meta.title)} enlarged">
       <div class="modal expanded-plot-modal">
@@ -1686,12 +1779,12 @@ function bindDom() {
   document.getElementById("time-slider")?.addEventListener("input", (event) => {
     state.selectedTimeIndex = Number(event.target.value);
     syncSelectionLabels();
-    paintCanvases();
+    scheduleSelectionPaint("heatmap", "spectrum", "expanded");
   });
   document.getElementById("wavelength-slider")?.addEventListener("input", (event) => {
     state.selectedWavelengthIndex = Number(event.target.value);
     syncSelectionLabels();
-    paintCanvases();
+    scheduleSelectionPaint("heatmap", "kinetics", "expanded");
   });
   document.getElementById("expanded-coordinate-slider")?.addEventListener("input", (event) => {
     const index = Number(event.target.value);
@@ -1710,7 +1803,11 @@ function bindDom() {
       if (linked) linked.value = `${index}`;
       syncSelectionLabels();
     }
-    paintCanvases();
+    if (isCompare) {
+      scheduleSelectionPaint(isTime ? "compare-spectrum" : "compare-kinetics", "expanded");
+    } else {
+      scheduleSelectionPaint("heatmap", isTime ? "spectrum" : "kinetics", "expanded");
+    }
   });
 
   document.getElementById("result-normalize")?.addEventListener("change", (event) => {
@@ -1743,42 +1840,6 @@ function bindDom() {
   document.getElementById("fit-range-sensitivity")?.addEventListener("change", (event) => {
     state.fitting.rangeSensitivity = event.target.checked;
   });
-  document.getElementById("feature-method")?.addEventListener("change", (event) => {
-    state.featureFinding.method = event.target.value === "local-threshold" ? "local-threshold" : "multi-gaussian";
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
-    markDirty();
-    render();
-  });
-  document.getElementById("feature-minimum-snr")?.addEventListener("change", (event) => {
-    state.featureFinding.minimumSnr = clamp(Number(event.target.value) || 4, 1, 50);
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
-    markDirty();
-    render();
-  });
-  document.getElementById("feature-maximum-peaks")?.addEventListener("change", (event) => {
-    state.featureFinding.maximumPeaksPerComponent = Math.round(clamp(Number(event.target.value) || 6, 1, 12));
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
-    markDirty();
-    render();
-  });
-  document.getElementById("feature-relative-threshold")?.addEventListener("change", (event) => {
-    state.featureFinding.relativeThreshold = clamp((Number(event.target.value) || 12) / 100, 0.01, 0.8);
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
-    markDirty();
-    render();
-  });
-  document.getElementById("feature-gaussian-r2")?.addEventListener("change", (event) => {
-    state.featureFinding.minimumGaussianR2 = clamp(Number(event.target.value) || 0, 0, 0.99);
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
-    markDirty();
-    render();
-  });
-  document.getElementById("feature-minimum-fwhm")?.addEventListener("change", (event) => {
-    state.featureFinding.minimumFwhmNm = clamp(Number(event.target.value) || 0, 0, 500);
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
-    markDirty();
-    render();
-  });
   document.querySelectorAll(".lifetime-value").forEach((input) => {
     input.addEventListener("input", (event) => {
       state.fitting.lifetimeValues[Number(event.currentTarget.dataset.lifetimeIndex)] = event.currentTarget.value;
@@ -1794,12 +1855,12 @@ function bindDom() {
   document.getElementById("compare-time-slider")?.addEventListener("input", (event) => {
     state.compare.timeIndex = Number(event.target.value);
     updateComparisonCoordinateLabels();
-    paintCanvases();
+    scheduleSelectionPaint("compare-spectrum", "expanded");
   });
   document.getElementById("compare-wavelength-slider")?.addEventListener("input", (event) => {
     state.compare.wavelengthIndex = Number(event.target.value);
     updateComparisonCoordinateLabels();
-    paintCanvases();
+    scheduleSelectionPaint("compare-kinetics", "expanded");
   });
   document.getElementById("compare-component-mode")?.addEventListener("change", (event) => {
     state.compare.componentMode = event.target.value;
@@ -1889,10 +1950,85 @@ function bindDom() {
       event.preventDefault();
       event.stopPropagation();
       const folderId = event.currentTarget.dataset.folderId;
-      const position = anchoredMenuPosition(event.currentTarget.getBoundingClientRect(), 240, 250);
+      const position = anchoredMenuPosition(event.currentTarget.getBoundingClientRect(), 240, 320);
       closeContextMenus();
       state.folderMenu = { folderId, ...position };
       render();
+    });
+  });
+  document.querySelectorAll(".folder-drag-handle").forEach((handle) => {
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const dragHandle = event.currentTarget;
+      const folderNode = dragHandle.closest(".folder-node");
+      const folderId = folderNode?.dataset.folderDrop;
+      if (!folderNode || !folderId) return;
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startY = event.clientY;
+      let started = false;
+      let resolvedTarget = null;
+      dragHandle.setPointerCapture?.(pointerId);
+
+      const clearTarget = () => {
+        if (!resolvedTarget) return;
+        resolvedTarget.element.classList.remove(resolvedTarget.dropClass);
+        resolvedTarget = null;
+      };
+      const updateTarget = (pointerEvent) => {
+        const element = document.elementFromPoint(pointerEvent.clientX, pointerEvent.clientY);
+        const target = element?.closest("[data-folder-drop]");
+        if (!target || target.dataset.folderDrop === folderId) {
+          clearTarget();
+          return;
+        }
+        const rect = target.querySelector(".folder-heading")?.getBoundingClientRect() ?? target.getBoundingClientRect();
+        const placement = pointerEvent.clientY < rect.top + rect.height / 2 ? "before" : "after";
+        const dropClass = `folder-drop-${placement}`;
+        const key = `${target.dataset.folderDrop}-${placement}`;
+        if (resolvedTarget?.key === key) return;
+        clearTarget();
+        resolvedTarget = { element: target, targetFolderId: target.dataset.folderDrop, placement, dropClass, key };
+        target.classList.add(dropClass);
+      };
+      const move = (pointerEvent) => {
+        if (pointerEvent.pointerId !== pointerId) return;
+        if (!started && Math.hypot(pointerEvent.clientX - startX, pointerEvent.clientY - startY) >= 4) {
+          started = true;
+          folderNode.classList.add("folder-dragging");
+          document.documentElement.classList.add("folder-drag-active");
+        }
+        if (!started) return;
+        updateTarget(pointerEvent);
+        const tree = document.querySelector(".dataset-tree-scroll");
+        if (tree) {
+          const treeRect = tree.getBoundingClientRect();
+          if (pointerEvent.clientY < treeRect.top + 40) tree.scrollTop -= 8;
+          else if (pointerEvent.clientY > treeRect.bottom - 40) tree.scrollTop += 8;
+        }
+      };
+      const cleanup = () => {
+        clearTarget();
+        folderNode.classList.remove("folder-dragging");
+        document.documentElement.classList.remove("folder-drag-active");
+        if (dragHandle.hasPointerCapture?.(pointerId)) dragHandle.releasePointerCapture(pointerId);
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", finish);
+        document.removeEventListener("pointercancel", cleanup);
+      };
+      const finish = (pointerEvent) => {
+        if (pointerEvent.pointerId !== pointerId) return;
+        if (started) updateTarget(pointerEvent);
+        const target = resolvedTarget;
+        cleanup();
+        if (started && target) reorderFolder(folderId, target.targetFolderId, target.placement);
+      };
+
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", finish);
+      document.addEventListener("pointercancel", cleanup);
     });
   });
   document.querySelectorAll(".dataset-drag-handle").forEach((handle) => {
@@ -2001,21 +2137,119 @@ function bindDom() {
   });
 }
 
+function handleFeatureBandClick(canvas, plotKey, event) {
+  if (!["modal-components", "main-components"].includes(plotKey)) return false;
+  if (state.captureMode || state.zoomSelectionKey === plotKey) return false;
+  const dataset = activeDataset();
+  if (!dataset?.fit) return false;
+  const mode = state.fitting.spectrumMode;
+  if (mode !== "EAS") return false;
+  const monitor = featureMonitorFor(dataset, "EAS");
+  const geometry = plotGeometry.get(canvas);
+  if (!geometry || geometry.type !== "line") return false;
+  const rect = canvas.getBoundingClientRect();
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
+  if (px < geometry.plot.left || px > geometry.plot.right || py < geometry.plot.top || py > geometry.plot.bottom) return false;
+  const wavelength = scale(px, [geometry.plot.left, geometry.plot.right], geometry.xExtent);
+  const hit = signatureHitAt(canvas, event)?.feature;
+  if (hit) {
+    state.selectedSignatureId = hit.id;
+    paintCanvases();
+    return true;
+  }
+  const spectra = visibleComponentSpectra(dataset, "EAS");
+  if (!spectra.length) return false;
+  const normalizeMode = plotKey === "main-components" ? state.fitting.normalize : "none";
+  const nearestComponent = spectra.map((spectrum, index) => {
+    const componentIndex = spectrum.componentIndex ?? index;
+    const points = normalizePoints(spectrum.x.map((x, pointIndex) => ({ x, y: spectrum.y[pointIndex] })), normalizeMode);
+    const point = points[nearestIndex(points.map((item) => item.x), wavelength)];
+    const pixelY = Number.isFinite(point?.y) ? scale(point.y, geometry.yExtent, [geometry.plot.bottom, geometry.plot.top]) : Infinity;
+    return { componentIndex, signal: point?.y, wavelength: point?.x, distance: Math.abs(pixelY - py) };
+  }).sort((left, right) => left.distance - right.distance)[0];
+  if (!nearestComponent || !Number.isFinite(nearestComponent.signal)) return false;
+  const existingForComponent = (monitor.candidates ?? []).filter((signature) => signature.componentIndex === nearestComponent.componentIndex).length;
+  const signature = createManualSignature(dataset, nearestComponent.componentIndex, nearestComponent.wavelength, nearestComponent.signal, {
+    mode: "EAS",
+    sequence: existingForComponent + 1,
+  });
+  state.evidenceGraph = upsertFeatureSignature(state.evidenceGraph, signature, {}, state.datasets, { author: "project-user" });
+  state.selectedSignatureId = signature.id;
+  state.signatureEditor = signatureEditorPosition(event.clientX, event.clientY);
+  clearPlotZooms(["main-components", "modal-components"]);
+  markDirty();
+  render();
+  return true;
+}
+
+function signatureHitAt(canvas, event, options = {}) {
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const regions = signatureHitRegions.get(canvas) ?? [];
+  const labelHit = [...regions].reverse().find((region) => (
+    x >= region.labelX - 3
+    && x <= region.labelX + region.labelWidth + 3
+    && y >= region.labelY - 3
+    && y <= region.labelY + region.labelHeight + 3
+  ));
+  if (labelHit || options.labelsOnly) return labelHit ?? null;
+  return regions
+    .map((region) => ({ ...region, lineDistance: Math.abs(region.lineX - x) }))
+    .filter((region) => lineDistanceWithinPlot(region, y))
+    .sort((left, right) => left.lineDistance - right.lineDistance)[0] ?? null;
+}
+
+function lineDistanceWithinPlot(region, y) {
+  return region.lineDistance <= 7 && y >= region.plotTop && y <= region.plotBottom;
+}
+
+function signatureEditorPosition(clientX, clientY) {
+  return {
+    x: clamp(clientX + 8, 8, Math.max(8, window.innerWidth - 430)),
+    y: clamp(clientY + 8, 8, Math.max(8, window.innerHeight - 420)),
+  };
+}
+
+function openSignatureEditor(canvas, event) {
+  const hit = signatureHitAt(canvas, event, { labelsOnly: true });
+  if (!hit) return false;
+  state.selectedSignatureId = hit.feature.id;
+  closeContextMenus();
+  state.signatureEditor = signatureEditorPosition(event.clientX, event.clientY);
+  render();
+  return true;
+}
+
 function bindPlotInteractions() {
   document.querySelectorAll("canvas[data-plot-key]").forEach((canvas) => {
     const plotKey = canvas.dataset.plotKey;
     canvas.classList.toggle("zoom-selecting", state.zoomSelectionKey === plotKey);
     canvas.classList.toggle("capture-target", state.captureMode);
     canvas.addEventListener("click", (event) => {
+      if (handleFeatureBandClick(canvas, plotKey, event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (!state.captureMode || state.zoomSelectionKey === plotKey) return;
       event.preventDefault();
       event.stopPropagation();
       state.captureMode = false;
       capturePlotToTray(plotKey).catch(showError);
     });
+    canvas.addEventListener("dblclick", (event) => {
+      const mode = ["modal-components", "main-components"].includes(plotKey) ? state.fitting.spectrumMode : null;
+      if (mode !== "EAS" || !openSignatureEditor(canvas, event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    });
     canvas.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      const mode = ["modal-components", "main-components"].includes(plotKey) ? state.fitting.spectrumMode : null;
+      if (mode === "EAS" && openSignatureEditor(canvas, event)) return;
       closeContextMenus();
       state.plotMenu = {
         plotKey,
@@ -2095,6 +2329,7 @@ function closeContextMenus() {
   state.datasetMenu = null;
   state.folderMenu = null;
   state.plotMenu = null;
+  state.signatureEditor = null;
 }
 
 function positionContextMenus() {
@@ -2102,6 +2337,7 @@ function positionContextMenus() {
     [".dataset-context-menu", state.datasetMenu],
     [".folder-context-menu", state.folderMenu],
     [".plot-context-menu", state.plotMenu],
+    [".signature-editor-popover", state.signatureEditor],
   ].forEach(([selector, position]) => {
     const menu = document.querySelector(selector);
     if (!menu || !position) return;
@@ -2131,6 +2367,7 @@ async function handleAction(event) {
       if (index < 0) return;
       if (index !== state.activeIndex) clearPlotZooms();
       state.activeIndex = index;
+      state.signatureEditor = null;
       clampSelections();
       render();
     } else if (action === "apply-range") {
@@ -2138,16 +2375,15 @@ async function handleAction(event) {
       const folderId = activeFolder()?.id;
       await runJob("Applying folder analysis range", "range", () => applyRangeToFolder(folderId, range), "Analysis range applied to the active folder.");
     } else if (action === "baseline") {
-      const folder = activeFolder();
-      if (!folder) return;
-      folder.treatments.baseline = !folder.treatments.baseline;
-      await runJob(folder.treatments.baseline ? "Applying pre-zero baseline" : "Removing baseline treatment", "baseline", () => rebuildTreatments(folder.id), "Baseline state updated for the active folder.");
+      await toggleActiveTreatment("baseline");
     } else if (action === "chirp") {
+      await toggleActiveTreatment("chirp");
+    } else if (action === "reset-dataset") {
+      const dataset = activeDataset();
       const folder = activeFolder();
-      if (!folder) return;
-      folder.treatments.chirp = !folder.treatments.chirp;
-      await runJob(folder.treatments.chirp ? "Estimating and applying chirp" : "Removing chirp treatment", "chirp", () => rebuildTreatments(folder.id), "Chirp state updated for the active folder.");
-    } else if (action === "reset") {
+      if (!dataset || !folder) return;
+      await runJob("Resetting active dataset", "reset", () => resetSingleDataset(dataset.id, folder.id), `"${datasetDisplayName(dataset)}" was reset to its selected source range; baseline, chirp, and global fit were removed for this dataset.`);
+    } else if (action === "reset-folder") {
       const folderId = activeFolder()?.id;
       await runJob("Resetting folder datasets", "reset", () => resetAnalysis(folderId), "Active-folder treatments and manual cropping were reset.");
     } else if (action === "open-manual") {
@@ -2219,10 +2455,12 @@ async function handleAction(event) {
       render();
     } else if (action === "global-fit") {
       syncLifetimeEditorFromDataset();
+      state.fitting.spectrumMode = "EAS";
       state.modal = "fit";
       render();
     } else if (action === "close-modal") {
       state.modal = null;
+      state.signatureEditor = null;
       state.pendingDeleteId = null;
       state.pendingDatasetId = null;
       state.pendingConnectionId = null;
@@ -2232,10 +2470,23 @@ async function handleAction(event) {
       render();
     } else if (action === "run-fit") {
       await runFitActive();
-    } else if (action === "reset-feature-finder") {
-      state.featureFinding = { method: "multi-gaussian", minimumSnr: 4, maximumPeaksPerComponent: 6, minimumBicImprovement: 6, relativeThreshold: 0.12, minimumGaussianR2: 0.45, minimumFwhmNm: 6 };
-      clearPlotZooms(["main-components", "modal-eas", "modal-das", "feature-time"]);
-      markDirty();
+    } else if (action === "reset-fit-parameters") {
+      resetFittingInputs();
+      render();
+    } else if (action === "edit-summary-signature") {
+      const signatureId = event.currentTarget.dataset.signatureId;
+      if (!featureMonitorFor(activeDataset(), "EAS").candidates.some((signature) => signature.id === signatureId)) return;
+      const anchor = event.currentTarget.getBoundingClientRect();
+      closeContextMenus();
+      state.selectedSignatureId = signatureId;
+      state.signatureEditor = anchoredMenuPosition(anchor, 420, 400);
+      render();
+    } else if (action === "save-signature") {
+      saveSelectedSignature();
+    } else if (action === "delete-signature") {
+      deleteSelectedSignature();
+    } else if (action === "close-signature-editor") {
+      state.signatureEditor = null;
       render();
     } else if (action === "batch-fit") {
       await runBatchFit();
@@ -2275,8 +2526,10 @@ async function handleAction(event) {
       await exportDisplayedPlotTxt(plotKey);
     } else if (action === "result-mode") {
       state.fitting.spectrumMode = event.currentTarget.dataset.mode;
-      clearPlotZooms(["main-components"]);
-      render();
+      state.selectedSignatureId = null;
+      state.signatureEditor = null;
+      clearPlotZooms(["main-components", "modal-components"]);
+      updateComponentViewUi();
     } else if (action === "new-folder") {
       state.modal = "new-folder";
       render();
@@ -2422,6 +2675,10 @@ async function handleAction(event) {
       const folderId = event.currentTarget.dataset.folderId;
       closeContextMenus();
       startFolderRename(folderId);
+    } else if (action === "move-folder-up" || action === "move-folder-down") {
+      const folderId = event.currentTarget.dataset.folderId;
+      closeContextMenus();
+      moveFolderByOffset(folderId, action === "move-folder-up" ? -1 : 1);
     } else if (action === "import-folder") {
       state.importTargetFolderId = event.currentTarget.dataset.folderId;
       closeContextMenus();
@@ -2651,20 +2908,82 @@ function applyRangeToFolder(folderId, nextRange) {
   markDirty();
 }
 
-function rebuildTreatments(folderId) {
+function rebuildTreatments(folderId, affectedDatasetIds = null) {
   const folder = state.folders.find((item) => item.id === folderId);
-  const targets = folderDatasets(folderId);
+  const affected = affectedDatasetIds ? new Set(affectedDatasetIds) : null;
+  const targets = folderDatasets(folderId).filter((dataset) => !affected || affected.has(dataset.id));
   if (!folder || !targets.length) return;
   let analyses = targets.map((dataset) => {
     let analysis = Parser.cloneAnalysisDataset(dataset.baseAnalysis);
-    if (folder.treatments.baseline) analysis = Parser.applyBaselineCorrection(analysis);
+    if (treatmentEnabled(dataset, folder, "baseline")) analysis = Parser.applyBaselineCorrection(analysis);
     return analysis;
   });
-  if (folder.treatments.chirp) analyses = Parser.applySharedChirpCorrection(analyses);
+  const chirpIndexes = targets
+    .map((dataset, index) => treatmentEnabled(dataset, folder, "chirp") ? index : -1)
+    .filter((index) => index >= 0);
+  if (chirpIndexes.length) {
+    const corrected = Parser.applySharedChirpCorrection(chirpIndexes.map((index) => analyses[index]));
+    chirpIndexes.forEach((analysisIndex, correctedIndex) => {
+      analyses[analysisIndex] = corrected[correctedIndex];
+    });
+  }
   const analysisById = new Map(targets.map((dataset, index) => [dataset.id, analyses[index]]));
   state.datasets = state.datasets.map((dataset) => analysisById.has(dataset.id)
     ? { ...dataset, analysis: analysisById.get(dataset.id), fit: null }
     : dataset);
+  clearPlotZooms();
+  clampSelections();
+  markDirty();
+}
+
+async function toggleActiveTreatment(kind) {
+  const folder = activeFolder();
+  const dataset = activeDataset();
+  if (!folder || !dataset || !["baseline", "chirp"].includes(kind)) return;
+  const previousStates = snapshotTreatmentStates(folderDatasets(folder.id), folder);
+  if (folder.treatments[kind] && dataset.treatmentOverrides?.[kind]) {
+    dataset.treatmentOverrides = { ...(dataset.treatmentOverrides ?? {}), [kind]: false };
+  } else {
+    folder.treatments[kind] = !folder.treatments[kind];
+    if (folder.treatments[kind]) {
+      state.datasets = state.datasets.map((item) => item.folderId === folder.id
+        ? { ...item, treatmentOverrides: { ...(item.treatmentOverrides ?? {}), [kind]: false } }
+        : item);
+    }
+  }
+  const affectedIds = changedTreatmentDatasetIds(folderDatasets(folder.id), folder, previousStates);
+  const nowEnabled = treatmentEnabled(activeDataset(), folder, kind);
+  const label = kind === "baseline" ? "pre-zero baseline" : "chirp";
+  await runJob(nowEnabled ? `Applying ${label}` : `Removing ${label}`, kind, () => rebuildTreatments(folder.id, affectedIds), `${kind === "baseline" ? "Baseline" : "Chirp"} state updated without rebuilding unaffected folder datasets.`);
+}
+
+function resetSingleDataset(datasetId, folderId) {
+  const folder = state.folders.find((item) => item.id === folderId);
+  if (!folder) return;
+  // Rebuild only the active dataset from its source, honoring the folder's
+  // current range (mirroring applyRangeToFolder's single-dataset path).
+  state.datasets = state.datasets.map((dataset) => {
+    if (dataset.id !== datasetId) return dataset;
+    const options = folder.range ? {
+      spectralRange: { min: folder.range.wavelengthMin, max: folder.range.wavelengthMax },
+      timeRange: { min: folder.range.timeMin, max: folder.range.timeMax },
+    } : {};
+    const baseAnalysis = Parser.createAnalysisDataset(dataset.source, options);
+    if (folder.range) {
+      baseAnalysis.provenance.push({
+        label: "Crop",
+        status: "applied",
+        range: `${format(baseAnalysis.spectralAxis[0])}-${format(baseAnalysis.spectralAxis.at(-1))} nm; ${format(baseAnalysis.timeAxis[0])}-${format(baseAnalysis.timeAxis.at(-1))} ps`,
+      });
+    }
+    return {
+      ...dataset,
+      baseAnalysis,
+      analysis: Parser.cloneAnalysisDataset(baseAnalysis),
+      fit: null,
+      treatmentOverrides: { ...(dataset.treatmentOverrides ?? {}), baseline: true, chirp: true },
+    };
+  });
   clearPlotZooms();
   clampSelections();
   markDirty();
@@ -2683,6 +3002,7 @@ function resetAnalysis(folderId) {
       baseAnalysis,
       analysis: Parser.cloneAnalysisDataset(baseAnalysis),
       fit: null,
+      treatmentOverrides: { baseline: false, chirp: false },
     };
   });
   folder.treatments = { baseline: false, chirp: false };
@@ -2712,7 +3032,7 @@ async function runFitActive() {
     state.fitting.lifetimeValues = dataset.fit.lifetimes.map((value) => conciseInputNumber(value));
     state.fitting.fixedLifetimes = dataset.fit.fixedLifetimes.slice();
     state.fitting.spectrumMode = "EAS";
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "fit-residual"]);
+    clearPlotZooms(["main-components", "modal-components", "fit-residual"]);
     markDirty();
   }, "Global fitting completed. Main-screen lifetime and component-spectra panels are now available.");
 }
@@ -2757,7 +3077,7 @@ async function runBatchFit() {
       state.fitting.fixedLifetimes = activeFit.fixedLifetimes.slice();
     }
     state.fitting.spectrumMode = "EAS";
-    clearPlotZooms(["main-components", "modal-eas", "modal-das", "fit-residual", "compare-components"]);
+    clearPlotZooms(["main-components", "modal-components", "fit-residual", "compare-components"]);
     markDirty();
   }, `Global fitting completed for ${targets.length} dataset(s) in "${folderName}"; existing fits were preserved.`);
 }
@@ -2766,6 +3086,21 @@ function resetLifetimeEditor() {
   state.fitting.editorDatasetId = activeDataset()?.id ?? null;
   state.fitting.lifetimeValues = Array.from({ length: state.fitting.components }, () => "");
   state.fitting.fixedLifetimes = Array.from({ length: state.fitting.components }, () => false);
+}
+
+function resetFittingInputs() {
+  Object.assign(state.fitting, {
+    components: 3,
+    irfFwhm: 0.25,
+    preZeroModel: "smooth",
+    coherentArtifactOrder: 1,
+    weighting: "robust-noise",
+    optimizerStarts: 3,
+    maximumIterations: 55,
+    rangeSensitivity: true,
+  });
+  resetLifetimeEditor();
+  markDirty();
 }
 
 function syncLifetimeEditorFromDataset() {
@@ -2844,7 +3179,7 @@ function loadProject(project) {
   state.selectedWavelengthIndex = project.state?.selectedWavelengthIndex ?? 0;
   state.compare = { ...state.compare, ...(project.state?.compare ?? {}) };
   state.fitting = { ...state.fitting, ...(project.state?.fitting ?? {}) };
-  state.featureFinding = { ...state.featureFinding, ...(project.state?.featureFinding ?? {}) };
+  state.featureFinding = sanitizeFeatureFinding(project.state?.featureFinding ?? state.featureFinding);
   state.merge = { selectedIds: [], plan: null, draft: null };
   state.compare.componentMode = "EAS";
   state.fitting.spectrumMode = "EAS";
@@ -2867,6 +3202,10 @@ function reviveDataset(dataset) {
     ...dataset,
     projectLabel: dataset.projectLabel || dataset.source?.fileName?.replace(/\.[^.]+$/, "") || "Dataset",
     sampleNote: dataset.sampleNote || "",
+    treatmentOverrides: {
+      baseline: Boolean(dataset.treatmentOverrides?.baseline),
+      chirp: Boolean(dataset.treatmentOverrides?.chirp),
+    },
     evidenceMetadata: normalizeDatasetEvidence(dataset.evidenceMetadata, dataset.kind === "merged" ? "fsta" : "fsta"),
     source: reviveMatrixObject(dataset.source),
     baseAnalysis: reviveMatrixObject(dataset.baseAnalysis),
@@ -3475,21 +3814,6 @@ function buildDisplayedPlotText(plotKey) {
 function matrixExportForPlot(plotKey) {
   const dataset = activeDataset();
   if (!dataset) return null;
-  if (plotKey === "feature-time") {
-    const compressed = buildFeatureTimeMap(dataset, featureMonitorFor(dataset));
-    if (compressed.status !== "live") return null;
-    return {
-      columns: ["Feature", "Candidate", "Wavelength min (nm)", "Wavelength max (nm)", "Time (ps)", "Mean DeltaOD"],
-      rows: compressed.features.flatMap((feature) => compressed.timeAxis.map((time, timeIndex) => [
-        feature.featureCode,
-        feature.candidateType,
-        feature.wavelengthMin,
-        feature.wavelengthMax,
-        time,
-        feature.trace[timeIndex],
-      ])),
-    };
-  }
   const analysis = plotKey === "fit-residual" && dataset.fit?.residualMatrix
     ? { ...dataset.analysis, matrix: dataset.fit.residualMatrix }
     : plotKey === "heatmap" ? dataset.analysis : null;
@@ -3524,11 +3848,12 @@ function lineExportForPlot(plotKey) {
       `${state.fitting.spectrumMode} DeltaOD`,
     );
   }
-  if (plotKey === "modal-eas") {
-    return componentSeriesData(visibleComponentSpectra(dataset, "EAS"), "none", "EAS DeltaOD");
-  }
-  if (plotKey === "modal-das") {
-    return componentSeriesData(visibleComponentSpectra(dataset, "DAS"), "none", "DAS DeltaOD");
+  if (plotKey === "modal-components") {
+    return componentSeriesData(
+      visibleComponentSpectra(dataset, state.fitting.spectrumMode),
+      "none",
+      `${state.fitting.spectrumMode} DeltaOD`,
+    );
   }
   return null;
 }
@@ -3883,6 +4208,7 @@ function syncComparisonSelectionControls() {
 
 function updateComponentViewUi() {
   const dataset = activeDataset();
+  if (!dataset?.fit) return;
   const hiddenCount = irfLimitedCount(dataset);
   document.querySelectorAll("[data-action=\"result-mode\"]").forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === state.fitting.spectrumMode);
@@ -3891,9 +4217,15 @@ function updateComponentViewUi() {
   if (copy) {
     copy.textContent = hiddenCount ? `${hiddenCount} IRF-limited excluded` : "";
   }
-  const canvas = document.getElementById("main-components");
-  if (canvas) canvas.setAttribute("aria-label", `${state.fitting.spectrumMode} component spectra`);
-  paintCanvases();
+  const fitCopy = document.getElementById("fit-component-mode-copy");
+  if (fitCopy) fitCopy.textContent = uiText(`${state.fitting.spectrumMode} preview`);
+  const mainCanvas = document.getElementById("main-components");
+  const modalCanvas = document.getElementById("modal-components");
+  if (mainCanvas) mainCanvas.setAttribute("aria-label", uiText(`${state.fitting.spectrumMode} component spectra`));
+  if (modalCanvas) modalCanvas.setAttribute("aria-label", uiText(`${state.fitting.spectrumMode} preview`));
+  paintDisplayedComponentSpectra(mainCanvas, dataset, state.fitting.spectrumMode, state.fitting.normalize);
+  paintDisplayedComponentSpectra(modalCanvas, dataset, state.fitting.spectrumMode);
+  if (["main-components", "modal-components"].includes(state.expandedPlot)) paintExpandedPlot();
 }
 
 function comparisonComponentCopy() {
@@ -3919,14 +4251,17 @@ function paintCanvases() {
   paintHeatmap(document.getElementById("heatmap"), dataset.analysis, { crosshair: true });
   paintSpectrum(document.getElementById("spectrum"), dataset);
   paintKinetics(document.getElementById("kinetics"), dataset);
-  paintComponentSpectra(
+  paintDisplayedComponentSpectra(
     document.getElementById("main-components"),
-    visibleComponentSpectra(dataset, state.fitting.spectrumMode),
-    { normalize: state.fitting.normalize, xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, state.fitting.spectrumMode).candidates },
+    dataset,
+    state.fitting.spectrumMode,
+    state.fitting.normalize,
   );
-  paintComponentSpectra(document.getElementById("modal-eas"), visibleComponentSpectra(dataset, "EAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "EAS").candidates });
-  paintComponentSpectra(document.getElementById("modal-das"), visibleComponentSpectra(dataset, "DAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "DAS").candidates });
-  paintFeatureTimeMap(document.getElementById("feature-time"), buildFeatureTimeMap(dataset, featureMonitorFor(dataset)));
+  paintDisplayedComponentSpectra(
+    document.getElementById("modal-components"),
+    dataset,
+    state.fitting.spectrumMode,
+  );
   if (dataset.fit?.residualMatrix) {
     paintHeatmap(document.getElementById("fit-residual"), {
       ...dataset.analysis,
@@ -3939,6 +4274,37 @@ function paintCanvases() {
   paintMergePreview();
   paintExpandedPlot();
   paintZoomDragOverlay();
+}
+
+let fullPaintFrame = null;
+
+function scheduleFullPaint() {
+  if (fullPaintFrame !== null) return;
+  fullPaintFrame = requestAnimationFrame(() => {
+    fullPaintFrame = null;
+    paintCanvases();
+  });
+}
+
+const pendingSelectionPaints = new Set();
+let selectionPaintFrame = null;
+
+function scheduleSelectionPaint(...views) {
+  views.forEach((view) => pendingSelectionPaints.add(view));
+  if (selectionPaintFrame !== null) return;
+  selectionPaintFrame = requestAnimationFrame(() => {
+    selectionPaintFrame = null;
+    const requested = new Set(pendingSelectionPaints);
+    pendingSelectionPaints.clear();
+    const dataset = activeDataset();
+    if (!dataset) return;
+    if (requested.has("heatmap")) paintHeatmap(document.getElementById("heatmap"), dataset.analysis, { crosshair: true });
+    if (requested.has("spectrum")) paintSpectrum(document.getElementById("spectrum"), dataset);
+    if (requested.has("kinetics")) paintKinetics(document.getElementById("kinetics"), dataset);
+    if (requested.has("compare-spectrum")) paintComparisonSlice(document.getElementById("compare-spectrum"), "spectrum");
+    if (requested.has("compare-kinetics")) paintComparisonSlice(document.getElementById("compare-kinetics"), "kinetics");
+    if (requested.has("expanded")) paintExpandedPlot();
+  });
 }
 
 function paintMergePreview() {
@@ -4177,8 +4543,20 @@ function paintComparisonComponents(canvas) {
   });
 }
 
+function paintDisplayedComponentSpectra(canvas, dataset, mode, normalize = "none") {
+  if (!canvas || !dataset?.fit) return;
+  const features = mode === "EAS" ? featureMonitorFor(dataset, "EAS").candidates : [];
+  paintComponentSpectra(canvas, visibleComponentSpectra(dataset, mode), {
+    dataset,
+    normalize,
+    xBreaks: dataset.analysis.wavelengthBreaks,
+    features,
+  });
+}
+
 function paintComponentSpectra(canvas, spectra, options = {}) {
   if (!canvas) return;
+  signatureHitRegions.set(canvas, []);
   if (!spectra?.length) {
     drawEmptyCanvas(canvas, uiText("No visible component spectra."));
     return;
@@ -4201,59 +4579,107 @@ function paintComponentSpectra(canvas, spectra, options = {}) {
     bottomPadding: 72,
     xLabelOffset: 30,
   });
-  drawFeatureAnnotations(canvas, spectra, options.features ?? [], options.normalize);
+  drawFeatureAnnotations(canvas, spectra, options.features ?? [], options.normalize, options.dataset);
 }
 
-function drawFeatureAnnotations(canvas, spectra, features, normalizeMode) {
+function drawFeatureAnnotations(canvas, spectra, features, normalizeMode, dataset) {
   const geometry = plotGeometry.get(canvas);
+  signatureHitRegions.set(canvas, []);
   if (!geometry || !features.length) return;
   const { ctx } = setupCanvas(canvas);
+  const assignments = dataset ? featureAssignmentsForDataset(dataset) : new Map();
   const visibleComponents = new Set(spectra.map((spectrum, index) => spectrum.componentIndex ?? index));
-  const retained = features.filter((feature) => visibleComponents.has(feature.componentIndex)).slice(0, 10);
+  const retained = features.filter((feature) => visibleComponents.has(feature.componentIndex));
+  const placedLabels = [];
+  const hitRegions = [];
   ctx.save();
   ctx.beginPath();
   ctx.rect(geometry.plot.left, geometry.plot.top, geometry.plot.right - geometry.plot.left, geometry.plot.bottom - geometry.plot.top);
   ctx.clip();
   retained.forEach((feature, labelIndex) => {
-    const x0 = scale(feature.wavelengthMin, geometry.xExtent, [geometry.plot.left, geometry.plot.right]);
-    const x1 = scale(feature.wavelengthMax, geometry.xExtent, [geometry.plot.left, geometry.plot.right]);
-    if (x1 < geometry.plot.left || x0 > geometry.plot.right) return;
-    const color = feature.sign === "positive" ? "#b96332" : "#7552a6";
-    ctx.fillStyle = feature.sign === "positive" ? "rgba(185, 99, 50, 0.055)" : "rgba(117, 82, 166, 0.055)";
-    ctx.fillRect(Math.max(x0, geometry.plot.left), geometry.plot.top, Math.max(2, Math.min(x1, geometry.plot.right) - Math.max(x0, geometry.plot.left)), geometry.plot.bottom - geometry.plot.top);
+    const anchorX = scale(feature.wavelengthCenter, geometry.xExtent, [geometry.plot.left, geometry.plot.right]);
+    if (anchorX < geometry.plot.left || anchorX > geometry.plot.right) return;
+    const assignment = assignments.get(feature.id);
+    const isUserAssigned = feature.signatureSource === "manual" || Boolean(assignment && assignment.assignment !== "unassigned");
+    const selected = feature.id === state.selectedSignatureId;
+    const color = signatureColor(feature.assignment ?? assignment?.assignment, feature.sign);
     ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.5;
-    ctx.setLineDash([4, 4]);
-    ctx.strokeRect(Math.max(x0, geometry.plot.left), geometry.plot.top, Math.max(2, Math.min(x1, geometry.plot.right) - Math.max(x0, geometry.plot.left)), geometry.plot.bottom - geometry.plot.top);
+    ctx.globalAlpha = selected ? 1 : isUserAssigned ? 0.82 : 0.62;
+    ctx.lineWidth = selected ? 2.2 : 1.35;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(anchorX, geometry.plot.top);
+    ctx.lineTo(anchorX, geometry.plot.bottom);
+    ctx.stroke();
     ctx.globalAlpha = 1;
+    ctx.lineWidth = 1;
     ctx.setLineDash([]);
 
     const spectrum = spectra.find((item, index) => (item.componentIndex ?? index) === feature.componentIndex);
     if (!spectrum) return;
     const normalized = normalizePoints(spectrum.x.map((x, index) => ({ x, y: spectrum.y[index] })), normalizeMode);
     const nearest = normalized[nearestIndex(normalized.map((point) => point.x), feature.wavelengthCenter)];
-    const anchorX = scale(feature.wavelengthCenter, geometry.xExtent, [geometry.plot.left, geometry.plot.right]);
     const anchorY = Number.isFinite(nearest?.y) ? scale(nearest.y, geometry.yExtent, [geometry.plot.bottom, geometry.plot.top]) : geometry.plot.top + 18;
-    const label = `${feature.featureCode} ${shortFeatureType(feature.candidateType)}`;
+    const typeLabel = feature.assignment ?? (isUserAssigned ? assignment.assignment : shortFeatureType(feature.candidateType));
+    const defaultLabel = `${feature.featureCode} ${typeLabel}`;
+    const label = `${feature.label?.trim() || defaultLabel} · ${formatWavelength(feature.wavelengthCenter)} nm`;
     ctx.font = "700 10px system-ui, sans-serif";
-    const labelWidth = Math.min(78, Math.max(45, ctx.measureText(label).width + 10));
+    const labelWidth = Math.min(150, Math.max(68, ctx.measureText(label).width + 12));
     const labelX = clamp(anchorX - labelWidth / 2, geometry.plot.left + 2, geometry.plot.right - labelWidth - 2);
-    const verticalShift = (labelIndex % 3) * 18;
-    const labelY = clamp(anchorY - 22 - verticalShift, geometry.plot.top + 3, geometry.plot.bottom - 18);
-    ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+    const labelY = placeSignatureLabel(labelX, labelWidth, anchorY, geometry.plot, placedLabels, labelIndex);
+    placedLabels.push({ x: labelX, y: labelY, width: labelWidth, height: 16 });
+    ctx.fillStyle = selected ? "rgba(255, 251, 235, 0.98)" : "rgba(255, 255, 255, 0.94)";
     ctx.fillRect(labelX, labelY, labelWidth, 16);
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = isUserAssigned ? 1.5 : 1;
     ctx.strokeRect(labelX, labelY, labelWidth, 16);
+    ctx.lineWidth = 1;
     ctx.fillStyle = color;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(label, labelX + labelWidth / 2, labelY + 8, labelWidth - 6);
+    hitRegions.push({
+      feature,
+      lineX: anchorX,
+      labelX,
+      labelY,
+      labelWidth,
+      labelHeight: 16,
+      plotTop: geometry.plot.top,
+      plotBottom: geometry.plot.bottom,
+    });
   });
   ctx.restore();
+  signatureHitRegions.set(canvas, hitRegions);
 }
 
-function paintFeatureTimeMap(canvas, compressed) {
+function placeSignatureLabel(labelX, labelWidth, anchorY, plot, placed, fallbackIndex) {
+  const minimumY = plot.top + 3;
+  const maximumY = plot.bottom - 19;
+  const candidates = [
+    clamp(anchorY - 22, minimumY, maximumY),
+    clamp(anchorY + 6, minimumY, maximumY),
+    ...Array.from({ length: Math.max(1, Math.floor((maximumY - minimumY) / 18) + 1) }, (_, index) => minimumY + index * 18),
+  ].filter((value, index, values) => values.indexOf(value) === index)
+    .sort((left, right) => Math.abs(left - (anchorY - 22)) - Math.abs(right - (anchorY - 22)));
+  const open = candidates.find((candidateY) => !placed.some((label) => (
+    labelX < label.x + label.width + 3
+    && labelX + labelWidth + 3 > label.x
+    && candidateY < label.y + label.height + 2
+    && candidateY + 18 > label.y
+  )));
+  return open ?? clamp(minimumY + (fallbackIndex % Math.max(1, candidates.length)) * 18, minimumY, maximumY);
+}
+
+function signatureColor(assignment, sign = "negative") {
+  if (assignment === "ESA") return "#c0572d";
+  if (assignment === "GSB") return "#2e6ca4";
+  if (assignment === "SE") return "#8152a5";
+  if (assignment === "GSB or SE") return "#536f8d";
+  return sign === "positive" ? "#c0572d" : "#536f8d";
+}
+
+function paintFeatureTimeMap(canvas, compressed, options = {}) {
   if (!canvas) return;
   if (compressed?.status !== "live" || !compressed.features.length) {
     drawEmptyCanvas(canvas, compressed?.limitations?.[0] ?? uiText("No live feature regions are available."));
@@ -4263,38 +4689,103 @@ function paintFeatureTimeMap(canvas, compressed) {
   ctx.fillStyle = "#fbfcfc";
   ctx.fillRect(0, 0, width, height);
   const plot = {
-    left: Math.max(142, Math.round(width * 0.18)),
+    left: Math.max(178, Math.round(width * 0.21)),
     right: Math.max(230, Math.round(width * 0.975)),
-    top: 14,
+    top: 16,
     bottom: height - 50,
   };
   const timeExtent = [compressed.timeAxis[0], compressed.timeAxis.at(-1)];
   const timeTransform = makeTimeTransform(timeExtent);
-  const xCenters = compressed.timeAxis.map((time) => scale(timeTransform.toFraction(time), [0, 1], [plot.left, plot.right]));
-  const xBounds = cellBounds(xCenters, plot.left, plot.right);
   const rowHeight = (plot.bottom - plot.top) / compressed.features.length;
-  const finite = compressed.matrix.flat().filter(Number.isFinite).map(Math.abs).sort((a, b) => a - b);
-  const limit = finite[Math.floor(finite.length * 0.985)] || 1;
+  const lifetimes = options.fitLifetimes ?? [];
+
   compressed.features.forEach((feature, rowIndex) => {
-    const y0 = plot.top + rowIndex * rowHeight;
-    const y1 = plot.top + (rowIndex + 1) * rowHeight;
-    feature.trace.forEach((value, timeIndex) => {
-      ctx.fillStyle = Number.isFinite(value) ? diverging(value / limit) : "#d9e0e2";
-      ctx.fillRect(xBounds[timeIndex], y0, Math.max(1, xBounds[timeIndex + 1] - xBounds[timeIndex] + 0.5), Math.max(1, y1 - y0));
+    const y0 = plot.top + rowIndex * rowHeight + 2;
+    const y1 = plot.top + (rowIndex + 1) * rowHeight - 2;
+    const baselineY = (y0 + y1) / 2;
+    const finite = feature.trace.filter(Number.isFinite);
+    const rowLimit = Math.max(...finite.map(Math.abs), 1e-12);
+    const color = signatureColor(feature.assignment, finite.reduce((sum, value) => sum + value, 0) >= 0 ? "positive" : "negative");
+    ctx.fillStyle = rowIndex % 2 ? "#f7f9f9" : "#ffffff";
+    ctx.fillRect(plot.left, y0 - 2, plot.right - plot.left, y1 - y0 + 4);
+    ctx.strokeStyle = "#dce4e5";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(plot.left, baselineY);
+    ctx.lineTo(plot.right, baselineY);
+    ctx.stroke();
+
+    const points = feature.trace.map((value, timeIndex) => ({
+      x: scale(timeTransform.toFraction(compressed.timeAxis[timeIndex]), [0, 1], [plot.left, plot.right]),
+      y: Number.isFinite(value) ? baselineY - (value / rowLimit) * Math.max(4, (y1 - y0) * 0.42) : Number.NaN,
+    }));
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.left, y0, plot.right - plot.left, y1 - y0);
+    ctx.clip();
+    ctx.fillStyle = `${color}20`;
+    ctx.beginPath();
+    let fillStarted = false;
+    points.forEach((point) => {
+      if (!Number.isFinite(point.y)) return;
+      if (!fillStarted) {
+        ctx.moveTo(point.x, baselineY);
+        ctx.lineTo(point.x, point.y);
+        fillStarted = true;
+      } else ctx.lineTo(point.x, point.y);
     });
-    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+    if (fillStarted) {
+      const last = [...points].reverse().find((point) => Number.isFinite(point.y));
+      ctx.lineTo(last.x, baselineY);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    let started = false;
+    points.forEach((point) => {
+      if (!Number.isFinite(point.y)) {
+        started = false;
+        return;
+      }
+      if (!started) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+      started = true;
+    });
+    ctx.stroke();
+    ctx.restore();
+
+    lifetimes.forEach(({ lifetime, componentIndex }) => {
+      if (componentIndex !== feature.componentIndex) return;
+      if (!Number.isFinite(lifetime) || lifetime < timeExtent[0] || lifetime > timeExtent[1]) return;
+      const lx = scale(timeTransform.toFraction(lifetime), [0, 1], [plot.left, plot.right]);
+      ctx.save();
+      ctx.strokeStyle = componentColor(componentIndex);
+      ctx.globalAlpha = 0.65;
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(lx, y0);
+      ctx.lineTo(lx, y1);
+      ctx.stroke();
+      ctx.restore();
+    });
+    ctx.strokeStyle = "#d6dfe0";
     ctx.beginPath();
     ctx.moveTo(plot.left, y1);
     ctx.lineTo(plot.right, y1);
     ctx.stroke();
-    ctx.fillStyle = feature.candidateType === "ESA candidate" ? "#9b4d25" : "#654391";
+    ctx.fillStyle = color;
     ctx.font = "700 11px system-ui, sans-serif";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    ctx.fillText(`${feature.featureCode} ${shortFeatureType(feature.candidateType)}`, plot.left - 9, (y0 + y1) / 2 - 6);
+    ctx.fillText(`${feature.featureCode} ${feature.assignment ?? shortFeatureType(feature.candidateType)}`, plot.left - 14, baselineY - 7);
     ctx.fillStyle = "#718084";
     ctx.font = "10px system-ui, sans-serif";
-    ctx.fillText(`${formatWavelength(feature.wavelengthMin)}–${formatWavelength(feature.wavelengthMax)} nm`, plot.left - 9, (y0 + y1) / 2 + 7);
+    ctx.fillText(`${formatWavelength(feature.sampledWavelength ?? feature.wavelengthCenter)} nm · max |ΔOD| ${rowLimit.toExponential(1)}`, plot.left - 14, baselineY + 7);
   });
   ctx.strokeStyle = "#bfcacc";
   ctx.strokeRect(plot.left, plot.top, plot.right - plot.left, plot.bottom - plot.top);
@@ -4308,10 +4799,16 @@ function paintFeatureTimeMap(canvas, compressed) {
     ctx.stroke();
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    ctx.fillText(`${Math.round(tick)}`, x, plot.bottom + 9);
+    ctx.fillText(formatAxisNumber(tick), x, plot.bottom + 9);
   });
   ctx.font = "600 13px system-ui, sans-serif";
   ctx.fillText(uiText("Time (ps)"), (plot.left + plot.right) / 2, plot.bottom + 38);
+}
+
+function fitLifetimesFor(dataset) {
+  return (dataset?.fit?.lifetimes ?? [])
+    .map((lifetime, componentIndex) => ({ lifetime, componentIndex }))
+    .filter((_, index) => !dataset.fit.irfLimited?.[index]);
 }
 
 function paintExpandedPlot() {
@@ -4325,17 +4822,9 @@ function paintExpandedPlot() {
   } else if (state.expandedPlot === "kinetics") {
     paintKinetics(canvas, dataset);
   } else if (state.expandedPlot === "main-components") {
-    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, state.fitting.spectrumMode), {
-      normalize: state.fitting.normalize,
-      xBreaks: dataset.analysis.wavelengthBreaks,
-      features: featureMonitorFor(dataset, state.fitting.spectrumMode).candidates,
-    });
-  } else if (state.expandedPlot === "modal-eas") {
-    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, "EAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "EAS").candidates });
-  } else if (state.expandedPlot === "modal-das") {
-    paintComponentSpectra(canvas, visibleComponentSpectra(dataset, "DAS"), { xBreaks: dataset.analysis.wavelengthBreaks, features: featureMonitorFor(dataset, "DAS").candidates });
-  } else if (state.expandedPlot === "feature-time") {
-    paintFeatureTimeMap(canvas, buildFeatureTimeMap(dataset, featureMonitorFor(dataset)));
+    paintDisplayedComponentSpectra(canvas, dataset, state.fitting.spectrumMode, state.fitting.normalize);
+  } else if (state.expandedPlot === "modal-components") {
+    paintDisplayedComponentSpectra(canvas, dataset, state.fitting.spectrumMode);
   } else if (state.expandedPlot === "fit-residual" && dataset.fit?.residualMatrix) {
     paintHeatmap(canvas, { ...dataset.analysis, matrix: dataset.fit.residualMatrix }, { crosshair: false });
   } else if (state.expandedPlot === "compare-kinetics") {
@@ -4708,7 +5197,7 @@ function updateSelectionFromHeatmap(event, canvas) {
   if (timeSlider) timeSlider.value = `${state.selectedTimeIndex}`;
   if (wavelengthSlider) wavelengthSlider.value = `${state.selectedWavelengthIndex}`;
   syncSelectionLabels();
-  paintCanvases();
+  scheduleSelectionPaint("heatmap", "spectrum", "kinetics", "expanded");
 }
 
 function syncSelectionLabels() {
@@ -4970,6 +5459,31 @@ function deleteEmptyFolder(folderId) {
   render();
 }
 
+function reorderFolder(folderId, targetFolderId, placement) {
+  const activeId = activeDataset()?.id ?? null;
+  const result = moveFolder(state.folders, { folderId, targetFolderId, placement });
+  if (!result.changed) {
+    render();
+    return;
+  }
+  const folderOrder = new Map(state.folders.map((folder, index) => [folder.id, index]));
+  const datasetOrder = new Map(state.datasets.map((dataset, index) => [dataset.id, index]));
+  state.datasets.sort((left, right) => (
+    (folderOrder.get(left.folderId) ?? state.folders.length) - (folderOrder.get(right.folderId) ?? state.folders.length)
+    || (datasetOrder.get(left.id) ?? 0) - (datasetOrder.get(right.id) ?? 0)
+  ));
+  state.activeIndex = Math.max(0, state.datasets.findIndex((dataset) => dataset.id === activeId));
+  markDirty();
+  render();
+}
+
+function moveFolderByOffset(folderId, offset) {
+  const sourceIndex = state.folders.findIndex((folder) => folder.id === folderId);
+  const target = state.folders[sourceIndex + offset];
+  if (sourceIndex < 0 || !target) return;
+  reorderFolder(folderId, target.id, offset < 0 ? "before" : "after");
+}
+
 function reorderDataset(datasetId, { targetFolderId, targetDatasetId, placement }) {
   const activeId = activeDataset()?.id ?? null;
   const result = moveDataset(state.datasets, state.folders, {
@@ -5014,13 +5528,9 @@ function persistDatasetDetails({ close = true, notify = true } = {}) {
     return [field, value || null];
   }));
   dataset.evidenceMetadata = metadata;
-  const speciesLabels = String(document.getElementById("dataset-species-states")?.value ?? "")
-    .split(/[,;\n]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  state.evidenceGraph = updateDatasetEvidenceEntities(state.evidenceGraph, dataset, state.datasets, {
-    speciesLabels,
+  state.evidenceGraph = migrateEvidenceGraph(state.evidenceGraph, state.datasets, {
     createdAt: new Date().toISOString(),
+    evidenceAssets: state.evidenceAssets,
   });
   if (state.compare.styles[dataset.id]) state.compare.styles[dataset.id].label = displayName;
   markDirty();
@@ -5028,7 +5538,7 @@ function persistDatasetDetails({ close = true, notify = true } = {}) {
     state.pendingDatasetId = null;
     state.modal = null;
   }
-  if (notify) state.notice = { kind: "success", title: "Dataset details saved", message: "Scientific metadata, conditions, hypotheses, notes, and graph records are included in the project." };
+  if (notify) state.notice = { kind: "success", title: "Dataset details saved", message: "Scientific metadata, conditions, notes, imported evidence, and graph records are included in the project." };
   if (close || notify) render();
 }
 
@@ -5232,10 +5742,8 @@ function expandedPlotMeta(key) {
     spectrum: ["Spectrum", `${formatCoordinate(activeDataset()?.analysis.timeAxis[state.selectedTimeIndex])} ps`],
     kinetics: ["Kinetics", `${formatWavelength(activeDataset()?.analysis.spectralAxis[state.selectedWavelengthIndex])} nm`],
     "main-components": [`${mode} Component Spectra`, irfLimitedCount(activeDataset()) ? "IRF-limited components excluded" : ""],
-    "modal-eas": ["EAS Preview", irfLimitedCount(activeDataset()) ? "IRF-limited components excluded" : ""],
-    "modal-das": ["DAS", irfLimitedCount(activeDataset()) ? "IRF-limited components excluded" : ""],
+    "modal-components": [`${mode} Preview`, irfLimitedCount(activeDataset()) ? "IRF-limited components excluded" : ""],
     "fit-residual": ["Fit Residual Map", ""],
-    "feature-time": ["Feature × Time Map", "Lossy regional compression; source fsTA heatmap remains authoritative"],
     "compare-kinetics": ["Kinetics Comparison", ""],
     "compare-spectrum": ["Spectra Comparison", ""],
     "compare-components": [`${state.compare.componentMode} Comparison`, compareDatasets().some((dataset) => irfLimitedCount(dataset)) ? "IRF-limited components excluded" : ""],
@@ -5307,10 +5815,6 @@ function componentDash(index) {
   return [[], [8, 4], [2, 4], [10, 3, 2, 3], [5, 3], [1, 3]][index % 6];
 }
 
-function componentColor(index) {
-  return ["#0c7c86", "#8b5d2a", "#7b5aa6", "#b54b4b", "#457b3c", "#c05f8a"][index % 6];
-}
-
 function projectStateLabel() {
   if (!state.datasets.length) return "No project";
   if (state.job?.kind === "save") return "Saving";
@@ -5337,10 +5841,10 @@ function isTreated(dataset) {
   return Boolean(dataset?.analysis?.provenance?.length);
 }
 
-function treatmentLabel(folder = activeFolder()) {
+function treatmentLabel(folder = activeFolder(), dataset = activeDataset()) {
   const labels = [];
-  if (folder?.treatments?.baseline) labels.push("Baseline");
-  if (folder?.treatments?.chirp) labels.push("Chirp");
+  if (treatmentEnabled(dataset, folder, "baseline")) labels.push("Baseline");
+  if (treatmentEnabled(dataset, folder, "chirp")) labels.push("Chirp");
   return labels.length ? labels.join(" + ") : "Analysis range";
 }
 
@@ -5486,7 +5990,7 @@ window.addEventListener("resize", () => {
     });
     const expanded = document.getElementById("expanded-canvas");
     if (expanded) plotGeometry.delete(expanded);
-    paintCanvases();
+    scheduleFullPaint();
   }, 100);
 });
 

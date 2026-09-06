@@ -9,15 +9,12 @@ export function buildFeatureTimeMap(dataset, monitor, options = {}) {
     return unavailable(dataset, "No live feature regions are available from the current global analysis.");
   }
 
-  const maxFeatures = options.maxFeatures ?? 10;
+  const maxFeatures = options.maxFeatures ?? 16;
   const features = monitor.candidates.slice(0, maxFeatures).map((candidate) => {
-    const spectralIndices = analysis.spectralAxis
-      .map((wavelength, index) => wavelength >= candidate.wavelengthMin && wavelength <= candidate.wavelengthMax ? index : -1)
-      .filter((index) => index >= 0);
-    if (!spectralIndices.length) return null;
-    const trace = analysis.timeAxis.map((_, timeIndex) => meanFinite(
-      spectralIndices.map((spectralIndex) => analysis.matrix[spectralIndex]?.[timeIndex]),
-    ));
+    const spectralIndex = nearestFiniteIndex(analysis.spectralAxis, candidate.wavelengthCenter);
+    if (spectralIndex < 0) return null;
+    const spectralIndices = [spectralIndex];
+    const trace = analysis.timeAxis.map((_, timeIndex) => analysis.matrix[spectralIndex]?.[timeIndex]);
     return {
       id: candidate.id,
       featureCode: candidate.featureCode,
@@ -27,9 +24,12 @@ export function buildFeatureTimeMap(dataset, monitor, options = {}) {
       wavelengthMin: candidate.wavelengthMin,
       wavelengthMax: candidate.wavelengthMax,
       wavelengthCenter: candidate.wavelengthCenter,
-      wavelengthPointCount: spectralIndices.length,
+      sampledWavelength: analysis.spectralAxis[spectralIndex],
+      wavelengthPointCount: 1,
       spectralIndices,
       trace,
+      assignment: candidate.assignment ?? null,
+      signatureSource: candidate.signatureSource ?? "automatic",
       status: candidate.status,
     };
   }).filter(Boolean);
@@ -49,11 +49,11 @@ export function buildFeatureTimeMap(dataset, monitor, options = {}) {
       cellReductionFactor: (analysis.spectralAxis.length * analysis.timeAxis.length) / (features.length * analysis.timeAxis.length),
       ...reconstruction,
     },
-    method: "finite mean DeltaOD within each deterministic EAS/DAS candidate wavelength region at every measured time",
+    method: "signed DeltaOD evolution sampled at the treated wavelength row nearest each exact signature peak position",
     limitations: [
-      "This is a lossy regional summary, not a replacement for the source fsTA matrix.",
-      "The reconstruction score compares piecewise feature-region means with the treated matrix and must be reported rather than assumed.",
-      "Candidate identities remain suggested-not-confirmed.",
+      "This is a sparse signature trace view, not a replacement for the source fsTA matrix.",
+      "Each trace uses one measured wavelength row nearest the editable signature position; overlapping bands are not deconvolved.",
+      "Automatic signature identities remain suggested-not-confirmed until edited by the user.",
     ],
   };
 }
@@ -101,4 +101,18 @@ function unavailable(dataset, reason) {
 function meanFinite(values) {
   const finite = values.filter(Number.isFinite);
   return finite.length ? finite.reduce((sum, value) => sum + value, 0) / finite.length : Number.NaN;
+}
+
+function nearestFiniteIndex(values, target) {
+  let best = -1;
+  let distance = Infinity;
+  values.forEach((value, index) => {
+    if (!Number.isFinite(value)) return;
+    const next = Math.abs(value - target);
+    if (next < distance) {
+      best = index;
+      distance = next;
+    }
+  });
+  return best;
 }

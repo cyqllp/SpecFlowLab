@@ -155,16 +155,16 @@ Each SpecFlowLab dataset becomes one Origin workbook with:
 
 - `Metadata`: source path/hash, dataset identity, selection, treatment
   metadata, and units.
-- `TreatedVM`: a virtual-matrix worksheet with wavelength down the first column
-  and the exact time coordinates across the first data row, so the sheet plots
-  as a 2D heatmap directly. `NaN` values are written as the literal token
-  `NaN`.
+- `TreatedVM`: a virtual-matrix worksheet with exact time coordinates down the
+  first column and wavelength values across the first data row, so wavelength
+  is horizontal in the 2D heatmap. `NaN` values are preserved.
 - `Selected`: the current selection plus five evenly distributed measured
   positions from each axis, producing five or six explicit spectral and
   kinetic XY traces without interpolation.
 - `FitSummary`: fit parameters and diagnostics when a fit exists.
 - `FittedVM` and `ResidualVM`: the fitted and residual matrices in the same
-  exact-coordinate layout when a fit exists.
+  exact-coordinate layout when a fit exists. `ResidualVM` is retained for
+  audit but is not plotted.
 - `DAS` and `EAS`: wavelength plus one Y column per component.
 
 Origin regular Matrix objects support only linear X/Y mapping, while transient
@@ -173,9 +173,11 @@ Origin **Virtual Matrix** worksheet and `plotvm` for heatmaps on the 2021+
 plotting path. This retains the actual time and wavelength coordinates without
 interpolation. Heatmap graph
 pages use wavelength on X and log10 time on Y, beginning at 0.1 ps and ending
-at the largest measured positive time. Pre-zero and sub-0.1 ps values remain
-unchanged in the worksheet and provenance bundle; only the displayed graph
-range excludes them.
+at the largest measured positive time. Treated heatmaps request 8 major and 5
+minor levels with a blue-to-red palette that introduces intermediate colors.
+Pre-zero and sub-0.1 ps values remain unchanged in the worksheet and provenance
+bundle; only the displayed graph range excludes them. Residual values remain
+available as data but do not generate a residual heatmap page.
 
 The importer lets `from_list()` grow worksheet rows automatically because
 `originpro.WSheet.rows` is a read-only property. It preallocates only columns,

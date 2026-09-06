@@ -9,13 +9,14 @@ export function upsertEvidenceConnection(graph, input, datasets = [], options = 
   const definition = relationshipDefinition(input?.type);
   if (!definition) throw new Error(`Unsupported evidence relationship type: ${input?.type || "missing"}.`);
   const now = options.createdAt ?? new Date().toISOString();
+  const [fromId, toId] = normalizedEndpoints(input?.fromId, input?.toId, definition.symmetric);
   const matching = input.id ? null : next.relationships.find((item) => (
-    item.fromId === input.fromId && item.toId === input.toId && item.type === input.type
+    item.type === input.type && sameEndpoints(item, fromId, toId, definition.symmetric)
   ));
   const relationship = {
-    id: input.id || matching?.id || createConnectionId(input.fromId, input.toId, input.type, next.relationships),
-    fromId: String(input.fromId || ""),
-    toId: String(input.toId || ""),
+    id: input.id || matching?.id || createConnectionId(fromId, toId, input.type, next.relationships),
+    fromId,
+    toId,
     type: input.type,
     category: definition.category,
     assertionStatus: input.assertionStatus || (definition.category === "interpretive" ? "proposed" : "recorded"),
@@ -66,6 +67,16 @@ function createConnectionId(fromId, toId, type, relationships) {
   let suffix = 2;
   while (relationships.some((item) => item.id === `${stem}:${suffix}`)) suffix += 1;
   return `${stem}:${suffix}`;
+}
+
+function normalizedEndpoints(fromId, toId, symmetric) {
+  const endpoints = [String(fromId || ""), String(toId || "")];
+  return symmetric && endpoints[0] > endpoints[1] ? [endpoints[1], endpoints[0]] : endpoints;
+}
+
+function sameEndpoints(relationship, fromId, toId, symmetric) {
+  if (relationship.fromId === fromId && relationship.toId === toId) return true;
+  return Boolean(symmetric && relationship.fromId === toId && relationship.toId === fromId);
 }
 
 function safe(value) {

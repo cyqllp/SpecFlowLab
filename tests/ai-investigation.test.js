@@ -10,6 +10,7 @@ import { AI_INVESTIGATION_SCHEMA, AI_INVESTIGATION_SPEC_SCHEMA, assertSafeAiPath
 import { defaultAiScope, resolveAiScope } from "../src/lib/ai-investigation/scope.js";
 import { upsertEvidenceConnection } from "../src/lib/evidence-graph/connections.js";
 import { migrateEvidenceGraph } from "../src/lib/evidence-graph/schema.js";
+import { upsertFeatureAssignment } from "../src/lib/evidence-graph/entities.js";
 import { createChartCapture } from "../src/lib/chart-capture/schema.js";
 
 test("AI investigation defaults multi-dataset work to the current folder", () => {
@@ -65,7 +66,7 @@ test("diagnostic .sflai is question-driven, concise, checksummed, and non-mutati
   const featureEvidence = manifest.evidence.find((item) => item.kind === "feature-monitor");
   const featurePayload = JSON.parse(strFromU8(entries[featureEvidence.files[0]]));
   assert.equal(featurePayload.featureTimeMap.schema, "specflowlab.feature_time_map.v1");
-  assert.equal(featurePayload.featureTimeMap.features.every((feature) => feature.status === "suggested-not-confirmed"), true);
+  assert.equal(featurePayload.featureTimeMap.features.every((feature) => ["auto-generated", "user-edited", "user-defined"].includes(feature.status)), true);
   for (const item of manifest.evidence.filter((evidence) => evidence.files[0]?.endsWith(".csv"))) {
     assert.match(strFromU8(entries[item.files[0]]), new RegExp(`(^|[\\r\\n,])"?${item.id}"?(,|\\r?\\n)`));
   }
@@ -86,6 +87,40 @@ test("diagnostic .sflai is question-driven, concise, checksummed, and non-mutati
   assert.deepEqual(project, before);
 });
 
+test("user feature assignments export as authored interpretation in .sflai", async () => {
+  const project = buildProject();
+  const datasets = project.datasets;
+  let graph = migrateEvidenceGraph(project.evidenceGraph, datasets);
+  graph = upsertFeatureAssignment(graph, {
+    id: "feature-candidate:dataset-a:eas:c02:r01",
+    featureCode: "F2.1",
+    componentIndex: 1,
+    wavelengthMin: 473,
+    wavelengthMax: 598,
+    wavelengthCenter: 535.6,
+    candidateType: "Negative feature: GSB or SE candidate",
+    datasetId: "dataset-a",
+    mode: "EAS",
+  }, "GSB", "consistent with the ground-state bleach in the reference spectrum", datasets, { createdAt: "2026-08-23T08:00:00.000Z" });
+  project.evidenceGraph = graph;
+
+  const result = await createAiInvestigationPackage(project, buildSpec(), { investigationId: "investigation-assignments", createdAt: "2026-08-12T08:00:00.000Z" });
+  const entries = unzipSync(result.bytes);
+  const manifest = JSON.parse(strFromU8(entries["manifest.json"]));
+  const featureEvidence = manifest.evidence.find((item) => item.kind === "feature-monitor" && item.datasetIds[0] === "dataset-a");
+  assert.ok(featureEvidence);
+  const payload = JSON.parse(strFromU8(entries[featureEvidence.files[0]]));
+
+  assert.equal(payload.featureAssignments.length, 1);
+  assert.equal(payload.featureAssignments[0].assignment, "GSB");
+  assert.equal(payload.featureAssignments[0].featureCode, "F2.1");
+  assert.match(payload.featureAssignments[0].note, /ground-state bleach/);
+  const assignedCandidate = payload.candidates.find((candidate) => candidate.id === "feature-candidate:dataset-a:eas:c02:r01");
+  assert.equal(assignedCandidate.assignment, "GSB");
+  assert.equal(assignedCandidate.status, "user-edited");
+  assert.match(featureEvidence.transformations[0], /authored interpretations/i);
+});
+
 test("full evidence preserves exact raw text and IEEE-754 NaN only after opt-in", async () => {
   const project = buildProject();
   const spec = buildSpec({
@@ -103,7 +138,9 @@ test("full evidence preserves exact raw text and IEEE-754 NaN only after opt-in"
   assert.equal(strFromU8(entries[rawEvidence.files[0]]), project.datasets[0].source.rawText);
   const binaryPath = matrixEvidence.files.find((path) => path.endsWith(".f64"));
   const values = decodeFloat64(entries[binaryPath]);
-  assert.equal(Number.isNaN(values[7]), true);
+  // Row-major encoding: the fixture's lone NaN sits at row 7, time column 3.
+  assert.equal(Number.isNaN(values[7 * 4 + 3]), true);
+  assert.equal(values.filter((value) => Number.isNaN(value)).length, 1);
   assert.equal(manifest.privacy.rawSourcesIncluded, true);
   assert.equal(manifest.privacy.fullTreatedMatricesIncluded, true);
 });
@@ -295,7 +332,7 @@ function buildProject() {
     activeIndex: 0,
     selectedTimeIndex: 2,
     selectedWavelengthIndex: 1,
-    state: { featureFinding: { relativeThreshold: 0.1, minimumGaussianR2: 0, minimumFwhmNm: 0 } },
+    state: { featureFinding: { minimumSnr: 3, minimumFwhmNm: 0 } },
     folders: [
       { id: "folder-1", name: "Conditions" },
       { id: "folder-2", name: "Other" },
@@ -308,13 +345,20 @@ function buildProject() {
 }
 
 function buildDataset(id, label, fitted, sampleNote) {
-  const spectralAxis = [500, 550, 600];
+  const spectralAxis = [420, 440, 460, 480, 500, 520, 540, 560, 580, 600, 620, 640, 660, 680, 700];
   const timeAxis = [-0.5, 0, 1, 10];
-  const matrix = [
-    [0, 0.2, 0.1, 0.01],
-    [0, -0.4, -0.2, Number.NaN],
-    [0, 0.1, 0.04, 0.005],
+  const easY = [
+    -0.00033522332112048263, -0.003861398988656334, -0.028503879245778584, -0.1347293766961451,
+    -0.4068142718246359, -0.7787425777447813, -0.9187988300580324, -0.5844687297581155,
+    0.004429304015931224, 0.4406679815346739, 0.5474377639867363, 0.4116756743836459,
+    0.2159332105307901, 0.08118250547285409, 0.021994159335879813,
   ];
+  const matrix = spectralAxis.map((_wavelength, rowIndex) => [0, easY[rowIndex], 0.5 * easY[rowIndex], 0.1 * easY[rowIndex]]);
+  matrix[7][3] = Number.NaN;
+  const rawText = [
+    "0,-0.5,0,1,10",
+    ...spectralAxis.map((wavelength, rowIndex) => `${wavelength},${matrix[rowIndex].map((value) => (Number.isNaN(value) ? "NaN" : value)).join(",")}`),
+  ].join("\r\n");
   const dataset = {
     id,
     folderId: "folder-1",
@@ -323,8 +367,8 @@ function buildDataset(id, label, fitted, sampleNote) {
     sampleNote,
     source: {
       fileName: `/Users/private/${id}.csv`,
-      rawText: "0,-0.5,0,1,10\r\n500,0,0.2,0.1,0.01\r\n550,0,-0.4,-0.2,NaN\r\n600,0,0.1,0.04,0.005\r\n",
-      sourceShape: { rows: 4, cols: 5 },
+      rawText,
+      sourceShape: { rows: spectralAxis.length + 1, cols: timeAxis.length + 1 },
       metadata: { Operator: "Private Person", Computer: "Lab-PC", Instrument: "TA" },
     },
     analysis: {
@@ -347,13 +391,11 @@ function buildDataset(id, label, fitted, sampleNote) {
       fitPointCount: 11,
       lifetimeBasis: "preview coordinate search",
       easSpectra: [
-        { label: "EAS 2", componentIndex: 1, lifetime: 12, x: spectralAxis.slice(), y: [-0.2, -1, -0.2] },
+        { label: "EAS 2", componentIndex: 1, lifetime: 12, x: spectralAxis.slice(), y: easY.slice() },
       ],
-      residualMatrix: [
-        [0, 0.01, -0.01, 0.002],
-        [0, -0.02, 0.01, Number.NaN],
-        [0, 0.003, -0.004, 0.001],
-      ],
+      residualMatrix: matrix.map((row, rowIndex) => row.map((value, colIndex) => (
+        Number.isNaN(value) ? Number.NaN : 0.01 * Math.sin(rowIndex * 1.7 + colIndex * 2.3)
+      ))),
     };
   }
   return dataset;

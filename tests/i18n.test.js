@@ -25,7 +25,12 @@ test("UI translations preserve scientific abbreviations and interpolate counts",
   assert.equal(translateText("Merge spectral ranges", "zh-CN"), "合并光谱范围");
   assert.equal(translateText("Expand VIS", "zh-CN"), "展开 VIS");
   assert.equal(translateText("Drag sample.ufs to another folder", "zh-CN"), "将 sample.ufs 拖到其他文件夹");
+  assert.equal(translateText("Drag VIS to reorder", "zh-CN"), "拖动 VIS 以重新排列");
   assert.equal(translateText("Component spectra mode", "zh-CN"), "组分光谱模式");
+  assert.equal(translateText("Global fit component spectra mode", "zh-CN"), "全局拟合组分光谱模式");
+  assert.equal(translateText("DAS preview", "zh-CN"), "DAS 预览");
+  assert.equal(translateText("Imported evidence library", "zh-CN"), "导入证据库");
+  assert.equal(translateText("Move folder up", "zh-CN"), "上移文件夹");
   assert.equal(translateText("Version 1.0.0", "zh-CN"), "版本 1.0.0");
   assert.equal(translateText("SpecFlowLab Manual", "zh-CN"), "SpecFlowLab 使用手册");
   assert.equal(translateText("Treat the dataset before merging", "zh-CN"), "请先处理数据集，再进行合并");
@@ -35,8 +40,6 @@ test("UI translations preserve scientific abbreviations and interpolate counts",
   assert.equal(translateText("The treated time axes are used directly; no additional time-zero shift is applied.", "zh-CN"), "直接使用已处理的时间轴，不再额外移动时间零点。");
   assert.equal(translateText("2 datasets imported into one new folder. Original CSV text or UFS bytes are preserved.", "zh-CN"), "2 个数据集已导入到一个新文件夹；原始 CSV 文本或 UFS 字节已保留。");
   assert.equal(translateText("EAS", "zh-CN"), "EAS");
-  assert.equal(translateText("Gaussian Feature Finder", "zh-CN"), "高斯特征寻找器");
-  assert.equal(translateText("Gaussian Lineshape Finder", "zh-CN"), "高斯线形寻找器");
   assert.equal(translateText("Evidence Tray", "zh-CN"), "证据托盘");
   assert.equal(translateText("2 IRF-limited excluded", "zh-CN"), "已排除 2 个 IRF 受限组分");
   assert.equal(translateText("Numerical model and convergence", "zh-CN"), "数值模型与收敛");
@@ -44,5 +47,11 @@ test("UI translations preserve scientific abbreviations and interpolate counts",
   assert.equal(translateText("Condition est.", "zh-CN"), "条件数估计");
   assert.equal(translateText("Uncertainty", "zh-CN"), "不确定度");
   assert.equal(translateText("Residual DoF", "zh-CN"), "残差自由度");
+  assert.equal(translateText("Peak position", "zh-CN"), "峰位");
+  assert.equal(translateText("Reset Dataset", "zh-CN"), "重置数据集");
+  assert.equal(translateText("Reset Folder", "zh-CN"), "重置文件夹");
+  assert.equal(translateText("Reset Fit Inputs", "zh-CN"), "重置拟合输入");
+  assert.equal(translateText("\"Condition A\" was reset to its selected source range; baseline, chirp, and global fit were removed for this dataset.", "zh-CN"), "“Condition A”已重置到所选源数据范围；已移除此数据集的基线、啁啾校正和全局拟合。");
+  assert.equal(translateText("Save changes", "zh-CN"), "保存更改");
   assert.equal(translateText("Component Spectra", "en"), "Component Spectra");
 });

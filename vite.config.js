@@ -7,6 +7,8 @@ export default {
   envPrefix: ["VITE_", "TAURI_"],
   build: {
     target: "es2022",
-    minify: false,
+    minify: "esbuild",
+    cssMinify: true,
+    sourcemap: false,
   },
 };

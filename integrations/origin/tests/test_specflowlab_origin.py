@@ -232,6 +232,11 @@ class OriginBridgeTests(unittest.TestCase):
             self.assertTrue(heatmap_origin.layer.rescaled)
             self.assertEqual(heatmap_origin.layer.yscale, "log10")
             self.assertEqual(heatmap_origin.layer.y_limits, (0.1, 1.0))
+            self.assertIn("layer.cmap.numMajorLevels=8", heatmap_origin.commands[1])
+            self.assertIn("layer.cmap.numMinorLevels=5", heatmap_origin.commands[1])
+            self.assertIn("layer.cmap.colorLow=3", heatmap_origin.commands[1])
+            self.assertIn("layer.cmap.colorHigh=1", heatmap_origin.commands[1])
+            self.assertIn("layer.cmap.colorMixMode=1", heatmap_origin.commands[1])
 
             graph_origin = FakeGraphOrigin()
             bridge._plot_spectra(
@@ -243,6 +248,10 @@ class OriginBridgeTests(unittest.TestCase):
             self.assertEqual(len(graph_origin.layer.plots), 2)
             self.assertTrue(graph_origin.layer.rescaled)
             self.assertEqual(graph_origin.configurations[0]["template"], "Origin")
+            self.assertEqual(
+                [entry[2].color for entry in graph_origin.layer.plots],
+                ["#000000", "#FF0000"],
+            )
 
             graph_origin = FakeGraphOrigin()
             bridge._plot_multi_line(
@@ -255,6 +264,10 @@ class OriginBridgeTests(unittest.TestCase):
             self.assertEqual(len(graph_origin.layer.plots), 3)
             self.assertTrue(graph_origin.layer.rescaled)
             self.assertEqual(graph_origin.configurations[0]["template"], "Origin")
+            self.assertEqual(
+                [entry[2].color for entry in graph_origin.layer.plots],
+                ["#000000", "#FF0000", "#008000"],
+            )
 
 
 class FakeSheet:
