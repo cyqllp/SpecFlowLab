@@ -73,7 +73,8 @@ jobs:
           Copy-Item src-tauri/target/release/specflowlab.exe $PortableExe
           Compress-Archive -Path $PortableExe -DestinationPath $PortableZip
           $Hash = (Get-FileHash -Algorithm SHA256 $PortableZip).Hash.ToLower()
-          "$Hash  $(Split-Path $PortableZip -Leaf)" | Set-Content -Encoding ascii "$PortableZip.sha256"
+          $ChecksumLine = "$Hash  $(Split-Path $PortableZip -Leaf)`n"
+          [System.IO.File]::WriteAllText("$PortableZip.sha256", $ChecksumLine, [System.Text.Encoding]::ASCII)
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
