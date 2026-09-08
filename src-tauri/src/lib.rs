@@ -11,7 +11,9 @@ use std::{
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{Emitter, Manager};
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 mod labtalk;
@@ -1761,16 +1763,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building SpecFlowLab");
 
-    app.run(|app_handle, event| {
+    app.run(|_app_handle, _event| {
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Opened { urls } = event {
+        if let tauri::RunEvent::Opened { urls } = _event {
             let paths = urls.into_iter().filter_map(|url| {
                 let path = url.to_file_path().ok()?;
                 is_specflowlab_project_path(&path).then(|| path.to_string_lossy().into_owned())
             });
-            queue_project_paths(app_handle, paths);
-            let _ = app_handle.emit("project-open-requested", ());
-            if let Some(window) = app_handle.get_webview_window("main") {
+            queue_project_paths(_app_handle, paths);
+            let _ = _app_handle.emit("project-open-requested", ());
+            if let Some(window) = _app_handle.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
