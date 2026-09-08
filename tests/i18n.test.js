@@ -29,7 +29,7 @@ test("UI translations preserve scientific abbreviations and interpolate counts",
   assert.equal(translateText("Component spectra mode", "zh-CN"), "组分光谱模式");
   assert.equal(translateText("Global fit component spectra mode", "zh-CN"), "全局拟合组分光谱模式");
   assert.equal(translateText("DAS preview", "zh-CN"), "DAS 预览");
-  assert.equal(translateText("Imported evidence library", "zh-CN"), "导入证据库");
+  assert.equal(translateText("Project evidence library", "zh-CN"), "项目证据库");
   assert.equal(translateText("Move folder up", "zh-CN"), "上移文件夹");
   assert.equal(translateText("Version 1.0.0", "zh-CN"), "版本 1.0.0");
   assert.equal(translateText("SpecFlowLab Manual", "zh-CN"), "SpecFlowLab 使用手册");
@@ -50,7 +50,7 @@ test("UI translations preserve scientific abbreviations and interpolate counts",
   assert.equal(translateText("Peak position", "zh-CN"), "峰位");
   assert.equal(translateText("Reset Dataset", "zh-CN"), "重置数据集");
   assert.equal(translateText("Reset Folder", "zh-CN"), "重置文件夹");
-  assert.equal(translateText("Reset Fit Inputs", "zh-CN"), "重置拟合输入");
+  assert.equal(translateText("Reset to 3 Components", "zh-CN"), "重置为 3 组分");
   assert.equal(translateText("\"Condition A\" was reset to its selected source range; baseline, chirp, and global fit were removed for this dataset.", "zh-CN"), "“Condition A”已重置到所选源数据范围；已移除此数据集的基线、啁啾校正和全局拟合。");
   assert.equal(translateText("Save changes", "zh-CN"), "保存更改");
   assert.equal(translateText("Component Spectra", "en"), "Component Spectra");

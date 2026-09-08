@@ -83,9 +83,9 @@ jobs:
           path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
-            releases/SpecFlowLab-1.0.8-Windows-x64-portable.exe
-            releases/SpecFlowLab-1.0.8-Windows-x64-portable.zip
-            releases/SpecFlowLab-1.0.8-Windows-x64-portable.zip.sha256
+            releases/SpecFlowLab-*-Windows-x64-portable.exe
+            releases/SpecFlowLab-*-Windows-x64-portable.zip
+            releases/SpecFlowLab-*-Windows-x64-portable.zip.sha256
           retention-days: 30
 
   build-macos:
@@ -114,8 +114,9 @@ jobs:
         run: |
           mkdir -p releases
           ARCH="$(uname -m)"
-          ARCHIVE="releases/SpecFlowLab-1.0.8-macOS-${ARCH}-portable.zip"
-          DISK_IMAGE="releases/SpecFlowLab-1.0.8-macOS-${ARCH}.dmg"
+          VERSION="$(node -p 'require("./package.json").version')"
+          ARCHIVE="releases/SpecFlowLab-${VERSION}-macOS-${ARCH}-portable.zip"
+          DISK_IMAGE="releases/SpecFlowLab-${VERSION}-macOS-${ARCH}.dmg"
           DMG_STAGE="$(mktemp -d)"
           ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/release/bundle/macos/SpecFlowLab.app" "$ARCHIVE"
           ditto "src-tauri/target/release/bundle/macos/SpecFlowLab.app" "$DMG_STAGE/SpecFlowLab.app"
@@ -131,6 +132,6 @@ jobs:
         with:
           name: SpecFlowLab-macOS
           path: |
-            releases/SpecFlowLab-1.0.8-macOS-*-portable.zip*
-            releases/SpecFlowLab-1.0.8-macOS-*.dmg*
+            releases/SpecFlowLab-*-macOS-*-portable.zip*
+            releases/SpecFlowLab-*-macOS-*.dmg*
           retention-days: 30

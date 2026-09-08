@@ -1,11 +1,11 @@
 # SpecFlowLab AI Investigation Implementation Guide
 
-Status: implementation handoff
+Status: implemented foundation, updated for SpecFlowLab 1.0.9
 Repository: `SpecFlowLab/SpecFlowLab-app`
 Baseline reviewed: SpecFlowLab 1.0.2 plus the current uncommitted Origin/workflow worktree
 Audience: Claude Code or another implementation agent
-Scope: replace blind project-wide Markdown dumping with question-driven,
-evidence-grounded, species-centered multimodal AI investigations
+Scope: question-driven, evidence-grounded AI investigations with an editable
+dataset scope and a unified imported-evidence library
 
 ## 1. Product objective
 
@@ -23,13 +23,10 @@ Scientific question
 
 The AI must act as an investigative coordinator and interpretation assistant. SpecFlowLab remains the numerical authority. The complete `.sflproj` remains the source of truth; Markdown becomes a concise, readable brief rather than a container for every numerical array.
 
-The long-term scientific unit is not an isolated fsTA matrix. It is a
-**species-centered body of evidence** connecting time-resolved measurements to
-steady-state absorption, PL/TRPL, EPR, IR/Raman, NMR, electrochemistry and
-spectroelectrochemistry, structural measurements, calculations, controls, and
-reference compounds. SpecFlowLab must preserve each modality in its native
-form while making the relationships between samples, candidate species,
-conditions, datasets, and scientific annotations explicit and reviewable.
+The scientific unit is not an isolated fsTA matrix. It is a reviewable project
+that keeps time-resolved measurements, steady-state spectra, characterization,
+figures, manuscripts, and literature together. SpecFlowLab preserves each
+source in its native form without requiring users to build a relationship map.
 
 The feature must reduce three current risks:
 
@@ -148,8 +145,6 @@ Initial goal presets:
 | `kinetic-model` | Evaluate kinetic models | at least one fitted dataset |
 | `spectral-interpretation` | Interpret spectral features | at least one dataset; experimental context recommended |
 | `merge-consistency` | Check VIS/NIR merge consistency | a merged dataset or two merge-ready parents |
-| `species-assignment` | Evaluate a species/state assignment | at least one dataset plus a species/state hypothesis; connected reference evidence recommended |
-| `multimodal-consistency` | Compare connected evidence | at least two connected datasets, preferably from different techniques |
 | `experiment-planning` | Suggest discriminating experiments | at least one dataset plus a question |
 | `custom` | Custom investigation | at least one dataset |
 
@@ -157,17 +152,11 @@ Each preset supplies a visible prompt scaffold but must not overwrite user text 
 
 #### Step 2 — Scope
 
-Scope choices:
-
-- active dataset;
-- current folder;
-- selected datasets;
-- connected evidence from a selected dataset, sample, or species hypothesis;
-- entire project.
-
-Default to **current folder**, not entire project. If only one dataset exists, default to active dataset.
-
-For selected datasets, reuse the generalized dataset-selection component used by Compare and Merge. Show folder, dataset name, raw/treated/merged state, range, and fit state. Apply goal-specific eligibility and explain disabled rows.
+Scope choices are **Selected datasets**, **Current folder**, and **Entire
+project**. Current folder and Entire project are selection presets. The dataset
+list remains enabled at all times; selecting or deselecting a row switches the
+scope to Selected datasets. Default to Current folder, including for a folder
+that contains one dataset.
 
 The scope preview must show:
 
@@ -176,15 +165,8 @@ The scope preview must show:
 - fitted versus unfitted count;
 - wavelength/time coverage;
 - whether merged datasets and their parents are both included;
-- connected techniques, samples, species hypotheses, and relationship types;
-- why every automatically suggested connected dataset is relevant;
-- whether connected measurements were made under comparable conditions;
+- the exact editable dataset selection;
 - warnings for incompatible ranges, missing notes, or incomparable preprocessing.
-
-For **connected evidence**, traverse one relationship hop by default. Never
-follow every project edge silently. Show the proposed traversal, relationship
-type, scientific rationale, and estimated package contribution, and require the
-user to approve the final dataset list. Wider traversal is an advanced action.
 
 #### Step 3 — Evidence
 
@@ -204,15 +186,11 @@ Show estimated:
 - number of evidence files;
 - whether original raw source or full matrices are included.
 
-Provide explicit privacy toggles:
-
-- include sample notes;
-- include source filenames;
-- include instrument metadata;
-- include original raw files;
-- redact local file paths and operator/computer names.
-
-Defaults: include sample notes and scientific metadata, omit raw files, redact absolute local paths and machine identity.
+Keep only analysis-relevant evidence controls in the builder: sample notes,
+exact raw sources, and full treated matrices. Source filenames and scientific
+metadata are included for provenance. Absolute local paths and operator or
+computer names are redacted automatically rather than exposed as routine UI
+choices. Raw sources and full matrices remain explicit Full-evidence opt-ins.
 
 #### Step 4 — Review and export
 
@@ -335,49 +313,6 @@ Required:
 
 Generated AI instruction: do not let the denser or higher-amplitude segment dominate conclusions without reporting its contribution. Prefer simultaneous parent-dataset fitting with shared lifetimes and separate amplitudes when testing common kinetics.
 
-### 5.7 Evaluate a species or state assignment
-
-Required:
-
-- the species/state hypothesis, its status, author, date, and rationale;
-- the time-resolved feature being assigned, including dataset ID, physical
-  coordinates, fit component if applicable, and uncertainty or IRF warnings;
-- connected steady-state, spectroscopic, electrochemical, structural, or
-  computational references selected by the user;
-- relationship records explaining why each connected dataset is relevant;
-- sample-identity and condition-comparability tables;
-- direct observations from each modality, kept separate from assignments;
-- supporting, conflicting, and missing evidence;
-- known alternative species or state assignments;
-- proposed discriminating measurements.
-
-Generated AI instruction: cross-modal agreement constrains an assignment but
-does not prove species identity or map a time-resolved lifetime to that species
-automatically. EPR establishes evidence about paramagnetic populations under
-its measurement conditions; PL concerns emissive populations; NMR and
-steady-state spectra have different time and population sensitivities; a
-reference spectrum may differ because of solvent, concentration, temperature,
-potential, aggregation, or excitation conditions. Report those boundaries.
-
-### 5.8 Compare connected multimodal evidence
-
-Required:
-
-- one explicit scientific question or hypothesis;
-- at least two connected datasets with stable IDs and technique labels;
-- native axes, units, processing history, and modality-specific limitations;
-- sample, batch, solvent, concentration, temperature, atmosphere, excitation,
-  electrochemical potential, and acquisition-time comparability where known;
-- the exact typed relationship between each pair of connected records;
-- an observation table that does not collapse unlike modalities into one
-  numerical score;
-- contradictions and absent metadata, not only supporting evidence.
-
-Do not correlate unlike spectra by array index or force them onto a shared
-axis. A cross-modal package may contain different native file types and
-summaries. Comparisons must use scientifically meaningful features or explicit
-reference relationships rather than hidden interpolation.
-
 ## 6. Deterministic evidence selection
 
 AI must not choose the initial numerical evidence. SpecFlowLab generates it deterministically and records the reason for every coordinate.
@@ -466,19 +401,10 @@ figures/
 optional/
   treated-matrices/
   raw-sources/
-connections/
-  evidence-graph.json
-  comparability-table.csv
-modalities/
-  absorption/
-  photoluminescence/
-  epr/
-  ir/
-  nmr/
-literature/
-  E020-figure-reference.png
-  E020-figure-reference.json
-  E021-digitized-trace.csv
+external-evidence/
+  asset-figure-4b/
+    metadata.json
+    source.png
 ```
 
 Use CSV for human/tool interoperability, JSON for nested metadata, SVG for vector line plots, and PNG only for raster heatmaps or when SVG export is not available. Full Float64 matrices may use the existing little-endian binary convention plus JSON descriptors rather than enormous CSV files.
@@ -558,61 +484,7 @@ Create a pure input model before package generation:
 
 Keep transient UI state out of `.sflproj` unless the user explicitly saves an investigation definition. A completed investigation may be referenced in project provenance by ID, question, timestamp, and package checksum without embedding the package.
 
-### 7.5 Connected-evidence manifest additions
-
-When connected datasets are included, add explicit graph references rather
-than relying on matching names or free-text comments:
-
-```json
-{
-  "focusEntityIds": ["hypothesis-radical-anion"],
-  "entities": [
-    {
-      "id": "sample-zntpp-sf-aa-01",
-      "kind": "sample",
-      "label": "ZnTPP-SF + AA",
-      "attributes": {
-        "solvent": "toluene",
-        "concentration": { "value": 0.1, "unit": "mM" },
-        "atmosphere": "nitrogen"
-      }
-    },
-    {
-      "id": "hypothesis-radical-anion",
-      "kind": "species-hypothesis",
-      "label": "ZnTPP-SF radical anion",
-      "status": "proposed"
-    }
-  ],
-  "connections": [
-    {
-      "id": "connection-001",
-      "fromId": "dataset-fsta-01",
-      "toId": "dataset-epr-01",
-      "type": "same-sample",
-      "assertionStatus": "recorded",
-      "rationale": "Aliquots from the same prepared sample",
-      "createdBy": "user",
-      "createdAt": "ISO-8601"
-    },
-    {
-      "id": "connection-002",
-      "fromId": "dataset-sec-01",
-      "toId": "hypothesis-radical-anion",
-      "type": "reference-for",
-      "assertionStatus": "proposed",
-      "rationale": "Electrochemically generated reference spectrum"
-    }
-  ]
-}
-```
-
-The `.sflai` manifest must list which connections caused each dataset to be
-included and which were user-selected directly. Package generation must never
-infer `same-sample`, `same-species`, or `supports-assignment` solely from
-similar filenames, labels, spectral shapes, or fitted lifetimes.
-
-### 7.6 Literature figure and image evidence
+### 7.5 Literature figure and image evidence
 
 Allow the user to supplement any fsTA dataset, feature, species hypothesis, or
 connection with a literature figure or picture. Treat the image as
@@ -649,13 +521,6 @@ Store a descriptor such as:
     "pixelWidth": 1800,
     "pixelHeight": 1200
   },
-  "relationships": [
-    {
-      "targetId": "feature-long-lived-band",
-      "type": "literature-reference-for",
-      "rationale": "User-selected comparison to a reported long-lived band"
-    }
-  ],
   "transformations": [],
   "interpretationBoundary": "qualitative-image-reference"
 }
@@ -855,10 +720,6 @@ src/lib/ai-investigation/
 src/lib/evidence-graph/
   schema.js
   entities.js
-  connections.js
-  comparability.js
-  traversal.js
-  migration.js
 src/lib/modalities/
   registry.js
   one-dimensional-spectrum.js
@@ -881,13 +742,8 @@ Responsibilities:
 - `prompt.js`: provider-neutral prompt contract;
 - `package.js`: ZIP assembly, checksums, size estimates;
 - `response.js`: future response validation and safe follow-up requests.
-- `evidence-graph/schema.js`: versioned entity, relationship, annotation, and
-  hypothesis contracts;
-- `evidence-graph/connections.js`: typed relationship creation and validation;
-- `evidence-graph/comparability.js`: condition-difference reporting without
-  deciding scientific equivalence automatically;
-- `evidence-graph/traversal.js`: deterministic, bounded, question-driven
-  connected-evidence scope resolution;
+- `evidence-graph/schema.js` and `entities.js`: stable feature-signature and
+  annotation records retained for plot labels and archive compatibility;
 - `modalities/registry.js`: extensible technique descriptors and native data
   shapes without putting technique-specific logic in UI handlers.
 - `evidence-assets/schema.js`: exact-source external spectrum, characterization,

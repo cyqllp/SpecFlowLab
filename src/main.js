@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./lib/parser-core.js";
 import {
   createProjectArchive,
@@ -12,6 +13,8 @@ import { isEligibleForMode, SELECTION_MODES, toggleSelection, validateSelection 
 import { moveDataset } from "./lib/dataset-order.js";
 import { moveFolder } from "./lib/folder-order.js";
 import { componentColor } from "./lib/component-colors.js";
+import { comparisonStyleDefaults } from "./lib/comparison-style.js";
+import { DEFAULT_FITTING_INPUTS, restoreDefaultFittingInputs } from "./lib/fitting-defaults.js";
 import {
   changedTreatmentDatasetIds,
   snapshotTreatmentStates,
@@ -29,22 +32,17 @@ import { AI_INVESTIGATION_SPEC_SCHEMA } from "./lib/ai-investigation/schema.js";
 import { defaultAiScope } from "./lib/ai-investigation/scope.js";
 import {
   CONDITION_FIELDS,
-  RELATIONSHIP_DEFINITIONS,
   createEmptyEvidenceGraph,
   migrateEvidenceGraph,
   normalizeDatasetEvidence,
 } from "./lib/evidence-graph/schema.js";
 import {
-  connectionsForEntity,
   removeDatasetFromEvidenceGraph,
-  removeEvidenceConnection,
-  upsertEvidenceConnection,
 } from "./lib/evidence-graph/connections.js";
 import {
   deleteFeatureSignature,
   upsertFeatureSignature,
 } from "./lib/evidence-graph/entities.js";
-import { compareDatasetConditions } from "./lib/evidence-graph/comparability.js";
 import {
   EVIDENCE_ASSET_KINDS,
   LITERATURE_RIGHTS_STATUSES,
@@ -73,7 +71,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
-const APP_VERSION = "1.0.8";
+const APP_VERSION = "1.0.9";
 const plotGeometry = new WeakMap();
 const signatureHitRegions = new WeakMap();
 
@@ -127,14 +125,7 @@ const state = {
     draft: null,
   },
   fitting: {
-    components: 3,
-    irfFwhm: 0.25,
-    preZeroModel: "smooth",
-    coherentArtifactOrder: 1,
-    weighting: "robust-noise",
-    optimizerStarts: 3,
-    maximumIterations: 55,
-    rangeSensitivity: true,
+    ...DEFAULT_FITTING_INPUTS,
     spectrumMode: "EAS",
     normalize: "none",
     hideIrfLimited: true,
@@ -163,8 +154,6 @@ const state = {
   },
   evidenceGraph: createEmptyEvidenceGraph(),
   evidenceAssets: [],
-  evidenceSelectionIds: [],
-  evidenceViewMode: "list",
   modal: null,
   expandedPlot: null,
   plotZooms: {},
@@ -172,11 +161,7 @@ const state = {
   zoomDrag: null,
   pendingDeleteId: null,
   pendingDatasetId: null,
-  pendingConnectionId: null,
-  pendingConnectionTargetIds: [],
   pendingEvidenceAssetId: null,
-  pendingEvidenceAssetDraft: null,
-  evidenceImportMode: "evidence",
   evidenceImportResultIds: [],
   chartCaptures: [],
   captureTrayOpen: false,
@@ -624,7 +609,6 @@ function renderModal() {
   if (state.modal === "new-folder") return renderNewFolderModal();
   if (state.modal === "delete-dataset") return renderDeleteDatasetModal();
   if (state.modal === "edit-dataset") return renderDatasetEditorModal();
-  if (state.modal === "edit-connection") return renderEvidenceConnectionModal();
   if (state.modal === "edit-evidence-asset") return renderEvidenceAssetModal();
   if (state.modal === "evidence-import") return renderEvidenceImportModal();
   if (state.modal === "move-dataset") return renderMoveDatasetModal();
@@ -639,7 +623,6 @@ function renderAiInvestigationModal() {
   }
   const selected = new Set(draft.scope.datasetIds ?? []);
   const selectedCaptures = new Set(draft.captureIds ?? []);
-  const datasetPickerEnabled = ["selected-datasets", "connected-evidence"].includes(draft.scope.kind);
   return `
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="New AI Investigation">
       <div class="modal ai-investigation-modal">
@@ -659,16 +642,14 @@ function renderAiInvestigationModal() {
           </section>
 
           <section class="ai-builder-section">
-            <div class="ai-step-label"><span>2</span><div><h3>Scope</h3><p>Current folder is the multi-dataset default.</p></div></div>
+            <div class="ai-step-label"><span>2</span><div><h3>Scope</h3><p>Choose a preset, then select or deselect any dataset below.</p></div></div>
             <div class="ai-choice-grid" role="radiogroup" aria-label="Investigation scope">
-              ${aiRadio("ai-scope", "active-dataset", "Active dataset", draft.scope.kind)}
-              ${aiRadio("ai-scope", "current-folder", "Current folder", draft.scope.kind)}
               ${aiRadio("ai-scope", "selected-datasets", "Selected datasets", draft.scope.kind)}
-              ${aiRadio("ai-scope", "connected-evidence", "Connected evidence", draft.scope.kind, "One explicit relationship hop; review required")}
+              ${aiRadio("ai-scope", "current-folder", "Current folder", draft.scope.kind)}
               ${aiRadio("ai-scope", "project", "Entire project", draft.scope.kind)}
             </div>
-            <div class="ai-dataset-picker ${datasetPickerEnabled ? "" : "disabled-control"}">
-              ${state.datasets.map((dataset) => `<label><input class="ai-dataset-check" type="checkbox" data-dataset-id="${escapeHtml(dataset.id)}" ${selected.has(dataset.id) ? "checked" : ""} ${datasetPickerEnabled ? "" : "disabled"} /><span data-i18n-skip>${escapeHtml(datasetDisplayName(dataset))}</span><small>${escapeHtml(state.folders.find((folder) => folder.id === dataset.folderId)?.name ?? "Unfiled")} · ${escapeHtml(getTechnique(dataset.evidenceMetadata?.technique?.id).label)} · ${escapeHtml(uiText(dataset.fit ? "fit available" : "unfitted"))}</small></label>`).join("")}
+            <div class="ai-dataset-picker">
+              ${state.datasets.map((dataset) => `<label><input class="ai-dataset-check" type="checkbox" data-dataset-id="${escapeHtml(dataset.id)}" ${selected.has(dataset.id) ? "checked" : ""} /><span data-i18n-skip>${escapeHtml(datasetDisplayName(dataset))}</span><small>${escapeHtml(state.folders.find((folder) => folder.id === dataset.folderId)?.name ?? "Unfiled")} · ${escapeHtml(getTechnique(dataset.evidenceMetadata?.technique?.id).label)} · ${escapeHtml(uiText(dataset.fit ? "fit available" : "unfitted"))}</small></label>`).join("")}
             </div>
           </section>
 
@@ -681,14 +662,10 @@ function renderAiInvestigationModal() {
             </div>
             <div class="ai-options-grid">
               ${aiCheckbox("ai-include-notes", "Include sample notes", draft.include.sampleNotes)}
-              ${aiCheckbox("ai-include-filenames", "Include source filenames", draft.include.sourceFileNames)}
-              ${aiCheckbox("ai-include-metadata", "Include instrument metadata", draft.include.instrumentMetadata)}
-              ${aiCheckbox("ai-redact-paths", "Redact absolute paths", draft.privacy.redactAbsolutePaths)}
-              ${aiCheckbox("ai-redact-operators", "Redact operator names", draft.privacy.redactOperatorNames)}
-              ${aiCheckbox("ai-redact-computers", "Redact computer names", draft.privacy.redactComputerNames)}
               ${aiCheckbox("ai-include-raw", "Include exact raw sources", draft.include.rawSources, draft.evidenceProfile !== "full")}
               ${aiCheckbox("ai-include-matrices", "Include full treated matrices", draft.include.fullTreatedMatrices, draft.evidenceProfile !== "full")}
             </div>
+            <p class="ai-privacy-note">Local paths and operator or computer names are removed automatically.</p>
             ${state.chartCaptures.length ? `<div class="ai-pinned-captures"><strong>Pinned chart evidence</strong><p>Selected captures are explicit evidence and retain their frozen view and displayed numerical values.</p>${state.chartCaptures.map((capture) => `<label><input class="ai-capture-check" type="checkbox" data-capture-id="${escapeHtml(capture.id)}" ${selectedCaptures.has(capture.id) ? "checked" : ""} /><img src="${escapeHtml(capture.previewUrl ?? "")}" alt="" /><span><b>${escapeHtml(capture.title)}</b><small>${escapeHtml(capture.datasetLabels.join(", "))}${capture.stale ? " · Earlier analysis state" : ""}</small></span></label>`).join("")}</div>` : `<div class="ai-pinned-captures empty"><strong>Pinned chart evidence</strong><p>No temporary chart captures are waiting in the Evidence Tray.</p></div>`}
           </section>
 
@@ -724,9 +701,8 @@ function renderAiInvestigationReview(draft, preview) {
             <div><dt>Estimated expanded size</dt><dd>${formatFileSize(preview.estimate.expandedBytes)}</dd></div>
             <div><dt>Approx. text tokens</dt><dd>${preview.estimate.approximateTextTokens.toLocaleString()}</dd></div>
           </dl>
-          <section><h3>Scoped datasets</h3><ul class="ai-compact-list">${scopeDatasets.map((dataset) => `<li><strong data-i18n-skip>${escapeHtml(dataset.label)}</strong><span>${escapeHtml(uiText(dataset.fitState))}${preview.manifest.connectedInclusions?.[dataset.id] ? ` · ${escapeHtml(preview.manifest.connectedInclusions[dataset.id].map((reason) => reason.relationshipType || reason.kind).join(", "))}` : ""}</span></li>`).join("")}</ul></section>
+          <section><h3>Scoped datasets</h3><ul class="ai-compact-list">${scopeDatasets.map((dataset) => `<li><strong data-i18n-skip>${escapeHtml(dataset.label)}</strong><span>${escapeHtml(uiText(dataset.fitState))}</span></li>`).join("")}</ul></section>
           <section><h3>Evidence index</h3><ol class="ai-evidence-list">${preview.evidence.map((item) => `<li><code>${item.id}</code><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.files.join(", "))}</small></div></li>`).join("")}</ol></section>
-          ${preview.manifest.connections?.length ? `<section><h3>Reviewed connections</h3><ul class="ai-compact-list">${preview.manifest.connections.map((connection) => `<li><strong><code>${escapeHtml(connection.id)}</code> · ${escapeHtml(connection.type)}</strong><span>${escapeHtml(connection.rationale)}</span></li>`).join("")}</ul></section>` : ""}
           <section><h3>Known limitations and omissions</h3><ul class="ai-limitations">${[...preview.manifest.limitations, ...preview.manifest.omissions.map((item) => item.reason)].map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>
           ${preview.estimate.warnings.length ? `<section class="ai-package-warning"><strong>Package warning</strong><ul>${preview.estimate.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul></section>` : ""}
           <section class="ai-privacy-summary"><strong>Privacy</strong><span>${escapeHtml(uiText(draft.include.rawSources && draft.evidenceProfile === "full" ? "Exact raw sources included by explicit choice." : "Raw sources omitted."))} ${escapeHtml(uiText(draft.include.fullTreatedMatrices && draft.evidenceProfile === "full" ? "Full treated matrices included." : "Full treated matrices omitted."))} ${escapeHtml(uiText("No network upload."))}</span></section>
@@ -840,7 +816,7 @@ function renderManualModal() {
     <section class="modal-shell" role="dialog" aria-modal="true" aria-label="SpecFlowLab Manual">
       <div class="modal product-modal manual-modal">
         <header class="modal-head">
-          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.8 spectroscopy workspace.</p></div>
+          <div><h2>SpecFlowLab Manual</h2><p>How to use the version 1.0.9 spectroscopy workspace.</p></div>
           <button data-action="close-modal" class="icon-button" aria-label="Close">x</button>
         </header>
         <div class="manual-intro">
@@ -850,7 +826,7 @@ function renderManualModal() {
         <ol class="manual-steps">
           <li><div><strong>Start a project</strong><p>Open an existing .sflproj project, or import CSV, TXT, TSV, ASC, or UFS files. Files imported together enter one dataset folder.</p></div></li>
           <li><div><strong>Organize datasets</strong><p>Use Edit Dataset Details for the project label and sample note. Move datasets between VIS, NIR, IR, or other folders without changing source files.</p></div></li>
-          <li><div><strong>Connect scientific evidence</strong><p>Open Dataset Details to record identity and high-value conditions above the evidence workspace. Use its independent import panel to drag, paste, or choose spectra, characterization files, figures, papers, and manuscripts; select evidence, add only relationships you can justify, and inspect the focused one-hop relation map.</p></div></li>
+          <li><div><strong>Import supporting evidence</strong><p>Open Dataset Details to record identity and high-value conditions. Use the unified evidence panel to drag, paste, or choose spectra, characterization files, figures, papers, and manuscripts.</p></div></li>
           <li><div><strong>Treat the data</strong><p>Set the wavelength and time range for the active folder, then apply Baseline and Chirp as needed. Merge selection becomes available only after treatment.</p></div></li>
           <li><div><strong>Merge treated spectral ranges</strong><p>Select exactly two treated datasets, click Merge between Chirp and Reset, choose clean retained wavelength ranges, review the spectral preview, and create the derived dataset.</p></div></li>
           <li><div><strong>Compare datasets</strong><p>Use Compare to inspect coordinated kinetics, spectra, EAS, and DAS views with reusable sample styles.</p></div></li>
@@ -1148,7 +1124,7 @@ function renderLifetimeControls() {
     <section class="lifetime-editor" aria-label="Lifetime starts and constraints">
       <div class="lifetime-editor-head">
         <strong>Lifetime starts</strong>
-        <button type="button" data-action="reset-fit-parameters" title="Restore default fitting inputs without deleting the last fit result">Reset Fit Inputs</button>
+        <button type="button" data-action="reset-fit-parameters" title="Restore the automatic three-component fitting inputs without deleting the last fit result">Reset to 3 Components</button>
       </div>
       <div class="lifetime-grid">
         ${Array.from({ length: count }, (_, index) => `
@@ -1323,11 +1299,6 @@ function renderDeleteDatasetModal() {
 function renderDatasetEditorModal() {
   const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
   const metadata = normalizeDatasetEvidence(dataset?.evidenceMetadata, "fsta");
-  const connections = connectionsForEntity(state.evidenceGraph, dataset?.id)
-    .filter((connection) => {
-      const otherId = connection.fromId === dataset?.id ? connection.toId : connection.fromId;
-      return state.evidenceGraph.entities.find((entity) => entity.id === otherId)?.kind !== "species-hypothesis";
-    });
   const primaryConditions = primaryConditionFields(metadata.technique.id);
   const additionalConditions = CONDITION_FIELDS.filter((field) => !primaryConditions.includes(field));
   return `
@@ -1359,15 +1330,14 @@ function renderDatasetEditorModal() {
               <div class="dataset-tag-editor additional-condition-tags">${additionalConditions.map((field) => renderConditionField(field, metadata, true)).join("")}</div>
             </details>
           </section>
-          <section class="dataset-detail-section connected-evidence-section">
-            <div class="dataset-detail-section-head"><div><h3>Imported Evidence</h3><p>Import supporting files and review existing links. Dataset links are visible from both connected datasets.</p></div><div class="evidence-toolbar"><button data-action="toggle-evidence-view">${state.evidenceViewMode === "map" ? "List view" : "Relation map"}</button><button data-action="open-evidence-import">Import evidence...</button><button data-action="open-literature-import">Import literature...</button></div></div>
-            ${state.evidenceViewMode === "map" ? renderFocusedEvidenceMap(dataset, connections) : (connections.length ? `<div class="evidence-connection-list">${connections.map((connection) => renderEvidenceConnectionRow(dataset, connection)).join("")}</div>` : `<p class="empty-evidence-state">No explicit connections. Similar filenames, lifetimes, or spectra will not create one automatically.</p>`)}
-            ${renderEvidenceLibrary(dataset)}
+          <section class="dataset-detail-section imported-evidence-section">
+            <div class="dataset-detail-section-head"><div><h3>Imported Evidence</h3><p>Keep spectra, characterization files, figures, manuscripts, and literature together in one project library.</p></div><div class="evidence-toolbar"><button data-action="open-evidence-import">Import evidence...</button></div></div>
+            ${renderEvidenceLibrary()}
           </section>
           <p class="source-readonly">Source file: <strong data-i18n-skip>${escapeHtml(dataset?.source.fileName ?? "-")}</strong></p>
         </div>
         <footer class="modal-footer">
-          <span>Metadata and graph records never duplicate or modify numerical source data.</span>
+          <span>Metadata records never duplicate or modify numerical source data.</span>
           <button data-action="save-dataset-details">Save Details</button>
         </footer>
       </div>
@@ -1398,148 +1368,61 @@ function primaryConditionFields(techniqueId) {
   return ["solvent", "temperature", "instrument"];
 }
 
-function renderEvidenceLibrary(dataset) {
-  const choices = state.evidenceGraph.entities
-    .filter((entity) => entity.id !== dataset.id && Boolean(entity.assetId))
-    .sort((left, right) => left.label.localeCompare(right.label));
+function renderEvidenceLibrary() {
+  const choices = state.evidenceAssets.slice().sort((left, right) => left.label.localeCompare(right.label));
   return `<div class="evidence-library">
-    <div class="evidence-library-head"><div><strong>Imported evidence library</strong><span>${state.evidenceSelectionIds.length} selected</span></div><button data-action="connect-selected-evidence" ${state.evidenceSelectionIds.length ? "" : "disabled"}>Connect selected...</button></div>
-    ${choices.length ? `<div class="evidence-library-grid">${choices.map((entity) => {
-      const asset = state.evidenceAssets.find((item) => item.id === entity.assetId);
-      return `<div class="evidence-library-item"><label><input class="evidence-library-check" type="checkbox" value="${escapeHtml(entity.id)}" ${state.evidenceSelectionIds.includes(entity.id) ? "checked" : ""} /><span><strong data-i18n-skip>${escapeHtml(entity.label)}</strong><small>${escapeHtml(titleCase(entity.kind))}${asset?.techniqueId ? ` · ${escapeHtml(getTechnique(asset.techniqueId).label)}` : ""}</small></span></label>${asset ? `<button type="button" data-action="open-evidence-asset" data-asset-id="${escapeHtml(asset.id)}">Details</button>` : ""}</div>`;
-    }).join("")}</div>` : `<p class="empty-evidence-state">Import an external spectrum, characterization, figure, manuscript, or literature citation to start the library.</p>`}
+    <div class="evidence-library-head"><div><strong>Project evidence library</strong><span>${choices.length} item${choices.length === 1 ? "" : "s"}</span></div></div>
+    ${choices.length ? `<div class="evidence-library-grid">${choices.map((asset) => `<div class="evidence-library-item"><span class="evidence-kind-mark" aria-hidden="true">${escapeHtml(evidenceKindMark(asset.kind))}</span><span><strong data-i18n-skip>${escapeHtml(asset.label)}</strong><small>${escapeHtml(titleCase(asset.kind))}${asset.techniqueId ? ` · ${escapeHtml(getTechnique(asset.techniqueId).label)}` : ""}</small></span><button type="button" data-action="open-evidence-asset" data-asset-id="${escapeHtml(asset.id)}">Details</button></div>`).join("")}</div>` : `<p class="empty-evidence-state">Import an external spectrum, characterization file, figure, manuscript, or literature file to start the library.</p>`}
   </div>`;
 }
 
-function renderFocusedEvidenceMap(dataset, connections) {
-  const neighbors = connections.map((connection) => {
-    const id = connection.fromId === dataset.id ? connection.toId : connection.fromId;
-    return { connection, entity: state.evidenceGraph.entities.find((item) => item.id === id) };
-  }).filter((item) => item.entity && item.entity.kind !== "feature").slice(0, 12);
-  if (!neighbors.length) return `<div class="evidence-map evidence-map-empty"><strong>${escapeHtml(datasetDisplayName(dataset))}</strong><span>No connected evidence yet</span></div>`;
-  const cx = 400;
-  const cy = 190;
-  return `<div class="evidence-map"><svg viewBox="0 0 800 380" role="img" aria-label="Focused evidence relation map">
-    ${neighbors.map(({ connection }, index) => {
-      const angle = (Math.PI * 2 * index / neighbors.length) - Math.PI / 2;
-      const x = cx + Math.cos(angle) * 285;
-      const y = cy + Math.sin(angle) * 130;
-      return `<g><line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/><text class="evidence-map-edge" x="${(cx + x) / 2}" y="${(cy + y) / 2 - 5}">${escapeHtml(shortLabel(connection.type, 22))}</text></g>`;
-    }).join("")}
-    <g class="evidence-map-node evidence-map-center"><rect x="310" y="156" width="180" height="68" rx="18"/><text x="400" y="186">${escapeHtml(shortLabel(datasetDisplayName(dataset), 25))}</text><text class="evidence-map-kind" x="400" y="206">Dataset</text></g>
-    ${neighbors.map(({ entity }, index) => {
-      const angle = (Math.PI * 2 * index / neighbors.length) - Math.PI / 2;
-      const x = cx + Math.cos(angle) * 285;
-      const y = cy + Math.sin(angle) * 130;
-      return `<g class="evidence-map-node" data-action="open-evidence-entity" data-entity-id="${escapeHtml(entity.id)}"><rect x="${x - 82}" y="${y - 29}" width="164" height="58" rx="15"/><text x="${x}" y="${y - 2}">${escapeHtml(shortLabel(entity.label, 22))}</text><text class="evidence-map-kind" x="${x}" y="${y + 17}">${escapeHtml(titleCase(entity.kind))}</text></g>`;
-    }).join("")}
-  </svg></div>`;
-}
-
-function shortLabel(value, length) {
-  const text = String(value ?? "");
-  return text.length > length ? `${text.slice(0, length - 1)}…` : text;
-}
-
-function renderEvidenceConnectionRow(dataset, connection) {
-  const otherId = connection.fromId === dataset.id ? connection.toId : connection.fromId;
-  const other = state.evidenceGraph.entities.find((entity) => entity.id === otherId);
-  const otherDataset = state.datasets.find((item) => item.id === otherId);
-  const comparison = otherDataset ? compareDatasetConditions(dataset, otherDataset) : null;
-  const technique = otherDataset ? getTechnique(otherDataset.evidenceMetadata?.technique?.id).label : titleCase(other?.kind ?? "entity");
-  const warning = comparison
-    ? `${comparison.matching.length} matching · ${comparison.different.length} different · ${comparison.unknown.length} unknown conditions`
-    : "Condition comparison not applicable";
-  return `<article class="evidence-connection-row">
-    <div><strong data-i18n-skip>${escapeHtml(other?.label ?? otherId)}</strong><span>${escapeHtml(technique)} · ${escapeHtml(connection.type)} · ${escapeHtml(connection.category)}</span><small>${escapeHtml(warning)}</small><p>${escapeHtml(connection.rationale)}</p></div>
-    <div class="evidence-connection-actions"><button data-action="start-ai-from-connection" data-connection-id="${escapeHtml(connection.id)}">Investigate...</button><button data-action="edit-evidence-connection" data-connection-id="${escapeHtml(connection.id)}">Edit rationale...</button><button class="danger-button" data-action="remove-evidence-connection" data-connection-id="${escapeHtml(connection.id)}">Remove</button></div>
-  </article>`;
-}
-
-function renderEvidenceConnectionModal() {
-  const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
-  const existing = state.evidenceGraph.relationships.find((item) => item.id === state.pendingConnectionId);
-  const sourceId = existing?.fromId ?? dataset?.id;
-  const source = state.evidenceGraph.entities.find((entity) => entity.id === sourceId);
-  const targets = state.evidenceGraph.entities.filter((entity) => (
-    entity.id !== sourceId && (existing ? entity.id === existing.toId : Boolean(entity.assetId))
-  ));
-  const selectedTargetIds = existing ? [existing.toId] : state.pendingConnectionTargetIds.length
-    ? state.pendingConnectionTargetIds
-    : [targets[0]?.id].filter(Boolean);
-  const compatibleTypes = compatibleRelationshipTypes(sourceId, selectedTargetIds);
-  const selectedTarget = selectedTargetIds[0] ?? "";
-  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Evidence connection">
-    <div class="modal compact-modal evidence-connection-modal">
-      <header class="modal-head">
-        <div><h2>${existing ? "Edit Evidence Connection" : "Add Evidence Connection"}</h2><p>Record the relationship as authored metadata; no relationship is inferred automatically.</p></div>
-        <button data-action="back-dataset-details" class="icon-button" aria-label="Close">x</button>
-      </header>
-      <div class="dataset-detail-fields">
-        <label class="modal-field"><span>From</span><input value="${escapeHtml(source?.label ?? sourceId ?? "")}" disabled /></label>
-        ${selectedTargetIds.length > 1 ? `<div class="modal-field"><span>To selected evidence (${selectedTargetIds.length})</span><div class="connection-target-chips">${selectedTargetIds.map((id) => `<span>${escapeHtml(state.evidenceGraph.entities.find((entity) => entity.id === id)?.label ?? id)}</span>`).join("")}</div></div>` : `<label class="modal-field"><span>To evidence</span><select id="connection-target" ${existing || state.pendingConnectionTargetIds.length ? "disabled" : ""}>${targets.map((entity) => `<option value="${escapeHtml(entity.id)}" ${entity.id === selectedTarget ? "selected" : ""}>${escapeHtml(entity.label)} · ${escapeHtml(titleCase(entity.kind))}</option>`).join("")}</select></label>`}
-        <label class="modal-field"><span>Relationship type</span><select id="connection-type">${compatibleTypes.map(([type, definition]) => `<option value="${type}" ${existing?.type === type ? "selected" : ""}>${escapeHtml(type)} · ${escapeHtml(definition.category)}</option>`).join("")}</select></label>
-        <label class="modal-field"><span>Assertion status</span><select id="connection-status">${["recorded", "proposed", "contested"].map((status) => `<option value="${status}" ${existing?.assertionStatus === status ? "selected" : ""}>${escapeHtml(titleCase(status))}</option>`).join("")}</select></label>
-        <label class="modal-field"><span>Authored rationale</span><textarea id="connection-rationale" rows="4" required placeholder="Why is this relationship scientifically relevant?">${escapeHtml(existing?.rationale ?? "")}</textarea></label>
-        <label class="modal-field"><span>Author</span><input id="connection-author" value="${escapeHtml(existing?.author ?? "project-user")}" /></label>
-        <p class="scientific-note">A dataset-to-dataset connection is visible from both datasets. Directional relationship types retain their authored direction.</p>
-      </div>
-      <footer class="modal-footer"><button data-action="back-dataset-details">Back</button><span>${compatibleTypes.length ? "One authored relationship will be applied to every selected item." : "The selected evidence types have no shared valid relationship."}</span><button data-action="save-evidence-connection" ${compatibleTypes.length ? "" : "disabled"}>${existing ? "Save Connection" : selectedTargetIds.length > 1 ? `Add ${selectedTargetIds.length} Connections` : "Add Connection"}</button></footer>
-    </div>
-  </section>`;
-}
-
-function compatibleRelationshipTypes(sourceId, targetIds) {
-  const source = state.evidenceGraph.entities.find((entity) => entity.id === sourceId);
-  const targets = targetIds.map((id) => state.evidenceGraph.entities.find((entity) => entity.id === id)).filter(Boolean);
-  return Object.entries(RELATIONSHIP_DEFINITIONS).filter(([, definition]) => source && targets.length && targets.every((target) => (
-    definition.pairs.some(([fromKind, toKind]) => fromKind === source.kind && toKind === target.kind)
-  )));
+function evidenceKindMark(kind) {
+  if (kind === "literature") return "L";
+  if (kind === "figure") return "F";
+  if (kind === "manuscript") return "M";
+  if (kind === "spectrum") return "S";
+  return "E";
 }
 
 function renderEvidenceImportModal() {
-  const literatureMode = state.evidenceImportMode === "literature";
   const imported = state.evidenceImportResultIds
     .map((id) => state.evidenceAssets.find((asset) => asset.id === id))
     .filter(Boolean);
-  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="${literatureMode ? "Import literature" : "Import evidence"}">
+  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Import evidence">
     <div class="modal evidence-import-modal">
       <header class="modal-head">
-        <div><h2>${literatureMode ? "Import Literature" : "Import External Evidence"}</h2><p>${literatureMode ? "Bring in a paper, supporting document, or published figure as a real file first." : "Bring project evidence in through one file-first workspace."}</p></div>
+        <div><h2>Import Evidence</h2><p>Bring data, figures, manuscripts, and literature into one file-first workspace.</p></div>
         <button data-action="close-evidence-import" class="icon-button" aria-label="Close">x</button>
       </header>
       <div class="evidence-import-layout">
         <div id="evidence-import-dropzone" class="evidence-import-dropzone" tabindex="0" role="button" aria-label="Drop or paste evidence files here">
           <div class="evidence-import-symbol" aria-hidden="true">+</div>
-          <strong>${literatureMode ? "Drop or paste literature files and figures" : "Drop or paste files and pictures"}</strong>
+          <strong>Drop or paste files and pictures</strong>
           <p>Drag files here, copy an image or file and press <kbd>⌘V</kbd>, or choose from Finder.</p>
           <label class="evidence-import-choose">Choose files from Finder<input id="evidence-asset-input" type="file" multiple accept=".csv,.tsv,.txt,.asc,.dat,.xy,.png,.jpg,.jpeg,.webp,.gif,.svg,.tif,.tiff,.pdf,.doc,.docx,.odt,.rtf,.tex,.md" /></label>
-          <small>${literatureMode ? "PDF, image, manuscript, text, or supporting files" : "Spectroscopy, characterization, images, PDF, documents, manuscripts, and text files"}</small>
+          <small>Spectroscopy, characterization, images, PDFs, manuscripts, and literature files</small>
         </div>
         <aside class="evidence-import-guidance">
-          <h3>${literatureMode ? "Literature import" : "Evidence import"}</h3>
+          <h3>One evidence library</h3>
           <ul>
             <li>The exact pasted or imported bytes are preserved.</li>
             <li>Files are automatically classified; you can refine Details later.</li>
-            <li>No scientific connection is created until you select and author one.</li>
-            ${literatureMode ? "<li>Publication metadata is optional after import; the file is never replaced by typed text.</li>" : ""}
+            <li>Literature metadata can be refined later in Details.</li>
           </ul>
         </aside>
       </div>
-      ${imported.length ? `<section class="evidence-import-results"><div><h3>Imported and selected</h3><span>${imported.length} item${imported.length === 1 ? "" : "s"}</span></div><div>${imported.map((asset) => `<button data-action="open-evidence-asset" data-asset-id="${escapeHtml(asset.id)}"><strong data-i18n-skip>${escapeHtml(asset.label)}</strong><small>${escapeHtml(titleCase(asset.kind))}</small></button>`).join("")}</div></section>` : ""}
-      <footer class="modal-footer"><button data-action="close-evidence-import">Back to Dataset Details</button><span>Imported items are selected for connection automatically.</span></footer>
+      ${imported.length ? `<section class="evidence-import-results"><div><h3>Imported</h3><span>${imported.length} item${imported.length === 1 ? "" : "s"}</span></div><div>${imported.map((asset) => `<button data-action="open-evidence-asset" data-asset-id="${escapeHtml(asset.id)}"><strong data-i18n-skip>${escapeHtml(asset.label)}</strong><small>${escapeHtml(titleCase(asset.kind))}</small></button>`).join("")}</div></section>` : ""}
+      <footer class="modal-footer"><button data-action="close-evidence-import">Back to Dataset Details</button><span>Imported bytes remain unchanged and are stored with the project.</span></footer>
     </div>
   </section>`;
 }
 
 function renderEvidenceAssetModal() {
-  const asset = state.pendingEvidenceAssetDraft
-    ?? state.evidenceAssets.find((item) => item.id === state.pendingEvidenceAssetId);
+  const asset = state.evidenceAssets.find((item) => item.id === state.pendingEvidenceAssetId);
   if (!asset) return "";
-  const isNew = Boolean(state.pendingEvidenceAssetDraft);
   return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="External evidence details">
     <div class="modal compact-modal evidence-asset-modal">
-      <header class="modal-head"><div><h2>${isNew ? "Add Literature Evidence" : "External Evidence Details"}</h2><p>Describe the evidence without changing its exact imported source.</p></div><button data-action="back-dataset-details" class="icon-button" aria-label="Close">x</button></header>
+      <header class="modal-head"><div><h2>External Evidence Details</h2><p>Describe the imported evidence without changing its exact source.</p></div><button data-action="back-dataset-details" class="icon-button" aria-label="Close">x</button></header>
       <div class="dataset-detail-fields">
         <label class="modal-field"><span>Label</span><input id="evidence-asset-label" value="${escapeHtml(asset.label)}" /></label>
         <div class="dataset-detail-grid">
@@ -1658,22 +1541,6 @@ function bindDom() {
     }
   });
   document.querySelector(".evidence-import-modal")?.addEventListener("paste", (event) => handleEvidencePaste(event).catch(showError));
-  document.querySelectorAll(".evidence-library-check").forEach((input) => {
-    input.addEventListener("change", (event) => {
-      const ids = new Set(state.evidenceSelectionIds);
-      if (event.target.checked) ids.add(event.target.value);
-      else ids.delete(event.target.value);
-      state.evidenceSelectionIds = [...ids];
-      render();
-    });
-  });
-  document.getElementById("connection-target")?.addEventListener("change", (event) => {
-    const sourceId = state.evidenceGraph.relationships.find((item) => item.id === state.pendingConnectionId)?.fromId
-      ?? state.pendingDatasetId;
-    const entries = compatibleRelationshipTypes(sourceId, [event.target.value]);
-    const select = document.getElementById("connection-type");
-    if (select) select.innerHTML = entries.map(([type, definition]) => `<option value="${type}">${escapeHtml(type)} · ${escapeHtml(definition.category)}</option>`).join("");
-  });
   document.getElementById("origin-output-mode")?.addEventListener("change", (event) => {
     state.origin.outputMode = event.target.value === "sheets-only"
       ? "sheets-only"
@@ -1696,10 +1563,9 @@ function bindDom() {
   document.querySelectorAll('input[name="ai-scope"]').forEach((input) => {
     input.addEventListener("change", (event) => {
       syncAiDraftFromDom();
-      state.aiInvestigation.draft.scope.kind = event.target.value;
-      if (event.target.value === "connected-evidence") {
-        state.aiInvestigation.draft.scope.datasetIds = activeDataset() ? [activeDataset().id] : [];
-      }
+      const kind = event.target.value;
+      state.aiInvestigation.draft.scope.kind = kind;
+      state.aiInvestigation.draft.scope.datasetIds = aiScopePresetDatasetIds(kind);
       state.aiInvestigation.preview = null;
       render();
     });
@@ -1721,13 +1587,14 @@ function bindDom() {
       const ids = new Set(state.aiInvestigation.draft.scope.datasetIds ?? []);
       if (event.target.checked) ids.add(event.currentTarget.dataset.datasetId);
       else ids.delete(event.currentTarget.dataset.datasetId);
+      state.aiInvestigation.draft.scope.kind = "selected-datasets";
       state.aiInvestigation.draft.scope.datasetIds = state.datasets.filter((dataset) => ids.has(dataset.id)).map((dataset) => dataset.id);
       state.aiInvestigation.preview = null;
+      render();
     });
   });
   [
-    "ai-include-notes", "ai-include-filenames", "ai-include-metadata", "ai-redact-paths",
-    "ai-redact-operators", "ai-redact-computers", "ai-include-raw", "ai-include-matrices",
+    "ai-include-notes", "ai-include-raw", "ai-include-matrices",
   ].forEach((id) => document.getElementById(id)?.addEventListener("change", syncAiDraftFromDom));
 
   // Shared selection-modal listeners (compare and merge)
@@ -2463,10 +2330,7 @@ async function handleAction(event) {
       state.signatureEditor = null;
       state.pendingDeleteId = null;
       state.pendingDatasetId = null;
-      state.pendingConnectionId = null;
-      state.pendingConnectionTargetIds = [];
       state.pendingEvidenceAssetId = null;
-      state.pendingEvidenceAssetDraft = null;
       render();
     } else if (action === "run-fit") {
       await runFitActive();
@@ -2570,25 +2434,13 @@ async function handleAction(event) {
       render();
     } else if (action === "edit-dataset") {
       state.pendingDatasetId = event.currentTarget.dataset.datasetId;
-      state.evidenceSelectionIds = [];
       state.datasetMenu = null;
       state.modal = "edit-dataset";
       render();
     } else if (action === "save-dataset-details") {
       saveDatasetDetails();
-    } else if (action === "toggle-evidence-view") {
+    } else if (action === "open-evidence-import") {
       persistDatasetDetails({ close: false, notify: false });
-      state.evidenceViewMode = state.evidenceViewMode === "map" ? "list" : "map";
-      render();
-    } else if (action === "connect-selected-evidence") {
-      persistDatasetDetails({ close: false, notify: false });
-      state.pendingConnectionId = null;
-      state.pendingConnectionTargetIds = state.evidenceSelectionIds.slice();
-      state.modal = "edit-connection";
-      render();
-    } else if (action === "open-evidence-import" || action === "open-literature-import") {
-      persistDatasetDetails({ close: false, notify: false });
-      state.evidenceImportMode = action === "open-literature-import" ? "literature" : "evidence";
       state.evidenceImportResultIds = [];
       state.modal = "evidence-import";
       render();
@@ -2601,58 +2453,12 @@ async function handleAction(event) {
     } else if (action === "open-evidence-asset") {
       event.preventDefault();
       state.pendingEvidenceAssetId = event.currentTarget.dataset.assetId;
-      state.pendingEvidenceAssetDraft = null;
       state.modal = "edit-evidence-asset";
-      render();
-    } else if (action === "open-evidence-entity") {
-      const entity = state.evidenceGraph.entities.find((item) => item.id === event.currentTarget.dataset.entityId);
-      if (entity?.datasetId) {
-        state.pendingDatasetId = entity.datasetId;
-        state.evidenceSelectionIds = [];
-        state.modal = "edit-dataset";
-      } else if (entity?.assetId) {
-        state.pendingEvidenceAssetId = entity.assetId;
-        state.pendingEvidenceAssetDraft = null;
-        state.modal = "edit-evidence-asset";
-      }
       render();
     } else if (action === "save-evidence-asset") {
       saveEvidenceAsset();
-    } else if (action === "start-ai-from-connection") {
-      const connection = state.evidenceGraph.relationships.find((item) => item.id === event.currentTarget.dataset.connectionId);
-      if (!connection) throw new Error("The selected evidence connection is unavailable.");
-      const datasetIds = [connection.fromId, connection.toId].filter((id) => state.datasets.some((dataset) => dataset.id === id));
-      openAiInvestigation();
-      state.aiInvestigation.draft.scope = { kind: "connected-evidence", datasetIds };
-      const techniques = new Set(datasetIds.map((id) => state.datasets.find((dataset) => dataset.id === id)?.evidenceMetadata?.technique?.id).filter(Boolean));
-      state.aiInvestigation.draft.goal = techniques.size > 1 ? "multimodal-consistency" : "custom";
-      state.aiInvestigation.draft.context = `Investigate the reviewed connection ${connection.id} (${connection.type}). User rationale: ${connection.rationale}`;
-      render();
-    } else if (action === "add-evidence-connection") {
-      persistDatasetDetails({ close: false, notify: false });
-      state.pendingConnectionId = null;
-      state.pendingConnectionTargetIds = [];
-      state.modal = "edit-connection";
-      render();
-    } else if (action === "edit-evidence-connection") {
-      persistDatasetDetails({ close: false, notify: false });
-      state.pendingConnectionId = event.currentTarget.dataset.connectionId;
-      state.pendingConnectionTargetIds = [];
-      state.modal = "edit-connection";
-      render();
-    } else if (action === "remove-evidence-connection") {
-      const connectionId = event.currentTarget.dataset.connectionId;
-      state.evidenceGraph = removeEvidenceConnection(state.evidenceGraph, connectionId, state.datasets);
-      markDirty();
-      state.notice = { kind: "success", title: "Connection removed", message: "The relationship was removed; neither dataset nor source data was deleted." };
-      render();
-    } else if (action === "save-evidence-connection") {
-      saveEvidenceConnection();
     } else if (action === "back-dataset-details") {
-      state.pendingConnectionId = null;
-      state.pendingConnectionTargetIds = [];
       state.pendingEvidenceAssetId = null;
-      state.pendingEvidenceAssetDraft = null;
       state.modal = "edit-dataset";
       render();
     } else if (action === "move-dataset") {
@@ -2751,7 +2557,6 @@ function normalizePastedEvidenceFile(file, index) {
 
 async function importEvidenceFileList(files) {
   if (!files.length) return;
-  const importMode = state.evidenceImportMode;
   await runJob(`Importing ${files.length} evidence item${files.length === 1 ? "" : "s"}`, "import-evidence", async () => {
     const imported = [];
     for (let index = 0; index < files.length; index += 1) {
@@ -2759,7 +2564,7 @@ async function importEvidenceFileList(files) {
       render();
       await nextFrame();
       imported.push(await createEvidenceAssetFromFile(files[index], {
-        ...evidenceImportOptions(files[index].name, files[index].type, importMode),
+        ...evidenceImportOptions(files[index].name, files[index].type),
         createdAt: new Date().toISOString(),
       }));
     }
@@ -2768,11 +2573,10 @@ async function importEvidenceFileList(files) {
       createdAt: new Date().toISOString(),
       evidenceAssets: state.evidenceAssets,
     });
-    state.evidenceSelectionIds = [...new Set([...state.evidenceSelectionIds, ...imported.map((asset) => asset.id)])];
     state.evidenceImportResultIds = [...new Set([...state.evidenceImportResultIds, ...imported.map((asset) => asset.id)])];
     markDirty();
     return imported;
-  }, `${files.length} external evidence item${files.length === 1 ? " was" : "s were"} imported with exact source bytes and selected for connection.`);
+  }, `${files.length} external evidence item${files.length === 1 ? " was" : "s were"} imported with exact source bytes.`);
 }
 
 async function importDataFiles(event, targetFolderId = null) {
@@ -2856,17 +2660,53 @@ async function openProjectFile(event) {
   const file = event.target.files?.[0];
   if (!file) return;
   await runJob("Opening project", "open-project", async () => {
-    const project = isProjectArchive(file)
-      ? hydrateProjectArchive(readProjectArchive(await file.arrayBuffer()), Parser)
-      : JSON.parse(await file.text());
-    loadProject(project);
-    state.project = {
-      dirty: false,
-      lastSavedAt: project.savedAt ?? null,
-      path: file.name,
-    };
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    loadProjectBytes(bytes, file.name, file.name);
   }, `${file.name} opened with treated datasets and analysis state.`);
   event.target.value = "";
+}
+
+function loadProjectBytes(bytes, fileName, projectPath = fileName) {
+  const project = /\.sflproj$/i.test(fileName)
+    ? hydrateProjectArchive(readProjectArchive(bytes), Parser)
+    : JSON.parse(new TextDecoder().decode(bytes));
+  loadProject(project);
+  state.project = {
+    dirty: false,
+    lastSavedAt: project.savedAt ?? null,
+    path: projectPath,
+  };
+}
+
+async function openProjectPath(projectPath) {
+  if (!projectPath || !isTauriRuntime()) return false;
+  if (state.project.dirty && state.datasets.length) {
+    state.notice = {
+      kind: "warning",
+      title: "Current project has unsaved changes",
+      message: "Save the current project before opening a .sflproj from Finder or File Explorer.",
+    };
+    render();
+    return false;
+  }
+  const fileName = String(projectPath).split(/[\\/]/).at(-1) || "SpecFlowLab project.sflproj";
+  return runJob("Opening project", "open-project", async () => {
+    const payload = await invoke("read_project_file", { path: projectPath });
+    const bytes = payload instanceof Uint8Array
+      ? payload
+      : payload instanceof ArrayBuffer
+        ? new Uint8Array(payload)
+        : Uint8Array.from(payload);
+    loadProjectBytes(bytes, fileName, projectPath);
+    return true;
+  }, `${fileName} opened directly with treated datasets and analysis state.`);
+}
+
+async function openPendingDesktopProject() {
+  if (!isTauriRuntime()) return;
+  const paths = await invoke("take_pending_project_paths");
+  if (!paths?.length) return;
+  await openProjectPath(paths.at(-1));
 }
 
 function readRangeControls() {
@@ -3089,17 +2929,7 @@ function resetLifetimeEditor() {
 }
 
 function resetFittingInputs() {
-  Object.assign(state.fitting, {
-    components: 3,
-    irfFwhm: 0.25,
-    preZeroModel: "smooth",
-    coherentArtifactOrder: 1,
-    weighting: "robust-noise",
-    optimizerStarts: 3,
-    maximumIterations: 55,
-    rangeSensitivity: true,
-  });
-  resetLifetimeEditor();
+  restoreDefaultFittingInputs(state.fitting, activeDataset()?.id ?? null);
   markDirty();
 }
 
@@ -3143,7 +2973,7 @@ function serializeProject() {
       derivedDatasetPolicy: "merged datasets are materialized derivatives with immutable parent sources, explicit lineage, time resampling, retained wavelength segments, and no hidden smoothing",
       folderPolicy: "one-level project dataset folders with per-folder range and treatment state",
       archivePolicy: "original source data and treated Float64 matrix stored once; derived fit matrices reconstructed on open",
-      externalEvidencePolicy: "external evidence retains exact imported bytes; previews and graph relationships are derived, typed, and authored",
+      externalEvidencePolicy: "external evidence retains exact imported bytes; previews and editable metadata are derived and non-authoritative",
     },
     state: {
       activeIndex: state.activeIndex,
@@ -3191,10 +3021,7 @@ function loadProject(project) {
   state.zoomSelectionKey = null;
   closeContextMenus();
   state.datasetClipboard = null;
-  state.evidenceSelectionIds = [];
-  state.pendingConnectionTargetIds = [];
   state.pendingEvidenceAssetId = null;
-  state.pendingEvidenceAssetDraft = null;
 }
 
 function reviveDataset(dataset) {
@@ -3292,10 +3119,6 @@ function reviveMatrix(matrix) {
   return (matrix ?? []).map(reviveArray);
 }
 
-function isProjectArchive(file) {
-  return file.name.toLowerCase().endsWith(".sflproj");
-}
-
 function projectArchiveDefaultName() {
   const currentName = state.project.path?.split(/[\\/]/).at(-1) ?? "SpecFlowLab_project";
   const stem = currentName
@@ -3350,7 +3173,7 @@ function openAiInvestigation() {
       question: "",
       context: "",
       desiredOutput: "",
-      scope: { ...scope, datasetIds: state.datasets.map((dataset) => dataset.id) },
+      scope,
       evidenceProfile: "diagnostic",
       userTimesPs: [],
       userWavelengthsNm: [],
@@ -3394,13 +3217,8 @@ function syncAiDraftFromDom() {
   draft.captureIds = Array.from(document.querySelectorAll(".ai-capture-check:checked"), (input) => input.dataset.captureId);
   const bindings = [
     ["ai-include-notes", draft.include, "sampleNotes"],
-    ["ai-include-filenames", draft.include, "sourceFileNames"],
-    ["ai-include-metadata", draft.include, "instrumentMetadata"],
     ["ai-include-raw", draft.include, "rawSources"],
     ["ai-include-matrices", draft.include, "fullTreatedMatrices"],
-    ["ai-redact-paths", draft.privacy, "redactAbsolutePaths"],
-    ["ai-redact-operators", draft.privacy, "redactOperatorNames"],
-    ["ai-redact-computers", draft.privacy, "redactComputerNames"],
   ];
   bindings.forEach(([id, target, key]) => {
     const input = document.getElementById(id);
@@ -5378,6 +5196,13 @@ function folderDatasets(folderId) {
   return state.datasets.filter((dataset) => dataset.folderId === folderId);
 }
 
+function aiScopePresetDatasetIds(kind) {
+  if (kind === "current-folder") return folderDatasets(activeFolder()?.id).map((dataset) => dataset.id);
+  if (kind === "project") return state.datasets.map((dataset) => dataset.id);
+  return state.aiInvestigation.draft?.scope?.datasetIds?.slice()
+    ?? (activeDataset() ? [activeDataset().id] : []);
+}
+
 function compareDatasets() {
   return state.datasets.filter((dataset) => state.compare.selectedIds.includes(dataset.id));
 }
@@ -5387,14 +5212,9 @@ function ensureCompareStyles() {
 }
 
 function ensureDatasetStyle(dataset, index) {
-  state.compare.styles[dataset.id] ??= {
-    color: componentColor(index),
-    label: datasetDisplayName(dataset),
-    lineStyle: ["solid", "dashed", "dotted"][index % 3],
-    lineWidth: 2.2,
-  };
+  state.compare.styles[dataset.id] ??= comparisonStyleDefaults(index, datasetDisplayName(dataset));
   state.compare.styles[dataset.id].label ||= datasetDisplayName(dataset);
-  state.compare.styles[dataset.id].lineStyle ||= ["solid", "dashed", "dotted"][index % 3];
+  state.compare.styles[dataset.id].lineStyle ||= "solid";
   state.compare.styles[dataset.id].lineWidth = clamp(Number(state.compare.styles[dataset.id].lineWidth) || 2.2, 0.5, 6);
   return state.compare.styles[dataset.id];
 }
@@ -5538,44 +5358,12 @@ function persistDatasetDetails({ close = true, notify = true } = {}) {
     state.pendingDatasetId = null;
     state.modal = null;
   }
-  if (notify) state.notice = { kind: "success", title: "Dataset details saved", message: "Scientific metadata, conditions, notes, imported evidence, and graph records are included in the project." };
+  if (notify) state.notice = { kind: "success", title: "Dataset details saved", message: "Scientific metadata, conditions, notes, and imported evidence are included in the project." };
   if (close || notify) render();
 }
 
-function saveEvidenceConnection() {
-  const existing = state.evidenceGraph.relationships.find((item) => item.id === state.pendingConnectionId);
-  const dataset = state.datasets.find((item) => item.id === state.pendingDatasetId);
-  if (!dataset) throw new Error("The connection source dataset is unavailable.");
-  const fromId = existing?.fromId ?? dataset.id;
-  const targetIds = existing ? [existing.toId] : state.pendingConnectionTargetIds.length
-    ? state.pendingConnectionTargetIds
-    : [document.getElementById("connection-target")?.value].filter(Boolean);
-  if (!targetIds.length) throw new Error("Choose evidence to connect.");
-  const now = new Date().toISOString();
-  targetIds.forEach((toId) => {
-    state.evidenceGraph = upsertEvidenceConnection(state.evidenceGraph, {
-      id: existing?.id,
-      fromId,
-      toId,
-      type: document.getElementById("connection-type")?.value,
-      assertionStatus: document.getElementById("connection-status")?.value,
-      rationale: document.getElementById("connection-rationale")?.value,
-      author: document.getElementById("connection-author")?.value,
-      createdAt: existing?.createdAt,
-    }, state.datasets, { createdAt: now, evidenceAssets: state.evidenceAssets });
-  });
-  state.pendingConnectionId = null;
-  state.pendingConnectionTargetIds = [];
-  state.evidenceSelectionIds = [];
-  state.modal = "edit-dataset";
-  markDirty();
-  state.notice = { kind: "success", title: "Evidence connection saved", message: "The authored relationship and rationale are now part of the project evidence graph." };
-  render();
-}
-
 function saveEvidenceAsset() {
-  const current = state.pendingEvidenceAssetDraft
-    ?? state.evidenceAssets.find((item) => item.id === state.pendingEvidenceAssetId);
+  const current = state.evidenceAssets.find((item) => item.id === state.pendingEvidenceAssetId);
   if (!current) throw new Error("The external evidence item is unavailable.");
   const label = document.getElementById("evidence-asset-label")?.value.trim();
   if (!label) throw new Error("Evidence label is required.");
@@ -5604,12 +5392,10 @@ function saveEvidenceAsset() {
     createdAt: new Date().toISOString(),
     evidenceAssets: state.evidenceAssets,
   });
-  state.evidenceSelectionIds = [...new Set([...state.evidenceSelectionIds, updated.id])];
-  state.pendingEvidenceAssetDraft = null;
   state.pendingEvidenceAssetId = null;
   state.modal = "edit-dataset";
   markDirty();
-  state.notice = { kind: "success", title: "Evidence saved", message: "The external evidence record is selected and ready to connect." };
+  state.notice = { kind: "success", title: "Evidence saved", message: "The external evidence record is stored in the project evidence library." };
   render();
 }
 
@@ -5996,7 +5782,18 @@ window.addEventListener("resize", () => {
 
 render();
 
-// Load saved Origin installation on startup
+// Register desktop project-open delivery before consuming the startup queue.
+(async () => {
+  if (!isTauriRuntime()) return;
+  try {
+    await listen("project-open-requested", () => openPendingDesktopProject().catch(showError));
+    await openPendingDesktopProject();
+  } catch (error) {
+    showError(error);
+  }
+})();
+
+// Load saved Origin installation on startup.
 (async () => {
   if (!isTauriRuntime()) return;
   try {

@@ -3,10 +3,8 @@ export const AI_INVESTIGATION_SPEC_SCHEMA = "specflowlab.ai_investigation_spec.v
 
 export const AI_EVIDENCE_PROFILES = Object.freeze(["brief", "diagnostic", "full"]);
 export const AI_SCOPE_KINDS = Object.freeze([
-  "active-dataset",
   "current-folder",
   "selected-datasets",
-  "connected-evidence",
   "project",
 ]);
 
@@ -36,7 +34,7 @@ export function validateAiInvestigationSpec(spec) {
   if (!String(spec?.question ?? "").trim()) errors.push("Enter a scientific question before exporting.");
   if (!AI_SCOPE_KINDS.includes(spec?.scope?.kind)) errors.push("Choose a valid dataset scope.");
   if (!AI_EVIDENCE_PROFILES.includes(spec?.evidenceProfile)) errors.push("Choose Brief, Diagnostic, or Full evidence.");
-  if (["selected-datasets", "connected-evidence"].includes(spec?.scope?.kind) && !(spec.scope.datasetIds?.length || spec.scope.focusEntityIds?.length)) {
+  if (spec?.scope?.kind === "selected-datasets" && !spec.scope.datasetIds?.length) {
     errors.push("Select at least one dataset for the selected-datasets scope.");
   }
   return errors;

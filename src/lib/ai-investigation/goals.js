@@ -32,18 +32,6 @@ export const AI_INVESTIGATION_GOALS = Object.freeze({
     requiresMergeContext: true,
     scaffold: "Does the merged result preserve consistent VIS/NIR evidence without one segment dominating?",
   },
-  "species-assignment": {
-    label: "Evaluate a species or state assignment",
-    minimumDatasets: 1,
-    requiresSpeciesHypothesis: true,
-    scaffold: "Which observations support or challenge the proposed species/state assignment, and which alternatives remain?",
-  },
-  "multimodal-consistency": {
-    label: "Compare connected multimodal evidence",
-    minimumDatasets: 2,
-    requiresMultipleTechniques: true,
-    scaffold: "Where do the explicitly connected measurements agree, conflict, or remain incomparable?",
-  },
   "experiment-planning": {
     label: "Suggest discriminating experiments",
     minimumDatasets: 1,
@@ -69,18 +57,7 @@ export function validateAiGoal(goalId, datasets, project = {}) {
   if (goal.requiresMergeContext && !hasMergeContext(datasets)) {
     errors.push(`${goal.label} requires a merged dataset or at least two possible parent datasets.`);
   }
-  if (goal.requiresSpeciesHypothesis && !hasSpeciesHypothesis(datasets, project.evidenceGraph)) {
-    errors.push(`${goal.label} requires at least one recorded species/state hypothesis.`);
-  }
-  if (goal.requiresMultipleTechniques && new Set(datasets.map((dataset) => dataset.evidenceMetadata?.technique?.id).filter(Boolean)).size < 2) {
-    errors.push(`${goal.label} requires at least two connected techniques.`);
-  }
   return errors;
-}
-
-function hasSpeciesHypothesis(datasets, graph) {
-  if ((graph?.entities ?? []).some((entity) => entity.kind === "species-hypothesis")) return true;
-  return datasets.some((dataset) => dataset.evidenceMetadata?.speciesStateIds?.length);
 }
 
 function hasMergeContext(datasets) {

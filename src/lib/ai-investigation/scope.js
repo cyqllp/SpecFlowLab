@@ -1,28 +1,26 @@
-import { resolveConnectedEvidenceScope } from "../evidence-graph/traversal.js";
-
 export function defaultAiScope(project) {
-  if ((project.datasets?.length ?? 0) <= 1) return { kind: "active-dataset", datasetIds: [] };
-  return { kind: "current-folder", datasetIds: [] };
+  const datasets = project.datasets ?? [];
+  const active = datasets.find((dataset) => dataset.id === project.activeDatasetId)
+    ?? datasets[project.activeIndex ?? 0];
+  const folderIds = active
+    ? datasets.filter((dataset) => dataset.folderId === active.folderId).map((dataset) => dataset.id)
+    : [];
+  return { kind: "current-folder", datasetIds: folderIds };
 }
 
 export function resolveAiScope(project, scope) {
   const datasets = project.datasets ?? [];
+  const selected = new Set(scope.datasetIds ?? []);
   let resolved;
-  if (scope.kind === "active-dataset") {
-    const active = datasets.find((dataset) => dataset.id === project.activeDatasetId)
-      ?? datasets[project.activeIndex ?? 0];
-    resolved = active ? [active] : [];
+  if (scope.kind === "selected-datasets") {
+    resolved = datasets.filter((dataset) => selected.has(dataset.id));
   } else if (scope.kind === "current-folder") {
     const active = datasets.find((dataset) => dataset.id === project.activeDatasetId)
       ?? datasets[project.activeIndex ?? 0];
-    resolved = active ? datasets.filter((dataset) => dataset.folderId === active.folderId) : [];
-  } else if (scope.kind === "selected-datasets") {
-    const selected = new Set(scope.datasetIds ?? []);
-    resolved = datasets.filter((dataset) => selected.has(dataset.id));
-  } else if (scope.kind === "connected-evidence") {
-    resolved = resolveConnectedEvidenceScope(project, scope).datasets;
+    const folderDatasets = active ? datasets.filter((dataset) => dataset.folderId === active.folderId) : [];
+    resolved = selected.size ? folderDatasets.filter((dataset) => selected.has(dataset.id)) : folderDatasets;
   } else if (scope.kind === "project") {
-    resolved = datasets.slice();
+    resolved = selected.size ? datasets.filter((dataset) => selected.has(dataset.id)) : datasets.slice();
   } else {
     resolved = [];
   }

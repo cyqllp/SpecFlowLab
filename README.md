@@ -28,6 +28,9 @@ Release downloads include `SHA256SUMS.txt` for file-integrity checks.
 
 ### 2. Create your first project
 
+Double-click an existing `.sflproj` to open it directly, or start SpecFlowLab
+and choose **Open Project**.
+
 1. Create a project and import one or more CSV or UFS measurements.
 2. Select a dataset and open **Edit Dataset Details** to set its name, sample
    information, role, and useful experimental conditions.
@@ -52,7 +55,7 @@ signatures appear as dashed lines at their peak wavelengths. Double-click or
 right-click a label to rename it, change its type or position, add a note, or
 delete it. You can also click an EAS curve to add your own signature.
 
-### 4. Add related evidence
+### 4. Add supporting evidence
 
 Open **Edit Dataset Details**, then use the Evidence Import panel to drag,
 paste, or select:
@@ -62,10 +65,9 @@ paste, or select:
 - figures and images;
 - manuscripts, papers, and supporting documents.
 
-Select imported items to connect them to a dataset. The relation map shows
-only the links you create. Connected absorption or PL data can help you review
-whether a negative fsTA feature is more consistent with GSB or SE, but the app
-keeps this as a suggestion for the user to confirm.
+All imported items stay together in one project evidence library. Absorption or
+PL data can help you review whether a negative fsTA feature is more consistent
+with GSB or SE, but the app keeps this as a suggestion for the user to confirm.
 
 ### 5. Save or share the work
 
@@ -89,8 +91,8 @@ keeps this as a suggestion for the user to confirm.
   preview in one workspace.
 - Suggest spectral peaks, edit labels directly on EAS plots, and keep
   user-authored ESA, GSB, SE, and other assignments separate from the fit.
-- Import external evidence and organize explicit dataset relationships in a
-  focused relation map.
+- Import spectra, characterization files, figures, manuscripts, and literature
+  into one project evidence library.
 - Save portable projects and prepare selected, cited evidence for AI review or
   OriginPro.
 - Switch the interface between English and Simplified Chinese.

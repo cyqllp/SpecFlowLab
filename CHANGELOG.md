@@ -4,6 +4,27 @@ All notable changes to SpecFlowLab are recorded here.
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-09-08
+
+- **Direct project opening** — macOS and Windows bundles now register
+  `.sflproj`, accept project paths from the operating system, and load the
+  selected project after launch instead of stopping at an empty window.
+- **Unified imported evidence** — literature, manuscripts, figures, spectra,
+  and characterization files share one drag, paste, and file-picker workflow.
+  The relation-map interface and connected-evidence investigation scope are
+  removed; imported evidence remains available to AI packages without inferred
+  sample relationships.
+- **Focused AI investigation builder** — scope is reduced to Selected,
+  Current folder, and Entire project. Each acts as a preset while the dataset
+  checklist remains editable. Privacy redaction is automatic, leaving only
+  analysis-relevant evidence controls visible.
+- **Predictable fitting reset** — Reset to 3 Components restores the complete
+  automatic three-component input preset while preserving the most recent fit
+  result and current EAS/DAS view.
+- **Consistent comparisons and calmer theme** — comparison datasets start with
+  the Origin-classic black, red, green, blue, cyan sequence and solid lines;
+  the interface uses a quieter slate, warm-white, and restrained teal palette.
+
 ## [1.0.8] - 2026-09-07
 
 - **Origin-classic component colors** — EAS and DAS curves now begin black,

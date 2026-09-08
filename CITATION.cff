@@ -2,8 +2,8 @@ cff-version: 1.2.0
 title: "SpecFlowLab"
 message: "If SpecFlowLab helps your work, please cite the versioned release."
 type: software
-version: 1.0.8
-date-released: 2026-09-07
+version: 1.0.9
+date-released: 2026-09-08
 doi: 10.5281/zenodo.21839697
 repository-code: "https://github.com/cyqllp/SpecFlowLab"
 url: "https://doi.org/10.5281/zenodo.21839697"

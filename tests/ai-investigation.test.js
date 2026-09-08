@@ -6,19 +6,24 @@ import { strFromU8, unzipSync } from "fflate";
 import { selectRepresentativeTimeIndices, selectRepresentativeWavelengthIndices } from "../src/lib/ai-investigation/coordinate-selection.js";
 import { validateAiGoal } from "../src/lib/ai-investigation/goals.js";
 import { createAiInvestigationPackage, inspectAiInvestigation } from "../src/lib/ai-investigation/package.js";
-import { AI_INVESTIGATION_SCHEMA, AI_INVESTIGATION_SPEC_SCHEMA, assertSafeAiPath } from "../src/lib/ai-investigation/schema.js";
+import { AI_INVESTIGATION_SCHEMA, AI_INVESTIGATION_SPEC_SCHEMA, AI_SCOPE_KINDS, assertSafeAiPath } from "../src/lib/ai-investigation/schema.js";
 import { defaultAiScope, resolveAiScope } from "../src/lib/ai-investigation/scope.js";
-import { upsertEvidenceConnection } from "../src/lib/evidence-graph/connections.js";
 import { migrateEvidenceGraph } from "../src/lib/evidence-graph/schema.js";
 import { upsertFeatureAssignment } from "../src/lib/evidence-graph/entities.js";
 import { createChartCapture } from "../src/lib/chart-capture/schema.js";
 
 test("AI investigation defaults multi-dataset work to the current folder", () => {
   const project = buildProject();
-  assert.deepEqual(defaultAiScope(project), { kind: "current-folder", datasetIds: [] });
+  assert.deepEqual(defaultAiScope(project), { kind: "current-folder", datasetIds: ["dataset-a", "dataset-b"] });
   assert.deepEqual(resolveAiScope(project, { kind: "current-folder" }).map((item) => item.id), ["dataset-a", "dataset-b"]);
   project.datasets.push({ ...project.datasets[1], id: "dataset-c", folderId: "folder-2" });
   assert.deepEqual(resolveAiScope(project, { kind: "current-folder" }).map((item) => item.id), ["dataset-a", "dataset-b"]);
+  assert.deepEqual(resolveAiScope(project, { kind: "current-folder", datasetIds: ["dataset-b"] }).map((item) => item.id), ["dataset-b"]);
+  assert.deepEqual(resolveAiScope(project, { kind: "project", datasetIds: ["dataset-a", "dataset-c"] }).map((item) => item.id), ["dataset-a", "dataset-c"]);
+});
+
+test("AI investigation exposes only the three editable dataset scope presets", () => {
+  assert.deepEqual(AI_SCOPE_KINDS, ["current-folder", "selected-datasets", "project"]);
 });
 
 test("goal eligibility is explicit and never triggers an automatic fit", () => {
@@ -154,48 +159,7 @@ test("inspection rejects empty questions, ineligible goals, and unsafe package p
   assert.throws(() => assertSafeAiPath("C:/escape.json"), /unsafe/i);
 });
 
-test("connected .sflai scope exports only explicit one-hop evidence with reviewable conditions", async () => {
-  const project = buildProject();
-  project.datasets.push({
-    ...structuredClone(project.datasets[1]),
-    id: "dataset-c",
-    projectLabel: "Unrelated lookalike",
-    source: { ...project.datasets[1].source, fileName: "Condition A.csv" },
-  });
-  project.datasets[0].evidenceMetadata = evidenceMetadata("fsta", "primary", { solvent: "toluene", temperature: "298 K" });
-  project.datasets[1].evidenceMetadata = evidenceMetadata("absorption", "reference", { solvent: "toluene", temperature: null });
-  project.datasets[2].evidenceMetadata = evidenceMetadata("absorption", "reference", { solvent: "toluene", temperature: "298 K" });
-  project.evidenceGraph = upsertEvidenceConnection(
-    migrateEvidenceGraph(null, project.datasets),
-    {
-      fromId: "dataset-a",
-      toId: "dataset-b",
-      type: "same-sample",
-      rationale: "Explicitly recorded aliquots",
-    },
-    project.datasets,
-    { createdAt: "2026-08-12T08:00:00.000Z" },
-  );
-  const result = await createAiInvestigationPackage(project, buildSpec({
-    goal: "multimodal-consistency",
-    scope: { kind: "connected-evidence", datasetIds: ["dataset-a"] },
-  }), {
-    investigationId: "investigation-connected",
-    createdAt: "2026-08-12T08:00:00.000Z",
-  });
-  const entries = unzipSync(result.bytes);
-  const manifest = JSON.parse(strFromU8(entries["manifest.json"]));
-
-  assert.deepEqual(manifest.scope.datasetIds, ["dataset-a", "dataset-b"]);
-  assert.equal(manifest.scope.datasetIds.includes("dataset-c"), false);
-  assert.equal(manifest.connections[0].type, "same-sample");
-  assert.equal(manifest.connectedInclusions["dataset-b"][0].connectionId, manifest.connections[0].id);
-  assert.ok(entries["connections/evidence-graph.json"]);
-  assert.match(strFromU8(entries["connections/comparability-table.csv"]), /"temperature","unknown"/i);
-  assert.match(strFromU8(entries["prompt.md"]), new RegExp(manifest.connections[0].id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-});
-
-test("connected external evidence exports metadata and only embeds reviewed exact sources after opt-in", async () => {
+test("imported evidence exports metadata and embeds permitted exact sources only after opt-in", async () => {
   const project = buildProject();
   const sourceBytes = Uint8Array.from([137, 80, 78, 71, 1, 2, 3]);
   project.evidenceAssets = [{
@@ -212,17 +176,9 @@ test("connected external evidence exports metadata and only embeds reviewed exac
     nativePreview: null,
     provenance: [{ action: "import", exactSourcePreserved: true }],
   }];
-  project.evidenceGraph = migrateEvidenceGraph(null, project.datasets, { evidenceAssets: project.evidenceAssets });
-  project.evidenceGraph = upsertEvidenceConnection(project.evidenceGraph, {
-    fromId: "dataset-a",
-    toId: "asset:figure",
-    type: "documented-by",
-    rationale: "User selected the published panel as qualitative context",
-  }, project.datasets, { evidenceAssets: project.evidenceAssets, createdAt: "2026-08-13T00:00:00.000Z" });
-
   const result = await createAiInvestigationPackage(project, buildSpec({
     goal: "custom",
-    scope: { kind: "connected-evidence", datasetIds: ["dataset-a"] },
+    scope: { kind: "selected-datasets", datasetIds: ["dataset-a"] },
     evidenceProfile: "full",
     include: { rawSources: true },
   }), { investigationId: "investigation-external", createdAt: "2026-08-13T00:00:00.000Z" });

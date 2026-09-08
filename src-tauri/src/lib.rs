@@ -4,17 +4,80 @@
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 #[cfg(target_os = "windows")]
 use std::{
     os::windows::process::CommandExt,
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 mod labtalk;
 mod origin;
+
+const MAX_PROJECT_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Default)]
+struct PendingProjectPaths(Mutex<Vec<String>>);
+
+fn is_specflowlab_project_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sflproj"))
+}
+
+fn project_paths_from_args<I>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    args.into_iter()
+        .map(PathBuf::from)
+        .filter(|path| is_specflowlab_project_path(path))
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn queue_project_paths(app: &tauri::AppHandle, paths: impl IntoIterator<Item = String>) {
+    let pending = app.state::<PendingProjectPaths>();
+    let Ok(mut queue) = pending.0.lock() else {
+        return;
+    };
+    for path in paths {
+        if !queue.contains(&path) {
+            queue.push(path);
+        }
+    }
+}
+
+#[tauri::command]
+fn take_pending_project_paths(pending: tauri::State<'_, PendingProjectPaths>) -> Vec<String> {
+    pending
+        .0
+        .lock()
+        .map(|mut queue| queue.drain(..).collect())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn read_project_file(path: String) -> Result<tauri::ipc::Response, String> {
+    let path = PathBuf::from(path);
+    if !is_specflowlab_project_path(&path) {
+        return Err("Only .sflproj files can be opened from the desktop.".to_string());
+    }
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a project file.", path.display()));
+    }
+    if metadata.len() > MAX_PROJECT_FILE_BYTES {
+        return Err("The project archive exceeds the 512 MB compressed-size limit.".to_string());
+    }
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
 
 #[cfg(target_os = "windows")]
 const ORIGIN_BRIDGE_SOURCE: &str = include_str!("../../integrations/origin/specflowlab_origin.py");
@@ -1676,9 +1739,17 @@ fn collect_origin_executables(directory: &Path, depth: usize, candidates: &mut V
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .manage(PendingProjectPaths::default())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let paths = project_paths_from_args(std::env::args_os().skip(1));
+            queue_project_paths(app.handle(), paths);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            take_pending_project_paths,
+            read_project_file,
             save_text_file,
             save_binary_file,
             create_origin_project,
@@ -1687,8 +1758,24 @@ pub fn run() {
             set_origin_installation,
             select_origin_installation
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running SpecFlowLab");
+        .build(tauri::generate_context!())
+        .expect("error while building SpecFlowLab");
+
+    app.run(|app_handle, event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = event {
+            let paths = urls.into_iter().filter_map(|url| {
+                let path = url.to_file_path().ok()?;
+                is_specflowlab_project_path(&path).then(|| path.to_string_lossy().into_owned())
+            });
+            queue_project_paths(app_handle, paths);
+            let _ = app_handle.emit("project-open-requested", ());
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1696,9 +1783,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::detect_bitness;
     use super::{
-        is_origin_executable_candidate, origin_candidate_score, origin_com_launcher_source,
-        origin_launcher_source, origin_startup_labtalk, powershell_single_quoted,
-        safe_default_name, OriginJobStatus,
+        is_origin_executable_candidate, is_specflowlab_project_path, origin_candidate_score,
+        origin_com_launcher_source, origin_launcher_source, origin_startup_labtalk,
+        powershell_single_quoted, project_paths_from_args, safe_default_name, OriginJobStatus,
     };
     use std::path::Path;
 
@@ -1717,6 +1804,20 @@ mod tests {
         assert!(!is_origin_executable_candidate(Path::new(
             "OriginUpdate.exe"
         )));
+    }
+
+    #[test]
+    fn accepts_only_specflowlab_project_launch_paths() {
+        assert!(is_specflowlab_project_path(Path::new("Experiment.sflproj")));
+        assert!(is_specflowlab_project_path(Path::new("Experiment.SFLPROJ")));
+        assert!(!is_specflowlab_project_path(Path::new("Experiment.json")));
+
+        let paths = project_paths_from_args([
+            "--verbose".into(),
+            "/tmp/Experiment.sflproj".into(),
+            "/tmp/readme.md".into(),
+        ]);
+        assert_eq!(paths, vec!["/tmp/Experiment.sflproj"]);
     }
 
     #[cfg(target_os = "windows")]
