@@ -766,7 +766,7 @@ input[type="checkbox"] {
   height: 100dvh;
   padding: var(--ws-pad);
   overflow: hidden;
-  container-type: inline-size;
+  container: workspace / inline-size;
 }
 
 
@@ -3294,12 +3294,10 @@ canvas.zoom-selecting {
 /* ── Container Queries ─────────────────────────────────────────────────── */
 
 /* When the workspace is too narrow for two columns, stack vertically */
-@container (max-width: 840px) {
+@container workspace (max-width: 840px) {
   .analysis-layout {
     grid-template-columns: 1fr;
   }
-
-  .workspace { overflow: auto; }
 
   .primary-column,
   .secondary-column {
@@ -3559,4 +3557,21 @@ canvas.capture-target {
 html[lang="zh-CN"] .section-heading h2 {
   letter-spacing: 0;
   text-transform: none;
+}
+
+/* Stage 1: the workspace owns vertical scrolling at all window sizes. */
+.workspace { overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.analysis-layout { flex: 0 0 auto; min-height: 720px; }
+.spectrum-panel canvas, .kinetics-panel canvas { min-height: 220px; }
+.navigation-toggle { display: none; }
+.unsaved-dialog { border: 1px solid var(--line); border-radius: 8px; padding: 22px; max-width: min(420px, 90vw); }
+.unsaved-dialog::backdrop { background: #0008; }
+.unsaved-actions { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 1200px) {
+  #app { display: block; }
+  .navigation-toggle { display: block; position: fixed; z-index: 30; top: 8px; left: 8px; }
+  .side { display: none; position: fixed; z-index: 29; top: 0; left: 0; width: min(360px, 90vw); height: 100dvh; padding-top: 48px; overflow-y: auto; border-right: 1px solid var(--line); box-shadow: 0 5px 24px #0004; }
+  .side.navigation-open { display: flex; }
+  .folder-rail-panel { min-height: 280px; }
+  .workspace { height: 100dvh; padding-top: 48px; }
 }

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { protectUnsavedWork } from "./lib/unsaved-work.js";
 import "./lib/parser-core.js";
 import {
   createProjectArchive,
@@ -72,6 +74,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
 const APP_VERSION = "1.0.9";
+let navigationOpen = false;
 const plotGeometry = new WeakMap();
 const signatureHitRegions = new WeakMap();
 
@@ -185,7 +188,8 @@ function render() {
   const dataset = activeDataset();
   const busy = Boolean(state.job);
   app.innerHTML = `
-    <aside class="side">
+    <button class="navigation-toggle" type="button" aria-expanded="${navigationOpen}" aria-controls="project-navigation">${navigationOpen ? "Close navigation" : "Project navigation"}</button>
+    <aside id="project-navigation" class="side ${navigationOpen ? "navigation-open" : ""}">
       <section class="brand">
         <div class="mark"><img src="${appIconUrl}" alt="" /></div>
         <div class="brand-copy">
@@ -286,6 +290,7 @@ function render() {
     ${state.signatureEditor ? renderSignatureEditorPopover() : ""}
     ${renderCaptureStation()}
   `;
+  document.querySelector(".navigation-toggle")?.addEventListener("click", () => { navigationOpen = !navigationOpen; render(); });
   localizeDom(app, state.locale);
   bindDom();
   const datasetTree = document.querySelector(".dataset-tree-scroll");
@@ -2656,14 +2661,44 @@ async function importDataFiles(event, targetFolderId = null) {
   state.importTargetFolderId = null;
 }
 
+let replacementInProgress = false;
+async function confirmProjectReplacement() {
+  if (replacementInProgress) return false;
+  replacementInProgress = true;
+  try {
+    return await protectUnsavedWork({
+      dirty: state.project.dirty,
+      decide: chooseUnsavedAction,
+      save: saveProject,
+    });
+  } finally {
+    replacementInProgress = false;
+  }
+}
+
+function chooseUnsavedAction() {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "unsaved-dialog";
+    dialog.innerHTML = `<form method="dialog"><h2>Unsaved changes</h2><p>Save the current project before continuing?</p><div class="unsaved-actions"><button value="cancel">Cancel</button><button value="discard">Discard</button><button value="save">Save</button></div></form>`;
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => { const result = dialog.returnValue; dialog.remove(); resolve(result || "cancel"); }, { once: true });
+    dialog.showModal();
+  });
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!isTauriRuntime() && state.project.dirty) { event.preventDefault(); event.returnValue = ""; }
+});
+
 async function openProjectFile(event) {
   const file = event.target.files?.[0];
-  if (!file) return;
+  event.target.value = "";
+  if (!file || !(await confirmProjectReplacement())) return;
   await runJob("Opening project", "open-project", async () => {
     const bytes = new Uint8Array(await file.arrayBuffer());
     loadProjectBytes(bytes, file.name, file.name);
   }, `${file.name} opened with treated datasets and analysis state.`);
-  event.target.value = "";
 }
 
 function loadProjectBytes(bytes, fileName, projectPath = fileName) {
@@ -2680,15 +2715,7 @@ function loadProjectBytes(bytes, fileName, projectPath = fileName) {
 
 async function openProjectPath(projectPath) {
   if (!projectPath || !isTauriRuntime()) return false;
-  if (state.project.dirty && state.datasets.length) {
-    state.notice = {
-      kind: "warning",
-      title: "Current project has unsaved changes",
-      message: "Save the current project before opening a .sflproj from Finder or File Explorer.",
-    };
-    render();
-    return false;
-  }
+  if (!(await confirmProjectReplacement())) return false;
   const fileName = String(projectPath).split(/[\\/]/).at(-1) || "SpecFlowLab project.sflproj";
   return runJob("Opening project", "open-project", async () => {
     const payload = await invoke("read_project_file", { path: projectPath });
@@ -3129,7 +3156,7 @@ function projectArchiveDefaultName() {
 }
 
 async function saveProject() {
-  await runJob("Saving project", "save", async () => {
+  return await runJob("Saving project", "save", async () => {
     const archive = createProjectArchive(serializeProject());
     const defaultName = projectArchiveDefaultName();
     const path = await saveBinaryWithDialog(archive, defaultName, "project", "application/zip");
@@ -5786,6 +5813,10 @@ render();
 (async () => {
   if (!isTauriRuntime()) return;
   try {
+    await getCurrentWindow().onCloseRequested(async (event) => {
+      event.preventDefault();
+      if (await confirmProjectReplacement()) await getCurrentWindow().destroy();
+    });
     await listen("project-open-requested", () => openPendingDesktopProject().catch(showError));
     await openPendingDesktopProject();
   } catch (error) {

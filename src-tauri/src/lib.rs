@@ -171,6 +171,100 @@ fn extension_filter(file_type: &str) -> (&'static str, &'static [&'static str]) 
     }
 }
 
+// Stage in the same directory; the previous destination remains recoverable as .bak.
+fn safe_write_file(path: &Path, bytes: &[u8], validate_project: bool) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or("Invalid destination")?
+        .to_string_lossy();
+    let temp = parent.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let backup = parent.join(format!("{name}.bak"));
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("Cannot create temporary file: {e}"))?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| format!("Cannot write temporary file: {e}"))?;
+        drop(file);
+        if validate_project {
+            let file = std::fs::File::open(&temp).map_err(|e| e.to_string())?;
+            let mut archive =
+                zip::ZipArchive::new(file).map_err(|e| format!("Invalid project archive: {e}"))?;
+            if archive.by_name("manifest.json").is_err() {
+                return Err("Project archive has no manifest.json".into());
+            }
+            for index in 0..archive.len() {
+                let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+                let mut sink = [0u8; 65536];
+                while entry
+                    .read(&mut sink)
+                    .map_err(|e| format!("Invalid archive entry: {e}"))?
+                    != 0
+                {}
+            }
+        }
+        if path.exists() {
+            // Copy to a staged backup, so a failed copy does not damage an older backup.
+            let backup_temp = parent.join(format!(
+                ".{name}.{}.{}.bak.tmp",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let copy_result = (|| -> Result<(), String> {
+                let mut source = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                let mut target = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&backup_temp)
+                    .map_err(|e| e.to_string())?;
+                std::io::copy(&mut source, &mut target)
+                    .and_then(|_| target.sync_all())
+                    .map_err(|e| e.to_string())?;
+                drop(target);
+                #[cfg(target_os = "windows")]
+                if backup.exists() {
+                    std::fs::remove_file(&backup).map_err(|e| e.to_string())?;
+                }
+                std::fs::rename(&backup_temp, &backup).map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            let _ = std::fs::remove_file(&backup_temp);
+            copy_result.map_err(|e| format!("Cannot preserve previous version: {e}"))?;
+        }
+        #[cfg(target_os = "windows")]
+        if path.exists() {
+            // The backup is complete before removal; restore it if installation fails.
+            std::fs::remove_file(path).map_err(|e| format!("Cannot replace destination: {e}"))?;
+            if let Err(error) = std::fs::rename(&temp, path) {
+                let _ = std::fs::copy(&backup, path);
+                return Err(format!(
+                    "Cannot install new file; previous version is at {}: {error}",
+                    backup.display()
+                ));
+            }
+            return Ok(());
+        }
+        std::fs::rename(&temp, path).map_err(|e| format!("Cannot replace destination: {e}"))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result
+}
+
 #[tauri::command]
 async fn save_text_file(
     app: tauri::AppHandle,
@@ -192,8 +286,7 @@ async fn save_text_file(
     let path = selected.into_path().map_err(|error| {
         format!("The selected destination is not a writable file path: {error}")
     })?;
-    std::fs::write(&path, contents.as_bytes())
-        .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+    safe_write_file(&path, contents.as_bytes(), false)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -218,8 +311,7 @@ async fn save_binary_file(
     let path = selected.into_path().map_err(|error| {
         format!("The selected destination is not a writable file path: {error}")
     })?;
-    std::fs::write(&path, bytes)
-        .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+    safe_write_file(&path, &bytes, file_type == "project")?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -2017,5 +2109,58 @@ mod tests {
             .as_deref()
             .is_some_and(|traceback| traceback.starts_with("Traceback")));
         assert_eq!(status.warnings, vec!["sheet skipped"]);
+    }
+}
+
+#[cfg(test)]
+mod safe_save_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn fixture() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "specflow-safe-save-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+    fn archive() -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+    #[test]
+    fn safe_save_keeps_previous_version_and_rejects_corrupt_archive() {
+        let dir = fixture();
+        let path = dir.join("work.sflproj");
+        let previous = archive();
+        std::fs::write(&path, &previous).unwrap();
+        assert!(safe_write_file(&path, b"incomplete", true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        let next = archive();
+        safe_write_file(&path, &next, true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), next);
+        assert_eq!(
+            std::fs::read(dir.join("work.sflproj.bak")).unwrap(),
+            previous
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn safe_save_failure_leaves_destination_untouched() {
+        let dir = fixture();
+        let path = dir.join("work.sflproj");
+        std::fs::write(&path, b"previous").unwrap();
+        // A directory at the backup path forces replacement to fail after staging.
+        std::fs::create_dir(dir.join("work.sflproj.bak")).unwrap();
+        assert!(safe_write_file(&path, b"next", false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

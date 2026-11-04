@@ -43,3 +43,7 @@ releases/**/*.exe
 # Duplicate local bridge copy
 integrations/origin/*_副本.py
 .xwin-cache/
+
+# Browser test output
+test-results/
+playwright-report/
