@@ -4569,7 +4569,7 @@ function paintFeatureTimeMap(canvas, compressed, options = {}) {
     left: Math.max(178, Math.round(width * 0.21)),
     right: Math.max(230, Math.round(width * 0.975)),
     top: 16,
-    bottom: height - 50,
+    bottom: height - 60,
   };
   const timeExtent = [compressed.timeAxis[0], compressed.timeAxis.at(-1)];
   const timeTransform = makeTimeTransform(timeExtent);
@@ -4731,7 +4731,7 @@ function drawLinePlot(canvas, series, xMode, options = {}) {
     left,
     right,
     top,
-    bottom: height - Math.max(50, Math.round(height * 0.088)),
+    bottom: height - Math.max(60, options.bottomPadding ?? 0, Math.round(height * 0.088)),
   };
   const plotKey = options.plotKey ?? canvas.dataset.plotKey;
   const zoom = state.plotZooms[plotKey];
@@ -4999,7 +4999,8 @@ function heatmapPlotArea(width, height) {
   const left = Math.max(64, Math.round(width * 0.072));
   const right = Math.max(left + 80, Math.round(width * 0.976));
   const top = Math.max(12, Math.round(height * 0.028));
-  const bottom = Math.max(top + 80, Math.round(height * 0.906));
+  // Keep room for tick labels and the axis title even on compact canvases.
+  const bottom = Math.min(Math.round(height * 0.906), height - 56);
   return { left, right, top, bottom };
 }
 

@@ -137,3 +137,29 @@ test('completed fit keeps diagnostic scroll through mode switches and rerenders'
   await page.setViewportSize({ width: 970, height: 640 });
   expect(await diagnostics.evaluate(el => el.scrollTop)).toBe(before);
 });
+
+for (const [width, height] of [[960, 640], [1480, 920]]) {
+  test(`Chinese heatmap axis title fits canvas at ${width}x${height}`, async ({ page }) => {
+    await page.addInitScript(() => {
+      const original = CanvasRenderingContext2D.prototype.fillText;
+      window.axisTitleBounds = [];
+      CanvasRenderingContext2D.prototype.fillText = function (text, x, y, ...rest) {
+        if (this.canvas.id === 'heatmap' && text === '波长 (nm)') {
+          const metrics = this.measureText(text);
+          const transform = this.getTransform();
+          window.axisTitleBounds.push({ bottom: (y + metrics.actualBoundingBoxDescent) * transform.d, height: this.canvas.height });
+        }
+        return original.call(this, text, x, y, ...rest);
+      };
+    });
+    await page.setViewportSize({ width, height });
+    await page.goto('/');
+    if (width <= 1200) await page.locator('.navigation-toggle').click();
+    await page.locator('#language-select').selectOption('zh-CN');
+    await page.locator('#file-input').setInputFiles(sample);
+    await expect(page.locator('#heatmap')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => window.axisTitleBounds.length)).toBeGreaterThan(0);
+    const bounds = await page.evaluate(() => window.axisTitleBounds.at(-1));
+    expect(bounds.bottom).toBeLessThanOrEqual(bounds.height - 2);
+  });
+}
