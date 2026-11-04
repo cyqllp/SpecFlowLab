@@ -3575,3 +3575,30 @@ html[lang="zh-CN"] .section-heading h2 {
   .folder-rail-panel { min-height: 280px; }
   .workspace { height: 100dvh; padding-top: 48px; }
 }
+
+/* Stage 2: the workspace and fit diagnostics each own their scrolling. */
+:root { --fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px; }
+.workspace { overflow-y: auto; overflow-x: hidden; }
+.analysis-layout { min-height: 780px; }
+.treatment-layout { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.treatment-actions { display: flex; flex-wrap: wrap; grid-column: 1 / -1; gap: 5px; }
+.treatment-actions button { flex: 1 1 110px; overflow: visible; white-space: normal; font-size: 12px; }
+.treatment-actions .reset-command:first-of-type { margin-left: 8px; }
+.info-metrics small, .fit-numerical-model > p { font-size: 11px; }
+.lifetime-editor-head button { font-size: 12px; white-space: normal; }
+.fit-lifetime-disclosure { flex: 0 0 auto; margin-bottom: 8px; }
+.fit-lifetime-disclosure > summary { cursor: pointer; font-weight: 700; }
+.fit-lifetime-disclosure .lifetime-editor { margin: 6px 0 0; }
+.fit-job-status { align-self: center; font-size: 12px; }
+.fit-diagnostic-grid { overflow-y: scroll; overscroll-behavior: contain; grid-auto-rows: minmax(250px, auto); }
+.fit-component-preview { grid-row: 1; min-height: 300px; }
+.fit-summary-diagnostic { grid-row: 2; }
+.fit-residual { grid-row: 2; }
+.fit-component-preview canvas { min-height: 220px; }
+.capture-station { bottom: auto; top: 6px; right: 8px; z-index: 19; }
+.capture-station-button { width: 36px; height: 36px; font-size: 16px; }
+.capture-tray-panel { max-height: calc(100dvh - 55px); }
+@media (max-width: 1200px) {
+  .fit-component-preview, .fit-summary-diagnostic, .fit-residual { grid-row: auto; grid-column: 1; }
+  .fit-component-preview { order: -1; }
+}

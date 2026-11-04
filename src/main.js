@@ -180,7 +180,26 @@ const state = {
   notice: null,
 };
 
+let modalReturnFocus = null;
+function elementPath(element) {
+  if (!element || !app.contains(element)) return null;
+  const parts = [];
+  while (element && element !== app) {
+    const index = Array.from(element.parentElement.children).indexOf(element) + 1;
+    parts.unshift(`${element.tagName.toLowerCase()}:nth-child(${index})`);
+    element = element.parentElement;
+  }
+  return `:scope > ${parts.join(" > ")}`;
+}
 function render() {
+  const oldModal = app.querySelector('.modal-shell');
+  const active = document.activeElement;
+  const focusPath = elementPath(active);
+  const focusedValue = active && /^(INPUT|TEXTAREA)$/.test(active.tagName) && !['checkbox', 'radio', 'file'].includes(active.type) ? active.value : null;
+  const selection = focusedValue !== null && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
+  const scrolls = Array.from(app.querySelectorAll('*')).filter((el) => el.scrollTop || el.scrollLeft).map((el) => [elementPath(el), el.scrollTop, el.scrollLeft]);
+  const openDetails = Array.from(app.querySelectorAll('details[open]')).map(elementPath);
+  if (!oldModal && state.modal && focusPath) modalReturnFocus = focusPath;
   pruneMergeSelection();
   refreshChartCaptureStaleness();
   const datasetTreeScrollTop =
@@ -295,6 +314,17 @@ function render() {
   bindDom();
   const datasetTree = document.querySelector(".dataset-tree-scroll");
   if (datasetTree) datasetTree.scrollTop = datasetTreeScrollTop;
+  scrolls.forEach(([path, top, left]) => { const el = path && app.querySelector(path); if (el) { el.scrollTop = top; el.scrollLeft = left; } });
+  openDetails.forEach((path) => { const el = path && app.querySelector(path); if (el?.tagName === 'DETAILS') el.open = true; });
+  const newModal = app.querySelector('.modal-shell');
+  let focusTarget = focusPath && app.querySelector(focusPath);
+  if (oldModal && !newModal && modalReturnFocus) { focusTarget = app.querySelector(modalReturnFocus); modalReturnFocus = null; }
+  if (newModal && !oldModal) focusTarget = newModal.querySelector('button:not([disabled]), input:not([disabled]), select:not([disabled])');
+  if (focusTarget && (!newModal || newModal.contains(focusTarget))) {
+    if (focusedValue !== null && focusTarget.tagName === active.tagName && focusTarget.type === active.type) focusTarget.value = focusedValue;
+    focusTarget.focus({ preventScroll: true });
+    if (selection && focusTarget.setSelectionRange) focusTarget.setSelectionRange(...selection);
+  }
   positionContextMenus();
   scheduleFullPaint();
 }
@@ -1114,9 +1144,10 @@ function renderFitModal() {
           <label><span>IRF FWHM (ps)</span><input id="fit-irf" type="number" min="0" step="0.01" value="${state.fitting.irfFwhm}" /></label>
           <button data-action="run-fit" ${state.job ? "disabled" : ""}>${state.job?.kind === "fit" ? "Processing..." : "Fit Active Dataset"}</button>
           <button data-action="batch-fit" ${state.job || !unfittedCount ? "disabled" : ""} title="${escapeHtml(folderContext)}">${state.job?.kind === "batch-fit" ? "Processing..." : unfittedCount ? `Batch Global Fitting (${unfittedCount})` : "Current Folder Fitted"}</button>
+          <span class="fit-job-status" role="status" aria-live="polite">${state.job ? escapeHtml(`${state.job.label} ${state.job.detail ?? ""}`) : "Ready"}</span>
           ${limitedCount ? `<span class="irf-exclusion-note">${limitedCount} IRF-limited component${limitedCount === 1 ? "" : "s"} excluded from all interpreted outputs</span>` : ""}
         </section>
-        ${renderLifetimeControls()}
+        ${dataset?.fit ? `<details class="fit-lifetime-disclosure"><summary>Lifetime starts and constraints</summary>${renderLifetimeControls()}</details>` : renderLifetimeControls()}
         ${dataset?.fit ? renderFitDiagnostics(dataset) : "<section class=\"empty compact\"><h3>No fit yet</h3><p>Run a fit to create lifetime, DAS, EAS-preview, overlay, and residual results.</p></section>"}
       </div>
     </section>
@@ -2681,6 +2712,7 @@ function chooseUnsavedAction() {
     const dialog = document.createElement("dialog");
     dialog.className = "unsaved-dialog";
     dialog.innerHTML = `<form method="dialog"><h2>Unsaved changes</h2><p>Save the current project before continuing?</p><div class="unsaved-actions"><button value="cancel">Cancel</button><button value="discard">Discard</button><button value="save">Save</button></div></form>`;
+    localizeDom(dialog, state.locale);
     document.body.append(dialog);
     dialog.addEventListener("close", () => { const result = dialog.returnValue; dialog.remove(); resolve(result || "cancel"); }, { once: true });
     dialog.showModal();
@@ -5790,6 +5822,25 @@ document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
 document.addEventListener("keydown", (event) => {
+  const modal = app.querySelector('.expanded-shell') || app.querySelector('.modal-shell');
+  if (modal && event.key === 'Tab') {
+    const selector = 'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex]:not([tabindex="-1"])';
+    const popover = app.querySelector('.signature-editor-popover');
+    const controls = [...modal.querySelectorAll(selector), ...(popover?.querySelectorAll(selector) ?? [])].filter((el) => el.getClientRects().length);
+    if (!controls.length) { event.preventDefault(); return; }
+    const index = controls.indexOf(document.activeElement);
+    if (event.shiftKey && index <= 0) { event.preventDefault(); controls.at(-1).focus(); }
+    else if (!event.shiftKey && (index === -1 || index === controls.length - 1)) { event.preventDefault(); controls[0].focus(); }
+  }
+  if (modal && event.key === 'Escape' && state.signatureEditor) {
+    event.preventDefault();
+    app.querySelector('.signature-editor-popover [data-action="close-signature-editor"]')?.click();
+    return;
+  }
+  if (modal && event.key === 'Escape' && !state.captureMode) {
+    const close = modal.querySelector('[data-action="close-expanded-plot"], [data-action="close-modal"]');
+    if (close) { event.preventDefault(); close.click(); return; }
+  }
   if (event.key !== "Escape" || !state.captureMode) return;
   state.captureMode = false;
   render();

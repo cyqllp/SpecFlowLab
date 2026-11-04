@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { buildUfsFixture } from '../ufs-fixture.js';
 
 const sample = { name: 'fixture.ufs', mimeType: 'application/octet-stream', buffer: Buffer.from(buildUfsFixture()) };
-for (const [width, height] of [[960,640], [1024,768], [1220,760], [1366,768]]) {
+for (const [width, height] of [[960,640], [1024,768], [1220,760], [1366,768], [1480,920]]) {
   test(`import and plot interaction at ${width}x${height}`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     await page.goto('/');
@@ -55,4 +55,85 @@ test('save and discard decisions allow opening a valid project', async ({ page }
   await page.locator('#project-input').setInputFiles(savedProject);
   await page.locator('.unsaved-dialog button[value="discard"]').click();
   await expect(page.locator('.project-panel .state-label')).toContainText('Saved');
+});
+
+for (const [width, height] of [[960,640], [1024,768], [1220,760], [1366,768], [1480,920]]) {
+  test(`fit dialog controls and focus at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto('/');
+    if (width <= 1200) await page.locator('.navigation-toggle').click();
+    await page.locator('#file-input').setInputFiles(sample);
+    if (width <= 1200) await page.locator('.navigation-toggle').click();
+    const trigger = page.locator('[data-action="global-fit"]');
+    await trigger.click();
+    const dialog = page.locator('.fit-modal');
+    await expect(dialog.locator('#fit-components')).toBeVisible();
+    await expect(dialog.locator('#fit-irf')).toBeVisible();
+    await expect(dialog.locator('[data-action="run-fit"]')).toBeInViewport();
+    await expect(dialog.locator('[role="status"]')).toBeInViewport();
+    const label = dialog.locator('[data-action="reset-fit-parameters"]');
+    expect(await label.evaluate(el => el.scrollWidth <= el.clientWidth)).toBeTruthy();
+    await dialog.locator('#fit-irf').focus();
+    await page.setViewportSize({ width: width + 10, height });
+    await expect(dialog.locator('#fit-irf')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+}
+
+test('navigation rerender preserves workspace scroll and focused field', async ({ page }) => {
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.goto('/');
+  await page.locator('.navigation-toggle').click();
+  await page.locator('#file-input').setInputFiles(sample);
+  await page.locator('.navigation-toggle').click();
+  const workspace = page.locator('.workspace');
+  await workspace.evaluate(el => { el.scrollTop = 250; });
+  const before = await workspace.evaluate(el => el.scrollTop);
+  await page.locator('.navigation-toggle').click();
+  expect(await workspace.evaluate(el => el.scrollTop)).toBe(before);
+  await expect(page.locator('.navigation-toggle')).toBeFocused();
+});
+
+test('Chinese unsaved guard is localized and keyboard accessible', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#language-select').selectOption('zh-CN');
+  await page.locator('#file-input').setInputFiles(sample);
+  await expect(page.locator('#heatmap')).toBeVisible();
+  await page.locator('#project-input').setInputFiles({ name: 'other.json', mimeType: 'application/json', buffer: Buffer.from('{}') });
+  const dialog = page.locator('.unsaved-dialog');
+  await expect(dialog).toContainText('未保存的更改');
+  await expect(dialog.locator('[value="discard"]')).toHaveText('不保存');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('#heatmap')).toBeVisible();
+});
+
+test('completed fit keeps diagnostic scroll through mode switches and rerenders', async ({ page }) => {
+  const spectralAxis = Array.from({ length: 25 }, (_, i) => 450 + i * 10);
+  const timeAxis = Array.from({ length: 45 }, (_, i) => i * 0.4);
+  const matrix = spectralAxis.map(w => timeAxis.map(t => Math.exp(-(((w - 540) / 45) ** 2)) * Math.exp(-t / 2) + .4 * Math.exp(-(((w - 630) / 40) ** 2)) * Math.exp(-t / 9)));
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.goto('/');
+  await page.locator('.navigation-toggle').click();
+  await page.locator('#file-input').setInputFiles({ name: 'fit.ufs', mimeType: 'application/octet-stream', buffer: Buffer.from(buildUfsFixture({ spectralAxis, timeAxis, matrix })) });
+  await expect(page.locator('#heatmap')).toBeVisible();
+  await page.locator('.navigation-toggle').click();
+  await page.locator('[data-action="global-fit"]').click();
+  await page.locator('#fit-components').selectOption('2');
+  await page.locator('.fit-numerical-model summary').click();
+  await page.locator('#fit-range-sensitivity').uncheck();
+  await page.locator('[data-action="run-fit"]').click();
+  const diagnostics = page.locator('.fit-diagnostic-grid');
+  await expect(diagnostics).toBeVisible({ timeout: 30000 });
+  await expect(page.locator('.fit-lifetime-disclosure')).not.toHaveAttribute('open', '');
+  await page.locator('.fit-modal [data-action="result-mode"][data-mode="DAS"]').focus();
+  await diagnostics.evaluate(el => { el.scrollTop = 150; });
+  const before = await diagnostics.evaluate(el => el.scrollTop);
+  await page.keyboard.press('Enter');
+  expect(await diagnostics.evaluate(el => el.scrollTop)).toBe(before);
+  await expect(page.locator('.fit-modal [data-action="result-mode"][data-mode="DAS"]')).toHaveClass(/active/);
+  await page.setViewportSize({ width: 970, height: 640 });
+  expect(await diagnostics.evaluate(el => el.scrollTop)).toBe(before);
 });

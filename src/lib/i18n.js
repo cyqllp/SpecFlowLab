@@ -7,6 +7,14 @@ const STORAGE_KEY = "specflowlab.locale";
 
 const ZH_CN = Object.freeze({
   Language: "语言",
+  "Project navigation": "项目导航",
+  "Close navigation": "关闭导航",
+  "Unsaved changes": "未保存的更改",
+  "Save the current project before continuing?": "继续之前保存当前项目吗？",
+  Discard: "不保存",
+  Save: "保存",
+  Ready: "就绪",
+  "Lifetime starts and constraints": "寿命初值与约束",
   Manual: "使用手册",
   About: "关于",
   Close: "关闭",
