@@ -350,16 +350,17 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
 
   function applyChirpCorrection(analysis, options = {}) {
     const next = cloneAnalysisDataset(analysis);
-    const model = options.model ?? fitPolynomialDispersion(next);
+    const model = options.model ?? fitPolynomialDispersion(next, options);
     if (!model) {
       next.provenance.push({ label: "Chirp", status: "skipped" });
       return next;
     }
-    const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime : 0;
+    const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime
+      : Number.isFinite(options.approximateZeroTimePs) ? options.approximateZeroTimePs : 0;
 
     let shifts = next.spectralAxis.map((wavelength) => evaluateDispersion(model, wavelength) + (model.referenceTime - targetReferenceTime));
     let correctedMatrix = applyTimeShifts(next, shifts);
-    const residualTimeZero = estimateDatasetTimeZero({
+    const residualTimeZero = Number.isFinite(options.approximateZeroTimePs) ? Number.NaN : estimateDatasetTimeZero({
       timeAxis: next.timeAxis,
       spectralAxis: next.spectralAxis,
       matrix: correctedMatrix,
@@ -394,10 +395,11 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
     });
   }
 
-  function applySharedChirpCorrection(analyses) {
-    const models = analyses.map((analysis) => fitPolynomialDispersion(analysis));
-    const targetReferenceTime = 0;
+  function applySharedChirpCorrection(analyses, options = {}) {
+    const models = analyses.map((analysis) => fitPolynomialDispersion(analysis, options));
+    const targetReferenceTime = Number.isFinite(options.approximateZeroTimePs) ? options.approximateZeroTimePs : 0;
     return analyses.map((analysis, index) => applyChirpCorrection(analysis, {
+      ...options,
       model: models[index],
       targetReferenceTime,
     }));
@@ -1394,8 +1396,13 @@ ${JSON.stringify(payload, null, 2)}
     return weightedMedian(anchors.map((anchor) => anchor.time), anchors.map((anchor) => anchor.weight));
   }
 
-  function fitPolynomialDispersion(analysis) {
-    const earlyIndexes = findEarlySignalIndexes(analysis.timeAxis);
+  function fitPolynomialDispersion(analysis, options = {}) {
+    const hint = options.approximateZeroTimePs;
+    const earlyIndexes = Number.isFinite(hint)
+      ? analysis.timeAxis.map((time, index) => ({ time, index }))
+        .filter(({ time }) => Number.isFinite(time) && Math.abs(time - hint) <= 0.5)
+        .map(({ index }) => index)
+      : findEarlySignalIndexes(analysis.timeAxis);
     if (earlyIndexes.length < 4 || analysis.spectralAxis.length < 8) return null;
 
     const anchors = analysis.matrix.map((row, rowIndex) => {

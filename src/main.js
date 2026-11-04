@@ -633,6 +633,7 @@ function enlargeButton(plotKey) {
 }
 
 function renderModal() {
+  if (state.modal === "chirp-hint") return renderChirpHintModal();
   if (state.modal === "ai-investigation") return renderAiInvestigationModal();
   if (state.modal === "merge") return renderMergeWorkspace();
   if (state.modal === "manual") return renderManualModal();
@@ -648,6 +649,17 @@ function renderModal() {
   if (state.modal === "evidence-import") return renderEvidenceImportModal();
   if (state.modal === "move-dataset") return renderMoveDatasetModal();
   return "";
+}
+
+function renderChirpHintModal() {
+  const analysis = activeDataset()?.analysis;
+  const value = analysis?.timeAxis[state.selectedTimeIndex] ?? 0;
+  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Chirp correction">
+    <div class="modal compact-modal">
+      <header class="modal-head"><div><h2>Chirp correction</h2></div><button data-action="close-modal" class="icon-button" aria-label="Close">x</button></header>
+      <label class="modal-field"><span>Approximate zero time (ps)</span><input id="chirp-zero-time" type="number" step="any" required value="${value}" /></label>
+      <footer class="modal-footer"><button data-action="close-modal">Cancel</button><button data-action="confirm-chirp">Confirm</button></footer>
+    </div></section>`;
 }
 
 function renderAiInvestigationModal() {
@@ -2280,7 +2292,15 @@ async function handleAction(event) {
     } else if (action === "baseline") {
       await toggleActiveTreatment("baseline");
     } else if (action === "chirp") {
-      await toggleActiveTreatment("chirp");
+      if (!activeDataset() || !activeFolder()) return;
+      if (treatmentEnabled(activeDataset(), activeFolder(), "chirp")) await toggleActiveTreatment("chirp");
+      else { state.modal = "chirp-hint"; render(); }
+    } else if (action === "confirm-chirp") {
+      const input = document.getElementById("chirp-zero-time");
+      if (!input || input.value.trim() === "" || !Number.isFinite(input.valueAsNumber)) { input?.reportValidity(); return; }
+      const hint = input.valueAsNumber;
+      state.modal = null;
+      await toggleActiveTreatment("chirp", hint);
     } else if (action === "reset-dataset") {
       const dataset = activeDataset();
       const folder = activeFolder();
@@ -2821,7 +2841,7 @@ function rebuildTreatments(folderId, affectedDatasetIds = null) {
     .map((dataset, index) => treatmentEnabled(dataset, folder, "chirp") ? index : -1)
     .filter((index) => index >= 0);
   if (chirpIndexes.length) {
-    const corrected = Parser.applySharedChirpCorrection(chirpIndexes.map((index) => analyses[index]));
+    const corrected = Parser.applySharedChirpCorrection(chirpIndexes.map((index) => analyses[index]), { approximateZeroTimePs: folder.chirpZeroTimePs });
     chirpIndexes.forEach((analysisIndex, correctedIndex) => {
       analyses[analysisIndex] = corrected[correctedIndex];
     });
@@ -2835,10 +2855,12 @@ function rebuildTreatments(folderId, affectedDatasetIds = null) {
   markDirty();
 }
 
-async function toggleActiveTreatment(kind) {
+async function toggleActiveTreatment(kind, approximateZeroTimePs) {
   const folder = activeFolder();
   const dataset = activeDataset();
   if (!folder || !dataset || !["baseline", "chirp"].includes(kind)) return;
+  const hintChanged = kind === "chirp" && Number.isFinite(approximateZeroTimePs) && folder.chirpZeroTimePs !== approximateZeroTimePs;
+  if (hintChanged) folder.chirpZeroTimePs = approximateZeroTimePs;
   const previousStates = snapshotTreatmentStates(folderDatasets(folder.id), folder);
   if (folder.treatments[kind] && dataset.treatmentOverrides?.[kind]) {
     dataset.treatmentOverrides = { ...(dataset.treatmentOverrides ?? {}), [kind]: false };
@@ -2851,6 +2873,9 @@ async function toggleActiveTreatment(kind) {
     }
   }
   const affectedIds = changedTreatmentDatasetIds(folderDatasets(folder.id), folder, previousStates);
+  if (hintChanged) folderDatasets(folder.id).forEach((item) => {
+    if (treatmentEnabled(item, folder, "chirp") && !affectedIds.includes(item.id)) affectedIds.push(item.id);
+  });
   const nowEnabled = treatmentEnabled(activeDataset(), folder, kind);
   const label = kind === "baseline" ? "pre-zero baseline" : "chirp";
   await runJob(nowEnabled ? `Applying ${label}` : `Removing ${label}`, kind, () => rebuildTreatments(folder.id, affectedIds), `${kind === "baseline" ? "Baseline" : "Chirp"} state updated without rebuilding unaffected folder datasets.`);

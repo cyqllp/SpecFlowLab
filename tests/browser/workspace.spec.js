@@ -163,3 +163,23 @@ for (const [width, height] of [[960, 640], [1480, 920]]) {
     expect(bounds.bottom).toBeLessThanOrEqual(bounds.height - 2);
   });
 }
+
+test('chirp hint uses spectrum time and cancel leaves treatment off', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#file-input').setInputFiles(sample);
+  await expect(page.locator('#heatmap')).toBeVisible();
+  await page.locator('#time-slider').fill('1');
+  const displayed = parseFloat(await page.locator('#spectrum-coordinate').innerText());
+  const chirp = page.locator('[data-action="chirp"]');
+  await chirp.click();
+  await expect(page.locator('#chirp-zero-time')).toHaveValue(String(displayed));
+  await page.locator('.modal-shell [data-action="close-modal"]').last().click();
+  await expect(chirp).not.toHaveClass(/active/);
+  await chirp.click();
+  await page.locator('#chirp-zero-time').fill('0.1');
+  await page.locator('[data-action="confirm-chirp"]').click();
+  await expect(chirp).toHaveClass(/active/);
+  await chirp.click();
+  await expect(chirp).not.toHaveClass(/active/);
+  await expect(page.locator('.modal-shell')).toHaveCount(0);
+});
