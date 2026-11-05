@@ -350,16 +350,26 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
 
   function applyChirpCorrection(analysis, options = {}) {
     const next = cloneAnalysisDataset(analysis);
-    const model = options.model ?? fitPolynomialDispersion(next, options);
+    let model = options.model ?? fitPolynomialDispersion(next, options);
     if (!model) {
       next.provenance.push({ label: "Chirp", status: "skipped" });
       return next;
     }
-    const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime
-      : Number.isFinite(options.approximateZeroTimePs) ? options.approximateZeroTimePs : 0;
+    const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime : 0;
+
+    if (Number.isFinite(options.approximateZeroTimePs)) {
+      const qualified = qualifyChirpModel(next, model, options.approximateZeroTimePs);
+      if (!qualified.accepted) {
+        next.chirp = { model: { ...model, targetReferenceTime, ...qualified }, curve: [] };
+        next.provenance.push({ label: "Chirp", status: "skipped", reason: qualified.reason });
+        return next;
+      }
+      model = { ...model, ...qualified };
+    }
 
     let shifts = next.spectralAxis.map((wavelength) => evaluateDispersion(model, wavelength) + (model.referenceTime - targetReferenceTime));
-    let correctedMatrix = applyTimeShifts(next, shifts);
+    if (Number.isFinite(options.approximateZeroTimePs)) shifts = shifts.map((shift) => shift + model.qualifiedOffset);
+    let correctedMatrix = Number.isFinite(options.approximateZeroTimePs) ? null : applyTimeShifts(next, shifts);
     const residualTimeZero = Number.isFinite(options.approximateZeroTimePs) ? Number.NaN : estimateDatasetTimeZero({
       timeAxis: next.timeAxis,
       spectralAxis: next.spectralAxis,
@@ -367,11 +377,12 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
     });
     const zeroResidualCorrection = Number.isFinite(residualTimeZero) && Math.abs(residualTimeZero - targetReferenceTime) > 0.02
       ? residualTimeZero - targetReferenceTime
-      : 0;
-    if (zeroResidualCorrection !== 0) {
+      : Number.isFinite(options.approximateZeroTimePs) ? model.qualifiedOffset : 0;
+    if (!Number.isFinite(options.approximateZeroTimePs) && zeroResidualCorrection !== 0) {
       shifts = shifts.map((shift) => shift + zeroResidualCorrection);
       correctedMatrix = applyTimeShifts(next, shifts);
     }
+    if (!correctedMatrix) correctedMatrix = applyTimeShifts(next, shifts);
     const curve = next.spectralAxis.map((wavelength, rowIndex) => ({
       wavelength,
       shift: shifts[rowIndex],
@@ -397,7 +408,7 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
 
   function applySharedChirpCorrection(analyses, options = {}) {
     const models = analyses.map((analysis) => fitPolynomialDispersion(analysis, options));
-    const targetReferenceTime = Number.isFinite(options.approximateZeroTimePs) ? options.approximateZeroTimePs : 0;
+    const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime : 0;
     return analyses.map((analysis, index) => applyChirpCorrection(analysis, {
       ...options,
       model: models[index],
@@ -1445,6 +1456,66 @@ ${JSON.stringify(payload, null, 2)}
         max: analysis.spectralAxis.at(-1),
       },
     };
+  }
+
+  // Estimate a common offset from raw, contiguous finite samples. Rows have equal influence.
+  function qualifyChirpModel(analysis, model, hint) {
+    const t = analysis.timeAxis;
+    const anchors = analysis.matrix.map((row, index) => {
+      const baseline = row.filter((v, i) => Number.isFinite(v) && t[i] < hint - 1.4);
+      if (baseline.length < 3) return null;
+      const center = median(baseline);
+      const noise = 1.4826 * median(baseline.map((v) => Math.abs(v - center)));
+      const peak = Math.max(0, ...row.filter((v, i) => Number.isFinite(v) && t[i] >= hint - 1 && t[i] <= hint + 2).map((v) => Math.abs(v - center)));
+      if (peak < 10 * Math.max(noise, 1e-15)) return null;
+      let best = null;
+      // Smooth on the actual time axis; never cross a missing-data gap.
+      for (let i = 1; i < t.length - 1; i += 1) {
+        if (Math.abs(t[i] - hint) > 1 || !Number.isFinite(row[i - 1]) || !Number.isFinite(row[i]) || !Number.isFinite(row[i + 1])) continue;
+        let left = i, right = i;
+        while (left > 0 && Number.isFinite(row[left - 1]) && t[i] - t[left - 1] <= 0.12) left--;
+        while (right + 1 < t.length && Number.isFinite(row[right + 1]) && t[right + 1] - t[i] <= 0.12) right++;
+        if (right - left < 2) continue;
+        let sw = 0, st = 0, sy = 0, stt = 0, sty = 0;
+        for (let j = left; j <= right; j++) {
+          const x = t[j] - t[i], w = Math.exp(-0.5 * (x / 0.05) ** 2);
+          sw += w; st += w*x; sy += w*row[j]; stt += w*x*x; sty += w*x*row[j];
+        }
+        const denom = sw*stt-st*st;
+        const slope = denom > 0 ? Math.abs((sw*sty-st*sy)/denom) : 0;
+        if (!best || slope > best.slope) best = { time: t[i], slope };
+      }
+      return best && best.slope > 0 ? { index, wavelength: analysis.spectralAxis[index], arrival: best.time } : null;
+    }).filter(Boolean);
+    const coverage = anchors.length / analysis.spectralAxis.length;
+    const span = anchors.length ? (Math.max(...anchors.map(a => a.wavelength)) - Math.min(...anchors.map(a => a.wavelength))) / Math.max(1e-12, analysis.spectralAxis.at(-1) - analysis.spectralAxis[0]) : 0;
+    const width = (v) => { const a = v.slice().sort((x,y) => x-y); return a.length ? a[Math.floor((a.length-1)*0.95)] - a[Math.floor((a.length-1)*0.05)] : Infinity; };
+    const residual = (m, a) => a.arrival - m.referenceTime - evaluateDispersion(m, a.wavelength);
+    const rawWidth = width(anchors.map(a => a.arrival));
+    let candidate = model;
+    let residuals = anchors.map(a => residual(candidate, a));
+    let kind = 'relative-cubic-qualified-offset';
+    if (coverage >= 0.2 && span >= 0.6 && width(residuals) > rawWidth + 0.05) {
+      // Free intercept polynomial: mu(lambda) = mu0 + sum parmu_j ((lambda-lambdac)/100)^j.
+      const ref = median(anchors.map(a => a.wavelength));
+      let samples = anchors.slice(), coefficients = null;
+      for (let pass = 0; pass < 3; pass++) {
+        coefficients = solveLeastSquares(samples.map(a => { const x = (a.wavelength-ref)/100; return [1,x,x*x,x*x*x]; }), samples.map(a => a.arrival), 4);
+        if (!coefficients) break;
+        const errors = samples.map(a => { const x=(a.wavelength-ref)/100; return a.arrival - (coefficients[0]+coefficients[1]*x+coefficients[2]*x*x+coefficients[3]*x*x*x); });
+        const mid = median(errors), scale = median(errors.map(e => Math.abs(e-mid))) || 0.02;
+        samples = samples.filter((a,i) => Math.abs(errors[i]-mid) <= Math.max(0.08, 4.5*scale));
+        if (samples.length < 8) { coefficients = null; break; }
+      }
+      if (coefficients) {
+        candidate = { ...model, referenceWavelength: ref, referenceTime: coefficients[0], coefficients: coefficients.slice(1) };
+        residuals = anchors.map(a => residual(candidate, a));
+        kind = 'free-intercept-cubic';
+      }
+    }
+    const boundaryFraction = anchors.filter(a => Math.abs(a.arrival-hint) >= 0.95).length / Math.max(1, anchors.length);
+    const accepted = anchors.length >= 8 && coverage >= 0.2 && span >= 0.6 && boundaryFraction < 0.2 && width(residuals) <= rawWidth + 0.05;
+    return { ...candidate, accepted, reason: accepted ? 'qualified' : 'insufficient support or relative alignment', absoluteOffsetStatus: accepted ? 'qualified' : 'review-required', relativeDispersionStatus: accepted ? 'qualified' : 'review-required', qualifiedOffset: accepted && kind !== 'free-intercept-cubic' ? median(residuals) : 0, offsetEstimator: 'raw-contiguous-smoothed-slope-median-v1', searchWindowsPs: [hint-1,hint+1], support: anchors.length, coverage, wavelengthSpanFraction: span, boundaryFraction, rawWidth, residualWidth: width(residuals), algorithm: kind, anchors };
   }
 
   function findEarlySignalIndexes(timeAxis) {

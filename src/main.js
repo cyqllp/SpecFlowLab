@@ -657,7 +657,7 @@ function renderChirpHintModal() {
   return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Chirp correction">
     <div class="modal compact-modal">
       <header class="modal-head"><div><h2>Chirp correction</h2></div><button data-action="close-modal" class="icon-button" aria-label="Close">x</button></header>
-      <label class="modal-field"><span>Approximate zero time (ps)</span><input id="chirp-zero-time" type="number" step="any" required value="${value}" /></label>
+      <p>Locate the signal near this input delay; correction moves its fitted time zero to 0 ps. 在原始时间轴上定位信号；校正将拟合的时间零点移至 0 ps。</p><label class="modal-field"><span>Approximate zero time (ps)</span><input id="chirp-zero-time" type="number" step="any" required value="${value}" /></label>
       <footer class="modal-footer"><button data-action="close-modal">Cancel</button><button data-action="confirm-chirp">Confirm</button></footer>
     </div></section>`;
 }
@@ -2687,7 +2687,7 @@ async function importDataFiles(event, targetFolderId = null) {
 
     let analyses = parsed.map((dataset) => Parser.cloneAnalysisDataset(dataset.baseAnalysis));
     if (folder.treatments?.baseline) analyses = analyses.map((analysis) => Parser.applyBaselineCorrection(analysis));
-    if (folder.treatments?.chirp) analyses = Parser.applySharedChirpCorrection(analyses);
+    if (folder.treatments?.chirp) analyses = Parser.applySharedChirpCorrection(analyses, { approximateZeroTimePs: folder.chirpZeroTimePs });
     const datasets = parsed.map((dataset, index) => ({ ...dataset, analysis: analyses[index] }));
 
     if (!existingFolder) {
