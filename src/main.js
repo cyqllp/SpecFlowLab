@@ -15,6 +15,7 @@ import { isEligibleForMode, SELECTION_MODES, toggleSelection, validateSelection 
 import { moveDataset } from "./lib/dataset-order.js";
 import { moveFolder } from "./lib/folder-order.js";
 import { componentColor } from "./lib/component-colors.js";
+import { chirpOverlaySegments } from "./lib/chirp-overlay.js";
 import { comparisonStyleDefaults } from "./lib/comparison-style.js";
 import { DEFAULT_FITTING_INPUTS, restoreDefaultFittingInputs } from "./lib/fitting-defaults.js";
 import {
@@ -4178,7 +4179,7 @@ function paintCanvases() {
     paintHeatmap(document.getElementById("fit-residual"), {
       ...dataset.analysis,
       matrix: dataset.fit.residualMatrix,
-    }, { crosshair: false });
+    }, { crosshair: false, chirpOverlay: false });
   }
   paintComparisonSlice(document.getElementById("compare-kinetics"), "kinetics");
   paintComparisonSlice(document.getElementById("compare-spectrum"), "spectrum");
@@ -4327,9 +4328,32 @@ function paintHeatmap(canvas, analysis, options = {}) {
       ctx.fillRect(x0, y0, Math.max(1, x1 - x0 + 0.5), Math.max(1, y1 - y0 + 0.5));
     });
   });
+  const chirpOverlay = options.chirpOverlay === false ? null : chirpOverlaySegments(analysis, xExtent, yExtent);
+  if (chirpOverlay) {
+    const drawSegments = (segments, color, dash) => {
+      for (const [stroke, width] of [["#101820", 4.5], [color, 2]]) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = width;
+        ctx.setLineDash(dash);
+        ctx.beginPath();
+        segments.forEach(([a, b]) => {
+          ctx.moveTo(scale(a.x, xExtent, [plot.left, plot.right]), scale(timeTransform.toFraction(a.y), [0, 1], [plot.top, plot.bottom]));
+          ctx.lineTo(scale(b.x, xExtent, [plot.left, plot.right]), scale(timeTransform.toFraction(b.y), [0, 1], [plot.top, plot.bottom]));
+        });
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    };
+    drawSegments(chirpOverlay.raw, "#ffffff", [6, 4]);
+    drawSegments(chirpOverlay.guide, "#ffea00", []);
+  }
   ctx.restore();
 
   drawHeatmapAxes(ctx, plot, analysis, timeTransform, xExtent, yExtent);
+  if (chirpOverlay) drawLegend(ctx, [
+    { label: uiText("Fitted chirp μ(λ) (raw locus)"), color: "#303b40", dash: [6, 4] },
+    { label: uiText("Target t₀"), color: "#a77700" },
+  ], plot, 290);
   plotGeometry.set(canvas, { type: "heatmap", plot, plotKey, xExtent, yExtent, timeTransform });
   if (options.crosshair !== false) {
     const wavelength = analysis.spectralAxis[clamp(state.selectedWavelengthIndex, 0, analysis.spectralAxis.length - 1)];
@@ -4738,7 +4762,7 @@ function paintExpandedPlot() {
   } else if (state.expandedPlot === "modal-components") {
     paintDisplayedComponentSpectra(canvas, dataset, state.fitting.spectrumMode);
   } else if (state.expandedPlot === "fit-residual" && dataset.fit?.residualMatrix) {
-    paintHeatmap(canvas, { ...dataset.analysis, matrix: dataset.fit.residualMatrix }, { crosshair: false });
+    paintHeatmap(canvas, { ...dataset.analysis, matrix: dataset.fit.residualMatrix }, { crosshair: false, chirpOverlay: false });
   } else if (state.expandedPlot === "compare-kinetics") {
     paintComparisonSlice(canvas, "kinetics");
   } else if (state.expandedPlot === "compare-spectrum") {
@@ -4973,9 +4997,9 @@ function drawHeatmapAxes(ctx, plot, analysis, timeTransform, xExtent, yExtent) {
   ctx.restore();
 }
 
-function drawLegend(ctx, series, plot) {
+function drawLegend(ctx, series, plot, maxWidth = 210) {
   const rows = series.slice(0, 12);
-  const boxWidth = Math.min(210, Math.max(120, ...rows.map((item) => item.label.length * 6.4 + 48)));
+  const boxWidth = Math.min(maxWidth, plot.right - plot.left - 16, Math.max(120, ...rows.map((item) => item.label.length * 6.4 + 48)));
   const boxHeight = rows.length * 18 + 12;
   const x = plot.right - boxWidth - 8;
   const y = plot.top + 8;

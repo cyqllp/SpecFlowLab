@@ -7,6 +7,8 @@ const STORAGE_KEY = "specflowlab.locale";
 
 const ZH_CN = Object.freeze({
   Language: "语言",
+  "Fitted chirp μ(λ) (raw locus)": "拟合啁啾 μ(λ)（原始轨迹）",
+  "Target t₀": "目标 t₀",
   "Project navigation": "项目导航",
   "Close navigation": "关闭导航",
   "Unsaved changes": "未保存的更改",
