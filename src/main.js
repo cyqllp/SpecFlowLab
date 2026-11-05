@@ -652,8 +652,9 @@ function renderModal() {
 }
 
 function renderChirpHintModal() {
-  const analysis = activeDataset()?.analysis;
-  const value = analysis?.timeAxis[state.selectedTimeIndex] ?? 0;
+  const dataset = activeDataset();
+  const analysis = dataset?.baseAnalysis;
+  const value = Number.isFinite(activeFolder()?.chirpZeroTimePs) ? activeFolder().chirpZeroTimePs : (dataset?.analysis?.chirp ? 0 : analysis?.timeAxis[state.selectedTimeIndex] ?? 0);
   return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Chirp correction">
     <div class="modal compact-modal">
       <header class="modal-head"><div><h2>Chirp correction</h2></div><button data-action="close-modal" class="icon-button" aria-label="Close">x</button></header>
@@ -2843,7 +2844,15 @@ function rebuildTreatments(folderId, affectedDatasetIds = null) {
   if (chirpIndexes.length) {
     const corrected = Parser.applySharedChirpCorrection(chirpIndexes.map((index) => analyses[index]), { approximateZeroTimePs: folder.chirpZeroTimePs });
     chirpIndexes.forEach((analysisIndex, correctedIndex) => {
-      analyses[analysisIndex] = corrected[correctedIndex];
+      const result = corrected[correctedIndex];
+      const previous = targets[analysisIndex].analysis;
+      const skipped = result.provenance?.at(-1)?.status === "skipped";
+      const sameAxis = (a, b) => a?.length === b?.length && a.every((v, i) => v === b[i]);
+      const sameBaseline = Boolean(previous?.provenance?.some(p => p.label === "Baseline" && p.status === "applied")) === Boolean(analyses[analysisIndex].provenance?.some(p => p.label === "Baseline" && p.status === "applied"));
+      if (skipped && previous?.provenance?.some(p => p.label === "Chirp" && p.status === "applied") && sameBaseline && sameAxis(previous.timeAxis, result.timeAxis) && sameAxis(previous.spectralAxis, result.spectralAxis)) {
+        analyses[analysisIndex] = Parser.cloneAnalysisDataset(previous);
+        analyses[analysisIndex].provenance.push({ label: "Chirp review", status: "review-required", reason: result.chirp?.model?.reason ?? "Fit unavailable; previous treatment preserved" });
+      } else analyses[analysisIndex] = result;
     });
   }
   const analysisById = new Map(targets.map((dataset, index) => [dataset.id, analyses[index]]));
@@ -2853,6 +2862,7 @@ function rebuildTreatments(folderId, affectedDatasetIds = null) {
   clearPlotZooms();
   clampSelections();
   markDirty();
+  return targets.map((_, i) => analyses[i].provenance?.at(-1)).filter(p => p?.status === "skipped" || p?.status === "review-required");
 }
 
 async function toggleActiveTreatment(kind, approximateZeroTimePs) {
@@ -2878,7 +2888,7 @@ async function toggleActiveTreatment(kind, approximateZeroTimePs) {
   });
   const nowEnabled = treatmentEnabled(activeDataset(), folder, kind);
   const label = kind === "baseline" ? "pre-zero baseline" : "chirp";
-  await runJob(nowEnabled ? `Applying ${label}` : `Removing ${label}`, kind, () => rebuildTreatments(folder.id, affectedIds), `${kind === "baseline" ? "Baseline" : "Chirp"} state updated without rebuilding unaffected folder datasets.`);
+  await runJob(nowEnabled ? `Applying ${label}` : `Removing ${label}`, kind, () => rebuildTreatments(folder.id, affectedIds), (reviews) => reviews?.length ? `Review required: ${reviews.map(p => p.reason || "fit unavailable").join("; ")}. Previously accepted results were preserved where compatible.` : `${kind === "baseline" ? "Baseline" : "Chirp"} state updated without rebuilding unaffected folder datasets.`);
 }
 
 function resetSingleDataset(datasetId, folderId) {

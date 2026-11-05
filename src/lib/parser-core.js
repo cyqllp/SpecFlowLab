@@ -352,7 +352,7 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
     const next = cloneAnalysisDataset(analysis);
     let model = options.model ?? fitPolynomialDispersion(next, options);
     if (!model) {
-      next.provenance.push({ label: "Chirp", status: "skipped" });
+      next.provenance.push({ label: "Chirp", status: "skipped", reason: "insufficient signal to fit chirp; review required" });
       return next;
     }
     const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime : 0;
@@ -1461,7 +1461,12 @@ ${JSON.stringify(payload, null, 2)}
   // Estimate a common offset from raw, contiguous finite samples. Rows have equal influence.
   function qualifyChirpModel(analysis, model, hint) {
     const t = analysis.timeAxis;
-    const anchors = analysis.matrix.map((row, index) => {
+    let searchHalfWidth = 0.5;
+    const searchWindowsPs = [];
+    let anchors;
+    do {
+    searchWindowsPs.push([hint - searchHalfWidth, hint + searchHalfWidth]);
+    anchors = analysis.matrix.map((row, index) => {
       const baseline = row.filter((v, i) => Number.isFinite(v) && t[i] < hint - 1.4);
       if (baseline.length < 3) return null;
       const center = median(baseline);
@@ -1471,7 +1476,7 @@ ${JSON.stringify(payload, null, 2)}
       let best = null;
       // Smooth on the actual time axis; never cross a missing-data gap.
       for (let i = 1; i < t.length - 1; i += 1) {
-        if (Math.abs(t[i] - hint) > 1 || !Number.isFinite(row[i - 1]) || !Number.isFinite(row[i]) || !Number.isFinite(row[i + 1])) continue;
+        if (Math.abs(t[i] - hint) > searchHalfWidth || !Number.isFinite(row[i - 1]) || !Number.isFinite(row[i]) || !Number.isFinite(row[i + 1])) continue;
         let left = i, right = i;
         while (left > 0 && Number.isFinite(row[left - 1]) && t[i] - t[left - 1] <= 0.12) left--;
         while (right + 1 < t.length && Number.isFinite(row[right + 1]) && t[right + 1] - t[i] <= 0.12) right++;
@@ -1485,8 +1490,26 @@ ${JSON.stringify(payload, null, 2)}
         const slope = denom > 0 ? Math.abs((sw*sty-st*sy)/denom) : 0;
         if (!best || slope > best.slope) best = { time: t[i], slope };
       }
-      return best && best.slope > 0 ? { index, wavelength: analysis.spectralAxis[index], arrival: best.time } : null;
+      if (!best || !best.slope) return null;
+      // Follow the same finite branch backwards to its first sustained departure.
+      let k = t.indexOf(best.time), start = k;
+      while (start > 0 && Number.isFinite(row[start - 1]) && t[start - 1] >= hint - searchHalfWidth) start--;
+      let local = row[k];
+      for (let j = k + 1; j < row.length && Number.isFinite(row[j]) && t[j] <= t[k] + 0.12; j++) {
+        if (Math.abs(row[j] - center) > Math.abs(local - center)) local = row[j];
+      }
+      const direction = Math.sign(local - center) || 1;
+      const threshold = Math.max(1e-15, 3 * noise, Math.abs(row[k] - center) * 0.2);
+      let onset = null;
+      for (let j = start; j < row.length && Number.isFinite(row[j]) && t[j] <= t[k] + 0.12; j++) {
+        if (direction * (row[j] - center) >= threshold) { onset = t[j]; break; }
+      }
+      return { index, wavelength: analysis.spectralAxis[index], arrival: best.time, onset };
     }).filter(Boolean);
+    const boundary = anchors.filter(a => Math.abs(a.arrival - hint) >= searchHalfWidth - 0.08).length / Math.max(1, anchors.length);
+    if (boundary < 0.1 || searchHalfWidth >= 1) break;
+    searchHalfWidth += 0.25;
+    } while (true);
     const coverage = anchors.length / analysis.spectralAxis.length;
     const span = anchors.length ? (Math.max(...anchors.map(a => a.wavelength)) - Math.min(...anchors.map(a => a.wavelength))) / Math.max(1e-12, analysis.spectralAxis.at(-1) - analysis.spectralAxis[0]) : 0;
     const width = (v) => { const a = v.slice().sort((x,y) => x-y); return a.length ? a[Math.floor((a.length-1)*0.95)] - a[Math.floor((a.length-1)*0.05)] : Infinity; };
@@ -1513,9 +1536,28 @@ ${JSON.stringify(payload, null, 2)}
         kind = 'free-intercept-cubic';
       }
     }
-    const boundaryFraction = anchors.filter(a => Math.abs(a.arrival-hint) >= 0.95).length / Math.max(1, anchors.length);
-    const accepted = anchors.length >= 8 && coverage >= 0.2 && span >= 0.6 && boundaryFraction < 0.2 && width(residuals) <= rawWidth + 0.05;
-    return { ...candidate, accepted, reason: accepted ? 'qualified' : 'insufficient support or relative alignment', absoluteOffsetStatus: accepted ? 'qualified' : 'review-required', relativeDispersionStatus: accepted ? 'qualified' : 'review-required', qualifiedOffset: accepted && kind !== 'free-intercept-cubic' ? median(residuals) : 0, offsetEstimator: 'raw-contiguous-smoothed-slope-median-v1', searchWindowsPs: [hint-1,hint+1], support: anchors.length, coverage, wavelengthSpanFraction: span, boundaryFraction, rawWidth, residualWidth: width(residuals), algorithm: kind, anchors };
+    const boundaryFraction = anchors.filter(a => Math.abs(a.arrival-hint) >= searchHalfWidth - 0.08).length / Math.max(1, anchors.length);
+    const differences = anchors.filter(a => Number.isFinite(a.onset)).map(a => a.arrival - a.onset);
+    const onsetMedian = differences.length ? median(differences) : null;
+    const onsetWidth = width(differences);
+    const onsetAgreement = differences.length >= Math.max(8, anchors.length * 0.6) && Math.abs(onsetMedian) <= 0.3 && onsetWidth <= 0.5;
+    // Contiguous wavelength blocks are excluded from fitting before prediction.
+    const sorted = anchors.slice().sort((a,b) => a.wavelength-b.wavelength);
+    const heldOutErrors = [];
+    const ref = candidate.referenceWavelength;
+    for (let block = 0; block < 5; block++) {
+      const train = sorted.filter((_, i) => Math.floor(i * 5 / sorted.length) !== block);
+      const held = sorted.filter((_, i) => Math.floor(i * 5 / sorted.length) === block);
+      if (train.length < 8 || !held.length) continue;
+      const coefficients = solveLeastSquares(train.map(a => { const x=(a.wavelength-ref)/100; return [1,x,x*x,x*x*x]; }), train.map(a => a.arrival), 4);
+      if (!coefficients) continue;
+      held.forEach(a => { const x=(a.wavelength-ref)/100; heldOutErrors.push(a.arrival - (coefficients[0]+coefficients[1]*x+coefficients[2]*x*x+coefficients[3]*x*x*x)); });
+    }
+    const heldOutWidth = width(heldOutErrors);
+    const heldOutMedian = heldOutErrors.length ? median(heldOutErrors) : null;
+    const heldOutAgreement = heldOutErrors.length === anchors.length && heldOutWidth <= rawWidth + 0.3 && Math.abs(heldOutMedian) <= 0.2;
+    const accepted = onsetAgreement && heldOutAgreement && anchors.length >= 8 && coverage >= 0.2 && span >= 0.6 && boundaryFraction < 0.2 && width(residuals) <= rawWidth + 0.05;
+    return { ...candidate, accepted, reason: accepted ? 'qualified' : !onsetAgreement ? 'slope and onset disagree or onset support is insufficient' : !heldOutAgreement ? 'held-out wavelength validation failed' : 'insufficient support or relative alignment', absoluteOffsetStatus: accepted ? 'qualified' : 'review-required', relativeDispersionStatus: accepted ? 'qualified' : 'review-required', qualifiedOffset: accepted && kind !== 'free-intercept-cubic' ? median(residuals) : 0, offsetEstimator: 'raw-contiguous-smoothed-slope-median-v1', searchWindowsPs, onsetMedian, onsetWidth, onsetCount: differences.length, onsetAgreement, heldOutCount: heldOutErrors.length, heldOutMedian, heldOutWidth, heldOutAgreement, support: anchors.length, coverage, wavelengthSpanFraction: span, boundaryFraction, rawWidth, residualWidth: width(residuals), algorithm: kind, anchors };
   }
 
   function findEarlySignalIndexes(timeAxis) {

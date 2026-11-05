@@ -46,3 +46,18 @@ test('guided correction skips when baseline support is missing', () => {
   assert.equal(result.chirp.model.absoluteOffsetStatus, 'review-required');
   assert.deepEqual(result.matrix, matrix);
 });
+
+test('guided fit records bounded search and independent validation evidence', () => {
+  const timeAxis = Array.from({length: 241}, (_, i) => -2 + i * 0.02);
+  const spectralAxis = Array.from({length: 30}, (_, i) => 400 + i * 10);
+  const matrix = spectralAxis.map((_, i) => timeAxis.map(t => t >= 1.05 + i * 0.02 ? 1 : 0));
+  const analysis = {timeAxis, spectralAxis, matrix, provenance: [], excluded: [], selectedRange: {time: {}, spectral: {}}};
+  const result = P.applyChirpCorrection(analysis, {approximateZeroTimePs: 1});
+  const model = result.chirp.model;
+  assert.deepEqual(model.searchWindowsPs[0], [0.5, 1.5]);
+  assert.ok(model.searchWindowsPs.length > 1 && model.searchWindowsPs.length <= 3);
+  assert.equal(model.heldOutCount, model.support);
+  assert.equal(model.heldOutAgreement, true);
+  assert.equal(model.onsetAgreement, true);
+  assert.ok(Number.isFinite(model.onsetMedian));
+});
