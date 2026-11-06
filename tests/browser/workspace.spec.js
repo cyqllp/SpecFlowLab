@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { buildUfsFixture } from '../ufs-fixture.js';
+import { chirpFixture, chirpCsv } from '../chirp-fixture.js';
 
 const sample = { name: 'fixture.ufs', mimeType: 'application/octet-stream', buffer: Buffer.from(buildUfsFixture()) };
 for (const [width, height] of [[960,640], [1024,768], [1220,760], [1366,768], [1480,920]]) {
@@ -166,7 +167,7 @@ for (const [width, height] of [[960, 640], [1480, 920]]) {
 
 test('chirp hint uses spectrum time and cancel leaves treatment off', async ({ page }) => {
   await page.goto('/');
-  await page.locator('#file-input').setInputFiles(sample);
+  await page.locator('#file-input').setInputFiles({ name: 'chirp.csv', mimeType: 'text/csv', buffer: Buffer.from(chirpCsv(chirpFixture({ arrival: () => 0.1 }))) });
   await expect(page.locator('#heatmap')).toBeVisible();
   await page.locator('#time-slider').fill('1');
   const displayed = parseFloat(await page.locator('#spectrum-coordinate').innerText());

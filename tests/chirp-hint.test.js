@@ -39,7 +39,7 @@ test('guided constant delay moves the edge to zero and preserves missing bracket
 test('guided correction skips when baseline support is missing', () => {
   const timeAxis = Array.from({length: 41}, (_, i) => i * 0.05);
   const spectralAxis = Array.from({length: 12}, (_, i) => 450 + i * 10);
-  const matrix = spectralAxis.map(() => timeAxis.map(t => t >= 1 ? 1 : 0));
+  const matrix = spectralAxis.map(() => timeAxis.map(t => t < 0.9 ? NaN : t >= 1 ? 1 : 0));
   const analysis = {timeAxis, spectralAxis, matrix, provenance: [], excluded: [], selectedRange: {time: {}, spectral: {}}};
   const result = P.applyChirpCorrection(analysis, {approximateZeroTimePs: 1});
   assert.equal(result.provenance.at(-1).status, 'skipped');

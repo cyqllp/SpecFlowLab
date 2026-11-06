@@ -1,4 +1,6 @@
 import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
+import { chirpArrival, estimateChirpModel } from "./chirp-model.js";
+import { analysisNeedsReview, treatmentStatus } from "./treatment-status.js";
 
 (function attachParser(root) {
   const MAX_UFS_STRING_BYTES = 16 * 1024 * 1024;
@@ -294,11 +296,7 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
       merge: clonePlainMetadata(analysis.merge),
       chirp: analysis.chirp
         ? {
-            model: {
-              ...analysis.chirp.model,
-              coefficients: analysis.chirp.model.coefficients.slice(),
-              sourceRange: { ...analysis.chirp.model.sourceRange },
-            },
+            model: structuredClone(analysis.chirp.model),
             curve: analysis.chirp.curve.map((point) => ({ ...point })),
           }
         : null,
@@ -326,74 +324,61 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
     return value ? JSON.parse(JSON.stringify(value)) : null;
   }
 
-  function applyBaselineCorrection(analysis) {
+  function applyBaselineCorrection(analysis, options = {}) {
     const next = cloneAnalysisDataset(analysis);
+    const referenceTime = Number.isFinite(options.referenceTimePs) ? options.referenceTimePs : 0;
+    const endTime = referenceTime - (options.guardPs ?? 0);
     const baselineIndexes = next.timeAxis
       .map((time, index) => ({ time, index }))
-      .filter((item) => Number.isFinite(item.time) && item.time < 0)
+      .filter((item) => Number.isFinite(item.time) && item.time < endTime)
       .map((item) => item.index);
-    const indexes = baselineIndexes.length > 0 ? baselineIndexes : fallbackLeadingIndexes(next.timeAxis.length);
-
-    if (indexes.length === 0) {
-      next.provenance.push({ label: "Baseline", status: "skipped" });
+    const offsets = next.matrix.map(row => meanFinite(baselineIndexes.map(index => row[index])));
+    if (!baselineIndexes.length || offsets.some((value, i) => !Number.isFinite(value) && next.matrix[i].some(Number.isFinite))) {
+      next.provenance.push({ label: "Baseline", status: "skipped", reason: "No finite pre-arrival baseline window; retain a pre-zero range." });
       return next;
     }
 
-    next.matrix = next.matrix.map((row) => {
-      const baseline = meanFinite(indexes.map((index) => row[index]));
+    next.matrix = next.matrix.map((row, i) => {
+      const baseline = offsets[i];
       if (!Number.isFinite(baseline)) return row.slice();
       return row.map((value) => (Number.isFinite(value) ? value - baseline : value));
     });
-    next.provenance.push({ label: "Baseline", status: "applied" });
+    next.provenance.push({ label: "Baseline", status: "applied", referenceTimePs: referenceTime, baselineEndPs: endTime });
     return next;
   }
 
   function applyChirpCorrection(analysis, options = {}) {
     const next = cloneAnalysisDataset(analysis);
-    let model = options.model ?? fitPolynomialDispersion(next, options);
-    if (!model) {
-      next.provenance.push({ label: "Chirp", status: "skipped", reason: "insufficient signal to fit chirp; review required" });
-      return next;
-    }
+    const model = options.model ?? estimateChirpModel(next, options);
     const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime : 0;
-
-    if (Number.isFinite(options.approximateZeroTimePs)) {
-      const qualified = qualifyChirpModel(next, model, options.approximateZeroTimePs);
-      if (!qualified.accepted) {
-        next.chirp = { model: { ...model, targetReferenceTime, ...qualified }, curve: [] };
-        next.provenance.push({ label: "Chirp", status: "skipped", reason: qualified.reason });
-        return next;
-      }
-      model = { ...model, ...qualified };
+    const skip = (reason) => {
+      next.chirp = { model: { ...model, targetReferenceTime, accepted: false, reason, absoluteOffsetStatus: "review-required", relativeDispersionStatus: "review-required" }, curve: [] };
+      next.provenance.push({ label: "Chirp", status: "skipped", reason });
+      return next;
+    };
+    if (model.accepted === false) return skip(model.reason);
+    if (targetReferenceTime < next.timeAxis[0] || targetReferenceTime > next.timeAxis.at(-1)) {
+      return skip("Target time zero is outside the output time range. The input matrix was preserved; choose a range containing the target before applying correction.");
     }
-
-    let shifts = next.spectralAxis.map((wavelength) => evaluateDispersion(model, wavelength) + (model.referenceTime - targetReferenceTime));
-    if (Number.isFinite(options.approximateZeroTimePs)) shifts = shifts.map((shift) => shift + model.qualifiedOffset);
-    let correctedMatrix = Number.isFinite(options.approximateZeroTimePs) ? null : applyTimeShifts(next, shifts);
-    const residualTimeZero = Number.isFinite(options.approximateZeroTimePs) ? Number.NaN : estimateDatasetTimeZero({
-      timeAxis: next.timeAxis,
-      spectralAxis: next.spectralAxis,
-      matrix: correctedMatrix,
-    });
-    const zeroResidualCorrection = Number.isFinite(residualTimeZero) && Math.abs(residualTimeZero - targetReferenceTime) > 0.02
-      ? residualTimeZero - targetReferenceTime
-      : Number.isFinite(options.approximateZeroTimePs) ? model.qualifiedOffset : 0;
-    if (!Number.isFinite(options.approximateZeroTimePs) && zeroResidualCorrection !== 0) {
-      shifts = shifts.map((shift) => shift + zeroResidualCorrection);
-      correctedMatrix = applyTimeShifts(next, shifts);
+    const shifts = next.spectralAxis.map(wavelength => chirpArrival(model, wavelength) - targetReferenceTime);
+    if (!shifts.every(Number.isFinite)) return skip("The fitted chirp predicts non-finite shifts.");
+    const correctedMatrix = applyTimeShifts(next, shifts);
+    const finiteCount = matrix => matrix.reduce((sum, row) => sum + row.filter(Number.isFinite).length, 0);
+    const inputFiniteCount = finiteCount(next.matrix), outputFiniteCount = finiteCount(correctedMatrix);
+    if (!outputFiniteCount || outputFiniteCount < inputFiniteCount * 0.25) {
+      return skip("The requested shift leaves insufficient measured time support. The input matrix was preserved; widen the analysis range.");
     }
-    if (!correctedMatrix) correctedMatrix = applyTimeShifts(next, shifts);
     const curve = next.spectralAxis.map((wavelength, rowIndex) => ({
       wavelength,
       shift: shifts[rowIndex],
     }));
 
     next.matrix = correctedMatrix;
-    next.chirp = { model: { ...model, targetReferenceTime, zeroResidualCorrection }, curve };
+    next.chirp = { model: { ...model, targetReferenceTime, zeroResidualCorrection: 0, inputFiniteCount, outputFiniteCount }, curve };
     next.provenance.push({
       label: "Chirp",
       status: "applied",
-      model: "polynomial-dispersion-3",
+      model: model.algorithm ?? "provided-polynomial",
       range: `${format(next.spectralAxis[0])} to ${format(next.spectralAxis.at(-1))} nm; target t0 ${format(targetReferenceTime)} ps`,
     });
     return next;
@@ -407,13 +392,23 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
   }
 
   function applySharedChirpCorrection(analyses, options = {}) {
-    const models = analyses.map((analysis) => fitPolynomialDispersion(analysis, options));
-    const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime : 0;
-    return analyses.map((analysis, index) => applyChirpCorrection(analysis, {
-      ...options,
-      model: models[index],
-      targetReferenceTime,
-    }));
+    return analyses.map(analysis => applyChirpCorrection(analysis, options));
+  }
+
+  function applyAnalysisTreatments(analysis, options = {}) {
+    let next = cloneAnalysisDataset(analysis);
+    if (options.chirp) next = applyChirpCorrection(next, options);
+    if (options.baseline) {
+      if (options.chirp && treatmentStatus(next, "Chirp") !== "applied") {
+        next.provenance.push({ label: "Baseline", status: "skipped", reason: "Resolve chirp time zero before subtracting the pre-arrival baseline." });
+      } else {
+        next = applyBaselineCorrection(next, {
+          referenceTimePs: options.chirp ? next.chirp.model.targetReferenceTime : options.approximateZeroTimePs,
+          guardPs: options.chirp ? next.chirp.model.baselineGuardPs ?? 0.15 : 0,
+        });
+      }
+    }
+    return next;
   }
 
   function analysisToCsv(analysis, source, options = {}) {
@@ -660,6 +655,10 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
         history: (analysis.provenance ?? []).map((item) => ({ ...item })),
         chirp: analysis.chirp
           ? {
+              status: treatmentStatus(analysis, "Chirp"),
+              reason: treatmentStatus(analysis, "Chirp") === "review-required"
+                ? analysis.provenance?.findLast(p => p.label === "Chirp review")?.reason
+                : analysis.chirp.model.reason,
               method: "polynomial dispersion correction",
               polynomial_terms: analysis.chirp.model.coefficients.length,
               fitted_wavelength_range_nm: analysis.chirp.model.sourceRange,
@@ -857,8 +856,8 @@ import { fitVariableProjectionGlobal } from "./global-analysis/solver.js";
     } else {
       notes.push("Lifetime uncertainty is unavailable for this fit; do not infer precision from displayed digits.");
     }
-    if ((analysis.provenance ?? []).some((item) => item.status === "skipped")) {
-      notes.push("At least one preprocessing step was skipped; inspect processing history before interpretation.");
+    if (analysisNeedsReview(analysis)) {
+      notes.push("A preprocessing step was skipped or requires review; inspect processing history before interpretation.");
     }
     if (!analysis.chirp) {
       notes.push("No chirp correction model is recorded for the current analysis dataset.");
@@ -1379,11 +1378,6 @@ ${JSON.stringify(payload, null, 2)}
     return values.filter(Number.isFinite).length / values.length;
   }
 
-  function fallbackLeadingIndexes(length) {
-    if (length <= 0) return [];
-    return Array.from({ length: Math.max(1, Math.floor(length * 0.05)) }, (_, index) => index);
-  }
-
   function meanFinite(values) {
     const finite = values.filter(Number.isFinite);
     if (finite.length === 0) return Number.NaN;
@@ -1395,234 +1389,6 @@ ${JSON.stringify(payload, null, 2)}
     if (finite.length === 0) return Number.NaN;
     const middle = Math.floor(finite.length / 2);
     return finite.length % 2 ? finite[middle] : (finite[middle - 1] + finite[middle]) / 2;
-  }
-
-  function estimateDatasetTimeZero(analysis) {
-    const earlyIndexes = findEarlySignalIndexes(analysis.timeAxis);
-    if (earlyIndexes.length < 4) return Number.NaN;
-    const anchors = analysis.matrix
-      .map((row) => estimateRowTimeZero(row, analysis.timeAxis, earlyIndexes))
-      .filter((anchor) => Number.isFinite(anchor.time) && anchor.weight > 0);
-    if (anchors.length < Math.max(8, analysis.spectralAxis.length * 0.15)) return Number.NaN;
-    return weightedMedian(anchors.map((anchor) => anchor.time), anchors.map((anchor) => anchor.weight));
-  }
-
-  function fitPolynomialDispersion(analysis, options = {}) {
-    const hint = options.approximateZeroTimePs;
-    const earlyIndexes = Number.isFinite(hint)
-      ? analysis.timeAxis.map((time, index) => ({ time, index }))
-        .filter(({ time }) => Number.isFinite(time) && Math.abs(time - hint) <= 0.5)
-        .map(({ index }) => index)
-      : findEarlySignalIndexes(analysis.timeAxis);
-    if (earlyIndexes.length < 4 || analysis.spectralAxis.length < 8) return null;
-
-    const anchors = analysis.matrix.map((row, rowIndex) => {
-      const anchor = estimateRowTimeZero(row, analysis.timeAxis, earlyIndexes);
-      return {
-        wavelength: analysis.spectralAxis[rowIndex],
-        anchor: anchor.time,
-        weight: anchor.weight,
-      };
-    });
-    const usable = anchors.filter((item) => Number.isFinite(item.wavelength) && Number.isFinite(item.anchor) && item.weight > 0);
-    if (usable.length < Math.max(8, analysis.spectralAxis.length * 0.2)) return null;
-
-    const referenceWavelength = median(usable.map((item) => item.wavelength));
-    const referenceTime = weightedMedian(usable.map((item) => item.anchor), usable.map((item) => item.weight));
-    const maxShift = estimateMaxChirpShift(analysis.timeAxis);
-    let samples = usable.map((item) => ({
-      x: (item.wavelength - referenceWavelength) / 100,
-      y: clamp(item.anchor - referenceTime, -maxShift, maxShift),
-      weight: item.weight,
-    }));
-
-    let coefficients = [0, 0, 0];
-    for (let pass = 0; pass < 3; pass += 1) {
-      coefficients = solveWeightedPolynomial(samples, 3);
-      if (!coefficients) return null;
-      const residuals = samples.map((sample) => sample.y - evaluatePolynomial(coefficients, sample.x));
-      const scale = median(residuals.map(Math.abs)) || 1e-12;
-      samples = samples.filter((sample, index) => Math.abs(residuals[index]) <= scale * 4.5);
-      if (samples.length < 8) return null;
-    }
-
-    return {
-      referenceWavelength,
-      referenceTime,
-      coefficients,
-      maxShift,
-      sourceRange: {
-        min: analysis.spectralAxis[0],
-        max: analysis.spectralAxis.at(-1),
-      },
-    };
-  }
-
-  // Estimate a common offset from raw, contiguous finite samples. Rows have equal influence.
-  function qualifyChirpModel(analysis, model, hint) {
-    const t = analysis.timeAxis;
-    let searchHalfWidth = 0.5;
-    const searchWindowsPs = [];
-    let anchors;
-    do {
-    searchWindowsPs.push([hint - searchHalfWidth, hint + searchHalfWidth]);
-    anchors = analysis.matrix.map((row, index) => {
-      const baseline = row.filter((v, i) => Number.isFinite(v) && t[i] < hint - 1.4);
-      if (baseline.length < 3) return null;
-      const center = median(baseline);
-      const noise = 1.4826 * median(baseline.map((v) => Math.abs(v - center)));
-      const peak = Math.max(0, ...row.filter((v, i) => Number.isFinite(v) && t[i] >= hint - 1 && t[i] <= hint + 2).map((v) => Math.abs(v - center)));
-      if (peak < 10 * Math.max(noise, 1e-15)) return null;
-      let best = null;
-      // Smooth on the actual time axis; never cross a missing-data gap.
-      for (let i = 1; i < t.length - 1; i += 1) {
-        if (Math.abs(t[i] - hint) > searchHalfWidth || !Number.isFinite(row[i - 1]) || !Number.isFinite(row[i]) || !Number.isFinite(row[i + 1])) continue;
-        let left = i, right = i;
-        while (left > 0 && Number.isFinite(row[left - 1]) && t[i] - t[left - 1] <= 0.12) left--;
-        while (right + 1 < t.length && Number.isFinite(row[right + 1]) && t[right + 1] - t[i] <= 0.12) right++;
-        if (right - left < 2) continue;
-        let sw = 0, st = 0, sy = 0, stt = 0, sty = 0;
-        for (let j = left; j <= right; j++) {
-          const x = t[j] - t[i], w = Math.exp(-0.5 * (x / 0.05) ** 2);
-          sw += w; st += w*x; sy += w*row[j]; stt += w*x*x; sty += w*x*row[j];
-        }
-        const denom = sw*stt-st*st;
-        const slope = denom > 0 ? Math.abs((sw*sty-st*sy)/denom) : 0;
-        if (!best || slope > best.slope) best = { time: t[i], slope };
-      }
-      if (!best || !best.slope) return null;
-      // Follow the same finite branch backwards to its first sustained departure.
-      let k = t.indexOf(best.time), start = k;
-      while (start > 0 && Number.isFinite(row[start - 1]) && t[start - 1] >= hint - searchHalfWidth) start--;
-      let local = row[k];
-      for (let j = k + 1; j < row.length && Number.isFinite(row[j]) && t[j] <= t[k] + 0.12; j++) {
-        if (Math.abs(row[j] - center) > Math.abs(local - center)) local = row[j];
-      }
-      const direction = Math.sign(local - center) || 1;
-      const threshold = Math.max(1e-15, 3 * noise, Math.abs(row[k] - center) * 0.2);
-      let onset = null;
-      for (let j = start; j < row.length && Number.isFinite(row[j]) && t[j] <= t[k] + 0.12; j++) {
-        if (direction * (row[j] - center) >= threshold) { onset = t[j]; break; }
-      }
-      return { index, wavelength: analysis.spectralAxis[index], arrival: best.time, onset };
-    }).filter(Boolean);
-    const boundary = anchors.filter(a => Math.abs(a.arrival - hint) >= searchHalfWidth - 0.08).length / Math.max(1, anchors.length);
-    if (boundary < 0.1 || searchHalfWidth >= 1) break;
-    searchHalfWidth += 0.25;
-    } while (true);
-    const coverage = anchors.length / analysis.spectralAxis.length;
-    const span = anchors.length ? (Math.max(...anchors.map(a => a.wavelength)) - Math.min(...anchors.map(a => a.wavelength))) / Math.max(1e-12, analysis.spectralAxis.at(-1) - analysis.spectralAxis[0]) : 0;
-    const width = (v) => { const a = v.slice().sort((x,y) => x-y); return a.length ? a[Math.floor((a.length-1)*0.95)] - a[Math.floor((a.length-1)*0.05)] : Infinity; };
-    const residual = (m, a) => a.arrival - m.referenceTime - evaluateDispersion(m, a.wavelength);
-    const rawWidth = width(anchors.map(a => a.arrival));
-    let candidate = model;
-    let residuals = anchors.map(a => residual(candidate, a));
-    let kind = 'relative-cubic-qualified-offset';
-    if (coverage >= 0.2 && span >= 0.6 && width(residuals) > rawWidth + 0.05) {
-      // Free intercept polynomial: mu(lambda) = mu0 + sum parmu_j ((lambda-lambdac)/100)^j.
-      const ref = median(anchors.map(a => a.wavelength));
-      let samples = anchors.slice(), coefficients = null;
-      for (let pass = 0; pass < 3; pass++) {
-        coefficients = solveLeastSquares(samples.map(a => { const x = (a.wavelength-ref)/100; return [1,x,x*x,x*x*x]; }), samples.map(a => a.arrival), 4);
-        if (!coefficients) break;
-        const errors = samples.map(a => { const x=(a.wavelength-ref)/100; return a.arrival - (coefficients[0]+coefficients[1]*x+coefficients[2]*x*x+coefficients[3]*x*x*x); });
-        const mid = median(errors), scale = median(errors.map(e => Math.abs(e-mid))) || 0.02;
-        samples = samples.filter((a,i) => Math.abs(errors[i]-mid) <= Math.max(0.08, 4.5*scale));
-        if (samples.length < 8) { coefficients = null; break; }
-      }
-      if (coefficients) {
-        candidate = { ...model, referenceWavelength: ref, referenceTime: coefficients[0], coefficients: coefficients.slice(1) };
-        residuals = anchors.map(a => residual(candidate, a));
-        kind = 'free-intercept-cubic';
-      }
-    }
-    const boundaryFraction = anchors.filter(a => Math.abs(a.arrival-hint) >= searchHalfWidth - 0.08).length / Math.max(1, anchors.length);
-    const differences = anchors.filter(a => Number.isFinite(a.onset)).map(a => a.arrival - a.onset);
-    const onsetMedian = differences.length ? median(differences) : null;
-    const onsetWidth = width(differences);
-    const onsetAgreement = differences.length >= Math.max(8, anchors.length * 0.6) && Math.abs(onsetMedian) <= 0.3 && onsetWidth <= 0.5;
-    // Contiguous wavelength blocks are excluded from fitting before prediction.
-    const sorted = anchors.slice().sort((a,b) => a.wavelength-b.wavelength);
-    const heldOutErrors = [];
-    const ref = candidate.referenceWavelength;
-    for (let block = 0; block < 5; block++) {
-      const train = sorted.filter((_, i) => Math.floor(i * 5 / sorted.length) !== block);
-      const held = sorted.filter((_, i) => Math.floor(i * 5 / sorted.length) === block);
-      if (train.length < 8 || !held.length) continue;
-      const coefficients = solveLeastSquares(train.map(a => { const x=(a.wavelength-ref)/100; return [1,x,x*x,x*x*x]; }), train.map(a => a.arrival), 4);
-      if (!coefficients) continue;
-      held.forEach(a => { const x=(a.wavelength-ref)/100; heldOutErrors.push(a.arrival - (coefficients[0]+coefficients[1]*x+coefficients[2]*x*x+coefficients[3]*x*x*x)); });
-    }
-    const heldOutWidth = width(heldOutErrors);
-    const heldOutMedian = heldOutErrors.length ? median(heldOutErrors) : null;
-    const heldOutAgreement = heldOutErrors.length === anchors.length && heldOutWidth <= rawWidth + 0.3 && Math.abs(heldOutMedian) <= 0.2;
-    const accepted = onsetAgreement && heldOutAgreement && anchors.length >= 8 && coverage >= 0.2 && span >= 0.6 && boundaryFraction < 0.2 && width(residuals) <= rawWidth + 0.05;
-    return { ...candidate, accepted, reason: accepted ? 'qualified' : !onsetAgreement ? 'slope and onset disagree or onset support is insufficient' : !heldOutAgreement ? 'held-out wavelength validation failed' : 'insufficient support or relative alignment', absoluteOffsetStatus: accepted ? 'qualified' : 'review-required', relativeDispersionStatus: accepted ? 'qualified' : 'review-required', qualifiedOffset: accepted && kind !== 'free-intercept-cubic' ? median(residuals) : 0, offsetEstimator: 'raw-contiguous-smoothed-slope-median-v1', searchWindowsPs, onsetMedian, onsetWidth, onsetCount: differences.length, onsetAgreement, heldOutCount: heldOutErrors.length, heldOutMedian, heldOutWidth, heldOutAgreement, support: anchors.length, coverage, wavelengthSpanFraction: span, boundaryFraction, rawWidth, residualWidth: width(residuals), algorithm: kind, anchors };
-  }
-
-  function findEarlySignalIndexes(timeAxis) {
-    const finiteTimes = timeAxis.filter(Number.isFinite);
-    if (finiteTimes.length === 0) return [];
-    const positive = finiteTimes.filter((time) => time > 0);
-    const positiveLimit = positive.length ? Math.min(8, positive[Math.max(0, Math.floor(positive.length * 0.16))]) : finiteTimes.at(-1);
-    return timeAxis
-      .map((time, index) => ({ time, index }))
-      .filter((item) => Number.isFinite(item.time) && item.time <= positiveLimit)
-      .map((item) => item.index);
-  }
-
-  function estimateRowTimeZero(row, timeAxis, indexes) {
-    let best = { time: Number.NaN, weight: 0 };
-    for (let position = 1; position < indexes.length; position += 1) {
-      const previousIndex = indexes[position - 1];
-      const currentIndex = indexes[position];
-      const previousValue = row[previousIndex];
-      const currentValue = row[currentIndex];
-      const previousTime = timeAxis[previousIndex];
-      const currentTime = timeAxis[currentIndex];
-      if (!Number.isFinite(previousValue) || !Number.isFinite(currentValue) || !Number.isFinite(previousTime) || !Number.isFinite(currentTime)) continue;
-      const dt = currentTime - previousTime;
-      if (!(dt > 0)) continue;
-      const slope = Math.abs((currentValue - previousValue) / dt);
-      if (slope > best.weight) {
-        best = { time: currentTime, weight: slope };
-      }
-    }
-    return best;
-  }
-
-  function estimateMaxChirpShift(timeAxis) {
-    const finite = timeAxis.filter(Number.isFinite);
-    if (finite.length < 2) return 0;
-    const positive = finite.filter((time) => time > 0);
-    const earlyEnd = positive.length ? Math.min(8, positive[Math.max(0, Math.floor(positive.length * 0.16))]) : finite[Math.min(finite.length - 1, 8)];
-    const earlyStart = finite[0];
-    return Math.max(0.2, Math.min(5, Math.abs(earlyEnd - earlyStart) * 0.35));
-  }
-
-  function evaluateDispersion(model, wavelength) {
-    const x = (wavelength - model.referenceWavelength) / 100;
-    return clamp(evaluatePolynomial(model.coefficients, x), -model.maxShift, model.maxShift);
-  }
-
-  function evaluatePolynomial(coefficients, x) {
-    return coefficients.reduce((sum, coefficient, index) => sum + coefficient * x ** (index + 1), 0);
-  }
-
-  function solveWeightedPolynomial(samples, degree) {
-    const normal = Array.from({ length: degree }, () => Array.from({ length: degree }, () => 0));
-    const rhs = Array.from({ length: degree }, () => 0);
-    samples.forEach((sample) => {
-      const powers = Array.from({ length: degree }, (_, index) => sample.x ** (index + 1));
-      const weight = Math.max(sample.weight, 1e-12);
-      for (let row = 0; row < degree; row += 1) {
-        rhs[row] += weight * powers[row] * sample.y;
-        for (let col = 0; col < degree; col += 1) {
-          normal[row][col] += weight * powers[row] * powers[col];
-        }
-      }
-    });
-    return solveLinearSystem(normal, rhs);
   }
 
   function solveLinearSystem(matrix, vector) {
@@ -1646,28 +1412,21 @@ ${JSON.stringify(payload, null, 2)}
     return a.map((row) => row[n]);
   }
 
-  function weightedMedian(values, weights) {
-    const pairs = values
-      .map((value, index) => ({ value, weight: weights[index] }))
-      .filter((item) => Number.isFinite(item.value) && Number.isFinite(item.weight) && item.weight > 0)
-      .sort((a, b) => a.value - b.value);
-    if (pairs.length === 0) return Number.NaN;
-    const total = pairs.reduce((sum, item) => sum + item.weight, 0);
-    let cumulative = 0;
-    for (const pair of pairs) {
-      cumulative += pair.weight;
-      if (cumulative >= total / 2) return pair.value;
-    }
-    return pairs.at(-1).value;
-  }
-
   function interpolateAt(xValues, yValues, target) {
     if (!Number.isFinite(target)) return Number.NaN;
-    if (target < xValues[0] || target > xValues.at(-1)) return Number.NaN;
-    let right = xValues.findIndex((value) => value >= target);
-    if (right < 0) return Number.NaN;
-    if (right === 0) return yValues[0];
+    const epsilon = 1e-12 * Math.max(1, Math.abs(target), Math.abs(xValues[0]), Math.abs(xValues.at(-1)));
+    if (target < xValues[0] - epsilon || target > xValues.at(-1) + epsilon) return Number.NaN;
+    let low = 0, high = xValues.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (xValues[middle] < target) low = middle + 1;
+      else high = middle;
+    }
+    const right = low;
+    if (Math.abs(target - xValues[right]) <= epsilon) return yValues[right];
+    if (right === 0) return Number.NaN;
     const left = right - 1;
+    if (Math.abs(target - xValues[left]) <= epsilon) return yValues[left];
     const x0 = xValues[left];
     const x1 = xValues[right];
     const y0 = yValues[left];
@@ -1749,6 +1508,7 @@ ${JSON.stringify(payload, null, 2)}
     applyBaselineCorrection,
     applyChirpCorrection,
     applySharedChirpCorrection,
+    applyAnalysisTreatments,
     analysisToCsv,
     analysesToCombinedCsv,
     fitGlobalExponentials,

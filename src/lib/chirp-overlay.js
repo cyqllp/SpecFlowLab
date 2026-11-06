@@ -1,3 +1,5 @@
+import { treatmentStatus } from './treatment-status.js';
+
 // Clip in physical coordinates before the time transform, which clamps outside its extent.
 function clipSegment(a, b, xExtent, yExtent) {
   let lo = 0, hi = 1;
@@ -15,9 +17,7 @@ function clipSegment(a, b, xExtent, yExtent) {
 }
 
 export function chirpOverlaySegments(analysis, xExtent, yExtent) {
-  const provenance = analysis.provenance ?? [];
-  const lastChirp = provenance.filter((item) => item.label === 'Chirp').at(-1);
-  if (lastChirp?.status !== 'applied' || provenance.some((item) => item.label === 'Chirp review' && item.status === 'review-required')) return null;
+  if (treatmentStatus(analysis, 'Chirp') !== 'applied') return null;
   const curve = analysis.chirp?.curve;
   if (!Array.isArray(curve) || curve.length < 2) return null;
   const target = Number.isFinite(analysis.chirp.model?.targetReferenceTime) ? analysis.chirp.model.targetReferenceTime : 0;

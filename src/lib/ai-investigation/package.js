@@ -1,6 +1,7 @@
 import { strToU8, zipSync } from "fflate";
 
 import { nearestFiniteIndex, selectRepresentativeTimeIndices, selectRepresentativeWavelengthIndices } from "./coordinate-selection.js";
+import { treatmentStatus } from "../treatment-status.js";
 import { AI_INVESTIGATION_GOALS, validateAiGoal } from "./goals.js";
 import {
   AI_INVESTIGATION_SCHEMA,
@@ -489,7 +490,7 @@ function preprocessingCsv(datasets, evidenceId) {
       axisMax(analysis.spectralAxis),
       axisMin(analysis.timeAxis),
       axisMax(analysis.timeAxis),
-      analysis.chirp ? "applied" : "not-recorded",
+      treatmentStatus(analysis, "Chirp"),
       (analysis.provenance ?? []).map((item) => `${item.label}:${item.status ?? "recorded"}`).join("; "),
       finiteCounts((analysis.matrix ?? []).flat()).missing,
       JSON.stringify(analysis.excluded ?? []),

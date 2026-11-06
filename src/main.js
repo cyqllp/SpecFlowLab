@@ -16,6 +16,7 @@ import { moveDataset } from "./lib/dataset-order.js";
 import { moveFolder } from "./lib/folder-order.js";
 import { componentColor } from "./lib/component-colors.js";
 import { chirpOverlaySegments } from "./lib/chirp-overlay.js";
+import { analysisNeedsReview, isAnalysisTreated, treatmentStatus } from "./lib/treatment-status.js";
 import { comparisonStyleDefaults } from "./lib/comparison-style.js";
 import { DEFAULT_FITTING_INPUTS, restoreDefaultFittingInputs } from "./lib/fitting-defaults.js";
 import {
@@ -437,8 +438,8 @@ function renderOverview() {
           <div class="treatment-layout">
             <div>${renderRangeControls(dataset, folder)}</div>
             <div class="treatment-actions">
-              <button data-action="baseline" class="${treatmentEnabled(dataset, folder, "baseline") ? "active" : ""}" ${state.job ? "disabled" : ""}>Baseline</button>
-              <button data-action="chirp" class="${treatmentEnabled(dataset, folder, "chirp") ? "active" : ""}" ${state.job ? "disabled" : ""}>Chirp</button>
+              <button data-action="baseline" class="${treatmentStatus(analysis, "Baseline") === "applied" ? "active" : ""}" ${state.job ? "disabled" : ""}>Baseline</button>
+              <button data-action="chirp" class="${treatmentStatus(analysis, "Chirp") === "applied" ? "active" : ""}" ${state.job ? "disabled" : ""}>${["skipped", "review-required"].includes(treatmentStatus(analysis, "Chirp")) ? "Chirp · Review" : "Chirp"}</button>
               <button data-action="reset-dataset" class="reset-command" ${state.job ? "disabled" : ""} title="Reset the active dataset to its selected source range and remove its baseline, chirp, and fit">Reset Dataset</button>
               <button data-action="reset-folder" class="reset-command" ${state.job ? "disabled" : ""} title="Reset every dataset in the folder and clear treatments and cropping">Reset Folder</button>
             </div>
@@ -655,12 +656,14 @@ function renderModal() {
 function renderChirpHintModal() {
   const dataset = activeDataset();
   const analysis = dataset?.baseAnalysis;
+  const reviewReason = dataset?.analysis?.provenance?.findLast(p => ["skipped", "review-required"].includes(p.status))?.reason;
   const value = Number.isFinite(activeFolder()?.chirpZeroTimePs) ? activeFolder().chirpZeroTimePs : (dataset?.analysis?.chirp ? 0 : analysis?.timeAxis[state.selectedTimeIndex] ?? 0);
   return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Chirp correction">
     <div class="modal compact-modal">
       <header class="modal-head"><div><h2>Chirp correction</h2></div><button data-action="close-modal" class="icon-button" aria-label="Close">x</button></header>
       <p>Locate the signal near this input delay; correction moves its fitted time zero to 0 ps. 在原始时间轴上定位信号；校正将拟合的时间零点移至 0 ps。</p><label class="modal-field"><span>Approximate zero time (ps)</span><input id="chirp-zero-time" type="number" step="any" required value="${value}" /></label>
-      <footer class="modal-footer"><button data-action="close-modal">Cancel</button><button data-action="confirm-chirp">Confirm</button></footer>
+      ${analysisNeedsReview(dataset?.analysis) ? `<p role="status">${escapeHtml(reviewReason ?? "Review the correction before applying it.")}</p>` : ""}
+      <footer class="modal-footer"><button data-action="close-modal">Cancel</button>${treatmentEnabled(dataset, activeFolder(), "chirp") ? '<button data-action="disable-chirp">Remove Chirp</button>' : ''}<button data-action="confirm-chirp">Confirm</button></footer>
     </div></section>`;
 }
 
@@ -2295,8 +2298,11 @@ async function handleAction(event) {
       await toggleActiveTreatment("baseline");
     } else if (action === "chirp") {
       if (!activeDataset() || !activeFolder()) return;
-      if (treatmentEnabled(activeDataset(), activeFolder(), "chirp")) await toggleActiveTreatment("chirp");
+      if (treatmentEnabled(activeDataset(), activeFolder(), "chirp") && treatmentStatus(activeDataset().analysis, "Chirp") === "applied") await toggleActiveTreatment("chirp");
       else { state.modal = "chirp-hint"; render(); }
+    } else if (action === "disable-chirp") {
+      state.modal = null;
+      await toggleActiveTreatment("chirp");
     } else if (action === "confirm-chirp") {
       const input = document.getElementById("chirp-zero-time");
       if (!input || input.value.trim() === "" || !Number.isFinite(input.valueAsNumber)) { input?.reportValidity(); return; }
@@ -2687,9 +2693,10 @@ async function importDataFiles(event, targetFolderId = null) {
       });
     }
 
-    let analyses = parsed.map((dataset) => Parser.cloneAnalysisDataset(dataset.baseAnalysis));
-    if (folder.treatments?.baseline) analyses = analyses.map((analysis) => Parser.applyBaselineCorrection(analysis));
-    if (folder.treatments?.chirp) analyses = Parser.applySharedChirpCorrection(analyses, { approximateZeroTimePs: folder.chirpZeroTimePs });
+    const analyses = parsed.map(dataset => Parser.applyAnalysisTreatments(dataset.baseAnalysis, {
+      baseline: folder.treatments?.baseline, chirp: folder.treatments?.chirp,
+      approximateZeroTimePs: folder.chirpZeroTimePs,
+    }));
     const datasets = parsed.map((dataset, index) => ({ ...dataset, analysis: analyses[index] }));
 
     if (!existingFolder) {
@@ -2707,6 +2714,7 @@ async function importDataFiles(event, targetFolderId = null) {
     state.compare.selectedIds = state.datasets.map((dataset) => dataset.id);
     ensureCompareStyles();
     markDirty();
+    return treatmentReviewItems(datasets);
   }, targetFolderId
     ? `${files.length} dataset${files.length === 1 ? "" : "s"} imported into the selected folder with its stored range and treatments. Original CSV text or UFS bytes are preserved.`
     : `${files.length} dataset${files.length === 1 ? "" : "s"} imported into one new folder. Original CSV text or UFS bytes are preserved.`);
@@ -2823,10 +2831,11 @@ function applyRangeToFolder(folderId, nextRange) {
   });
   state.datasets = updated;
   folder.range = { ...nextRange };
-  rebuildTreatments(folderId);
+  const reviews = rebuildTreatments(folderId);
   clearPlotZooms();
   clampSelections();
   markDirty();
+  return reviews;
 }
 
 function rebuildTreatments(folderId, affectedDatasetIds = null) {
@@ -2834,36 +2843,40 @@ function rebuildTreatments(folderId, affectedDatasetIds = null) {
   const affected = affectedDatasetIds ? new Set(affectedDatasetIds) : null;
   const targets = folderDatasets(folderId).filter((dataset) => !affected || affected.has(dataset.id));
   if (!folder || !targets.length) return;
-  let analyses = targets.map((dataset) => {
-    let analysis = Parser.cloneAnalysisDataset(dataset.baseAnalysis);
-    if (treatmentEnabled(dataset, folder, "baseline")) analysis = Parser.applyBaselineCorrection(analysis);
-    return analysis;
-  });
-  const chirpIndexes = targets
-    .map((dataset, index) => treatmentEnabled(dataset, folder, "chirp") ? index : -1)
-    .filter((index) => index >= 0);
-  if (chirpIndexes.length) {
-    const corrected = Parser.applySharedChirpCorrection(chirpIndexes.map((index) => analyses[index]), { approximateZeroTimePs: folder.chirpZeroTimePs });
-    chirpIndexes.forEach((analysisIndex, correctedIndex) => {
-      const result = corrected[correctedIndex];
-      const previous = targets[analysisIndex].analysis;
-      const skipped = result.provenance?.at(-1)?.status === "skipped";
-      const sameAxis = (a, b) => a?.length === b?.length && a.every((v, i) => v === b[i]);
-      const sameBaseline = Boolean(previous?.provenance?.some(p => p.label === "Baseline" && p.status === "applied")) === Boolean(analyses[analysisIndex].provenance?.some(p => p.label === "Baseline" && p.status === "applied"));
-      if (skipped && previous?.provenance?.some(p => p.label === "Chirp" && p.status === "applied") && sameBaseline && sameAxis(previous.timeAxis, result.timeAxis) && sameAxis(previous.spectralAxis, result.spectralAxis)) {
-        analyses[analysisIndex] = Parser.cloneAnalysisDataset(previous);
-        analyses[analysisIndex].provenance.push({ label: "Chirp review", status: "review-required", reason: result.chirp?.model?.reason ?? "Fit unavailable; previous treatment preserved" });
-      } else analyses[analysisIndex] = result;
+  const retained = new Set();
+  const analyses = targets.map(dataset => {
+    const baseline = treatmentEnabled(dataset, folder, "baseline");
+    const result = Parser.applyAnalysisTreatments(dataset.baseAnalysis, {
+      baseline, chirp: treatmentEnabled(dataset, folder, "chirp"), approximateZeroTimePs: folder.chirpZeroTimePs,
     });
-  }
+    const previous = dataset.analysis;
+    const sameAxis = (a, b) => a?.length === b?.length && a.every((v, i) => v === b[i]);
+    if (treatmentStatus(result, "Chirp") === "skipped"
+      && previous?.provenance?.some(p => p.label === "Chirp" && p.status === "applied")
+      && (treatmentStatus(previous, "Baseline") === "applied") === baseline
+      && sameAxis(previous.timeAxis, result.timeAxis) && sameAxis(previous.spectralAxis, result.spectralAxis)) {
+      const preserved = Parser.cloneAnalysisDataset(previous);
+      preserved.provenance.push({ label: "Chirp review", status: "review-required", reason: `${result.chirp.model.reason} The previous accepted correction and any existing fit were retained.` });
+      retained.add(dataset.id);
+      return preserved;
+    }
+    return result;
+  });
   const analysisById = new Map(targets.map((dataset, index) => [dataset.id, analyses[index]]));
   state.datasets = state.datasets.map((dataset) => analysisById.has(dataset.id)
-    ? { ...dataset, analysis: analysisById.get(dataset.id), fit: null }
+    ? { ...dataset, analysis: analysisById.get(dataset.id), fit: retained.has(dataset.id) ? dataset.fit : null }
     : dataset);
   clearPlotZooms();
   clampSelections();
   markDirty();
-  return targets.map((_, i) => analyses[i].provenance?.at(-1)).filter(p => p?.status === "skipped" || p?.status === "review-required");
+  return treatmentReviewItems(targets.map((dataset, i) => ({ ...dataset, analysis: analyses[i] })));
+}
+
+function treatmentReviewItems(datasets) {
+  return datasets.filter(dataset => analysisNeedsReview(dataset.analysis)).map(dataset => ({
+    status: "review-required",
+    reason: `${datasetDisplayName(dataset)}: ${dataset.analysis.provenance.findLast(p => ["skipped", "review-required"].includes(p.status))?.reason ?? "Review preprocessing."}`,
+  }));
 }
 
 async function toggleActiveTreatment(kind, approximateZeroTimePs) {
@@ -2873,7 +2886,9 @@ async function toggleActiveTreatment(kind, approximateZeroTimePs) {
   const hintChanged = kind === "chirp" && Number.isFinite(approximateZeroTimePs) && folder.chirpZeroTimePs !== approximateZeroTimePs;
   if (hintChanged) folder.chirpZeroTimePs = approximateZeroTimePs;
   const previousStates = snapshotTreatmentStates(folderDatasets(folder.id), folder);
-  if (folder.treatments[kind] && dataset.treatmentOverrides?.[kind]) {
+  if (kind === "chirp" && Number.isFinite(approximateZeroTimePs) && folder.treatments.chirp) {
+    dataset.treatmentOverrides = { ...(dataset.treatmentOverrides ?? {}), chirp: false };
+  } else if (folder.treatments[kind] && dataset.treatmentOverrides?.[kind]) {
     dataset.treatmentOverrides = { ...(dataset.treatmentOverrides ?? {}), [kind]: false };
   } else {
     folder.treatments[kind] = !folder.treatments[kind];
@@ -2884,12 +2899,13 @@ async function toggleActiveTreatment(kind, approximateZeroTimePs) {
     }
   }
   const affectedIds = changedTreatmentDatasetIds(folderDatasets(folder.id), folder, previousStates);
+  if (kind === "chirp" && Number.isFinite(approximateZeroTimePs) && !affectedIds.includes(dataset.id)) affectedIds.push(dataset.id);
   if (hintChanged) folderDatasets(folder.id).forEach((item) => {
     if (treatmentEnabled(item, folder, "chirp") && !affectedIds.includes(item.id)) affectedIds.push(item.id);
   });
   const nowEnabled = treatmentEnabled(activeDataset(), folder, kind);
   const label = kind === "baseline" ? "pre-zero baseline" : "chirp";
-  await runJob(nowEnabled ? `Applying ${label}` : `Removing ${label}`, kind, () => rebuildTreatments(folder.id, affectedIds), (reviews) => reviews?.length ? `Review required: ${reviews.map(p => p.reason || "fit unavailable").join("; ")}. Previously accepted results were preserved where compatible.` : `${kind === "baseline" ? "Baseline" : "Chirp"} state updated without rebuilding unaffected folder datasets.`);
+  await runJob(nowEnabled ? `Applying ${label}` : `Removing ${label}`, kind, () => rebuildTreatments(folder.id, affectedIds), `${kind === "baseline" ? "Baseline" : "Chirp"} state updated without rebuilding unaffected folder datasets.`);
 }
 
 function resetSingleDataset(datasetId, folderId) {
@@ -3896,11 +3912,10 @@ async function runJob(label, kind, work, successMessage) {
     if (result === false || result === null) {
       state.notice = { kind: "info", title: "Cancelled", message: "No file or project state was changed." };
     } else {
-      state.notice = {
-        kind: "success",
-        title: "Completed",
-        message: typeof successMessage === "function" ? successMessage(result) : successMessage,
-      };
+      const reviews = Array.isArray(result) ? result.filter(item => item?.status === "review-required") : [];
+      state.notice = reviews.length
+        ? { kind: "warning", title: "Review required", message: reviews.map(item => item.reason).join(" ") }
+        : { kind: "success", title: "Completed", message: typeof successMessage === "function" ? successMessage(result) : successMessage };
     }
     return result;
   } catch (error) {
@@ -5729,6 +5744,7 @@ function projectStateLabel() {
 }
 
 function datasetStateLabel(dataset) {
+  if (analysisNeedsReview(dataset.analysis)) return "Review required";
   if (dataset.fit) return dataset.fit.irfLimited?.some(Boolean) ? "Fit available, unresolved" : "Fit available";
   if (isTreated(dataset)) return "Treated";
   return "Imported";
@@ -5743,13 +5759,14 @@ function irfLimitedCount(dataset) {
 }
 
 function isTreated(dataset) {
-  return Boolean(dataset?.analysis?.provenance?.length);
+  return isAnalysisTreated(dataset?.analysis);
 }
 
 function treatmentLabel(folder = activeFolder(), dataset = activeDataset()) {
   const labels = [];
-  if (treatmentEnabled(dataset, folder, "baseline")) labels.push("Baseline");
-  if (treatmentEnabled(dataset, folder, "chirp")) labels.push("Chirp");
+  if (treatmentStatus(dataset?.analysis, "Baseline") === "applied") labels.push("Baseline");
+  if (treatmentStatus(dataset?.analysis, "Chirp") === "applied") labels.push("Chirp");
+  if (analysisNeedsReview(dataset?.analysis)) labels.push("Review required");
   return labels.length ? labels.join(" + ") : "Analysis range";
 }
 

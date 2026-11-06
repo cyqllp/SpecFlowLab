@@ -23,3 +23,9 @@ test('skipped and review-required chirps do not produce overlays', () => {
   const review = analysis(); review.provenance.push({ label: 'Chirp review', status: 'review-required' });
   assert.equal(chirpOverlaySegments(review, [400, 500], [-1, 1]), null);
 });
+
+test('a successful retry restores the overlay despite an older review record', () => {
+  const retried = analysis();
+  retried.provenance.unshift({ label: 'Chirp review', status: 'review-required' });
+  assert.ok(chirpOverlaySegments(retried, [400, 500], [-1, 1]));
+});

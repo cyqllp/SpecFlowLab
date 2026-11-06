@@ -1,3 +1,5 @@
+import { isAnalysisTreated } from "./treatment-status.js";
+
 /**
  * Shared selection model for Compare and Merge dataset pickers.
  * No DOM or main.js imports.
@@ -37,7 +39,7 @@ export function isEligibleForMode(dataset, mode) {
   const config = requireMode(mode);
   if (config.eligibility === "all") return true;
   if (config.eligibility === "treated") {
-    return Boolean(dataset?.analysis?.provenance?.length);
+    return isAnalysisTreated(dataset?.analysis);
   }
   return false;
 }
