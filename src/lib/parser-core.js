@@ -349,23 +349,27 @@ import { analysisNeedsReview, treatmentStatus } from "./treatment-status.js";
 
   function applyChirpCorrection(analysis, options = {}) {
     const next = cloneAnalysisDataset(analysis);
-    const model = options.model ?? estimateChirpModel(next, options);
+    const axesValid = next.timeAxis?.length >= 2 && next.spectralAxis?.length > 0
+      && next.timeAxis.every((v, i, a) => Number.isFinite(v) && (!i || v > a[i - 1]))
+      && next.spectralAxis.every((v, i, a) => Number.isFinite(v) && (!i || v > a[i - 1]))
+      && next.matrix?.length === next.spectralAxis.length
+      && next.matrix.every(row => Array.isArray(row) && row.length === next.timeAxis.length && row.every(v => Number.isFinite(v) || Number.isNaN(v)));
+    const model = options.model ?? (axesValid ? estimateChirpModel(next, options) : { accepted: false, reason: "Invalid axes or matrix." });
     const targetReferenceTime = Number.isFinite(options.targetReferenceTime) ? options.targetReferenceTime : 0;
     const skip = (reason) => {
       next.chirp = { model: { ...model, targetReferenceTime, accepted: false, reason, absoluteOffsetStatus: "review-required", relativeDispersionStatus: "review-required" }, curve: [] };
       next.provenance.push({ label: "Chirp", status: "skipped", reason });
       return next;
     };
+    if (!axesValid) return skip("Invalid axes or matrix.");
     if (model.accepted === false) return skip(model.reason);
-    if (targetReferenceTime < next.timeAxis[0] || targetReferenceTime > next.timeAxis.at(-1)) {
-      return skip("Target time zero is outside the output time range. The input matrix was preserved; choose a range containing the target before applying correction.");
-    }
+    if (!Number.isFinite(model.referenceWavelength) || !Number.isFinite(model.referenceTime) || !Array.isArray(model.coefficients) || !model.coefficients.every(Number.isFinite)) return skip("Invalid chirp model.");
     const shifts = next.spectralAxis.map(wavelength => chirpArrival(model, wavelength) - targetReferenceTime);
     if (!shifts.every(Number.isFinite)) return skip("The fitted chirp predicts non-finite shifts.");
     const correctedMatrix = applyTimeShifts(next, shifts);
     const finiteCount = matrix => matrix.reduce((sum, row) => sum + row.filter(Number.isFinite).length, 0);
     const inputFiniteCount = finiteCount(next.matrix), outputFiniteCount = finiteCount(correctedMatrix);
-    if (!outputFiniteCount || outputFiniteCount < inputFiniteCount * 0.25) {
+    if (!outputFiniteCount) {
       return skip("The requested shift leaves insufficient measured time support. The input matrix was preserved; widen the analysis range.");
     }
     const curve = next.spectralAxis.map((wavelength, rowIndex) => ({
@@ -375,12 +379,15 @@ import { analysisNeedsReview, treatmentStatus } from "./treatment-status.js";
     }));
 
     next.matrix = correctedMatrix;
-    next.chirp = { model: { ...model, targetReferenceTime, zeroResidualCorrection: 0, inputFiniteCount, outputFiniteCount }, curve };
+    const warnings = [...(model.warnings ?? [])];
+    if (outputFiniteCount < inputFiniteCount * 0.25) warnings.push(`Only ${outputFiniteCount} of ${inputFiniteCount} finite input samples (${(100 * outputFiniteCount / inputFiniteCount).toFixed(1)}%) remain after the shift.`);
+    next.chirp = { model: { ...model, warnings, targetReferenceTime, zeroResidualCorrection: 0, inputFiniteCount, outputFiniteCount }, curve };
     next.provenance.push({
       label: "Chirp",
       status: "applied",
       model: model.algorithm ?? "provided-polynomial",
       range: `${format(next.spectralAxis[0])} to ${format(next.spectralAxis.at(-1))} nm; target t0 ${format(targetReferenceTime)} ps`,
+      ...(warnings.length ? { note: warnings.join(" ") } : {}),
       ...(model.extrapolation ? { note: model.extrapolation.warning, fittingRange: model.calibrationRange, predictedRanges: model.extrapolation.ranges } : {}),
     });
     return next;
@@ -661,7 +668,10 @@ import { analysisNeedsReview, treatmentStatus } from "./treatment-status.js";
               reason: treatmentStatus(analysis, "Chirp") === "review-required"
                 ? analysis.provenance?.findLast(p => p.label === "Chirp review")?.reason
                 : analysis.chirp.model.reason,
-              method: "polynomial dispersion correction",
+              method: analysis.chirp.model.method ?? "polynomial dispersion correction",
+              reference_wavelength_nm: cleanNumber(analysis.chirp.model.referenceWavelength),
+              seed_time_ps: cleanNumber(analysis.chirp.model.seedTimePs),
+              warnings: analysis.chirp.model.warnings ?? [],
               polynomial_terms: analysis.chirp.model.coefficients.length,
               fitted_wavelength_range_nm: analysis.chirp.model.sourceRange,
               predicted_wavelength_ranges_nm: analysis.chirp.model.extrapolation?.ranges ?? [],

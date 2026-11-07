@@ -24,7 +24,8 @@ import {
   snapshotTreatmentStates,
   treatmentEnabled,
   chirpHintForDataset,
-  chirpFitRangeForDataset,
+  chirpReferenceForDataset,
+  chirpCursorSeeds,
   configureChirpTreatment,
 } from "./lib/treatment-plan.js";
 import {
@@ -661,48 +662,32 @@ function renderModal() {
 }
 
 function chirpDialogDefaults(dataset, folder) {
-  const hint = chirpHintForDataset(dataset, folder);
-  const value = Number.isFinite(hint) ? hint : (dataset?.analysis?.chirp ? 0 : dataset?.baseAnalysis?.timeAxis[state.selectedTimeIndex] ?? 0);
-  const retry = treatmentEnabled(dataset, folder, "chirp") || dataset?.analysis?.chirp || folder?.treatments?.chirp;
-  const range = chirpFitRangeForDataset(dataset, folder);
-  return { datasetId: dataset?.id, value: String(value), scope: retry ? "dataset" : "folder", rangeMin: range ? String(range.min) : "", rangeMax: range ? String(range.max) : "" };
+  const { time: value, wavelength } = chirpCursorSeeds(dataset?.analysis, state.selectedTimeIndex, state.selectedWavelengthIndex);
+  return { datasetId: dataset?.id, value: String(value), reference: String(wavelength), scope: "dataset" };
 }
 
 function renderChirpHintModal() {
   const dataset = activeDataset(), folder = activeFolder();
-  const issue = treatmentIssue(dataset?.analysis, "Chirp");
   const draft = state.chirpDraft?.datasetId === dataset?.id ? state.chirpDraft : chirpDialogDefaults(dataset, folder);
-  const model = issue?.attemptedModel ?? dataset?.analysis?.chirp?.model;
+  const model = dataset?.analysis?.chirp?.model;
   const metric = number => Number.isFinite(number) ? format(number) : "—";
-  const count = number => Number.isInteger(number) && number >= 0 ? String(number) : "—";
   return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Chirp correction">
     <div class="modal compact-modal">
       <header class="modal-head"><div><h2>Chirp correction</h2></div><button data-action="close-modal" class="icon-button" aria-label="Close">x</button></header>
-      <p>Choose an approximate arrival on the original time axis. Each dataset is fitted independently and aligned to 0 ps.</p>
+      <p>Initial values use the current cursor. Time is on the original input axis; each dataset is fitted independently and aligned to 0 ps.</p>
       <label class="modal-field"><span>Apply to</span><select id="chirp-scope"><option value="dataset" ${draft.scope === "dataset" ? "selected" : ""}>This dataset</option><option value="folder" ${draft.scope === "folder" ? "selected" : ""}>Current folder</option></select></label>
-      <label class="modal-field"><span>Approximate zero time (ps)</span><input id="chirp-zero-time" type="number" step="any" required value="${escapeHtml(draft.value)}" /></label>
-      <details class="chirp-fitting-range" ${draft.rangeMin || draft.rangeMax ? "open" : ""}><summary>Fitting wavelengths (optional)</summary>
-        <div class="range-grid"><label><span>From (nm)</span><input id="chirp-fit-min" type="number" step="any" value="${escapeHtml(draft.rangeMin)}" placeholder="Auto" /></label><label><span>To (nm)</span><input id="chirp-fit-max" type="number" step="any" value="${escapeHtml(draft.rangeMax)}" placeholder="Auto" /></label></div>
-        <p>Leave blank for automatic fitting. A weak red tail may be predicted from supported wavelengths. A chosen fitting range does not crop the heatmap; corrections outside it are marked as predicted.</p>
-      </details>
-      <p class="muted">A dataset-only retry leaves other datasets and their fits unchanged.</p>
-      ${issue ? `<p role="status">${escapeHtml(issue.reason ?? "Review the correction before applying it.")}</p>` : ""}
-      ${model?.extrapolation ? `<p class="chirp-prediction-note" role="note"><strong>Predicted correction:</strong> ${model.extrapolation.ranges.map(r => `${metric(r.min)}–${metric(r.max)} nm`).join(", ")}. ${escapeHtml(model.extrapolation.warning)}</p>` : ""}
+      <label class="modal-field"><span>Initial t0 (original input, ps)</span><input id="chirp-zero-time" type="number" step="any" required value="${escapeHtml(draft.value)}" /></label>
+      <label class="modal-field"><span>Reference wavelength (nm)</span><input id="chirp-reference" type="number" step="any" required value="${escapeHtml(draft.reference)}" /></label>
+      <p class="muted">If the result is unsuitable, retry with different initial values or crop.</p>
+      ${model?.accepted === false ? `<p role="status">${escapeHtml(model.reason ?? "The chirp correction could not be applied.")}</p>` : ""}
       ${model ? `<details class="chirp-diagnostics"><summary>Correction diagnostics</summary><dl class="metric-list">
-        <div><dt>Signal anchors</dt><dd>${count(model.support)}</dd></div>
-        ${model.calibrationRange ? `<div><dt>Fitting range (nm)</dt><dd>${metric(model.calibrationRange.min)}–${metric(model.calibrationRange.max)}</dd></div>` : ""}
-        ${model.outsideAnchorCheck ? `<div><dt>Conflicting outside-range anchors</dt><dd>${count(model.outsideAnchorCheck.conflictingCount)} / ${count(model.outsideAnchorCheck.testedCount)}</dd></div>` : ""}
-        ${model.outsideAnchorCheck?.conflicts?.length ? `<div><dt>Outside-range conflict wavelengths (nm)</dt><dd>${metric(Math.min(...model.outsideAnchorCheck.conflicts.map(a => a.wavelength)))}–${metric(Math.max(...model.outsideAnchorCheck.conflicts.map(a => a.wavelength)))}</dd></div>` : ""}
-        ${Number.isFinite(model.inlierCount) ? `<div><dt>Consistent anchors</dt><dd>${count(model.inlierCount)} / ${count(model.support)}</dd></div>` : ""}
-        ${Number.isFinite(model.selectedDegree) ? `<div><dt>Polynomial degree</dt><dd>${count(model.selectedDegree)}</dd></div>` : ""}
-        <div><dt>Timing tolerance (ps)</dt><dd>${metric(model.alignmentTolerancePs)}</dd></div>
-        <div><dt>All-anchor residual p95 (ps)</dt><dd>${metric(model.residualP95)}</dd></div>
-        <div><dt>Consistent-anchor residual p95 (ps)</dt><dd>${metric(model.inlierResidualP95 ?? model.residualP95)}</dd></div>
-        <div><dt>All-anchor validation p95 (ps)</dt><dd>${metric(model.heldOutP95)}</dd></div>
-        <div><dt>Consistent-anchor validation p95 (ps)</dt><dd>${metric(model.heldOutInlierP95 ?? model.heldOutP95)}</dd></div>
-        ${Number.isFinite(model.heldOutInlierCount) ? `<div><dt>Consistent validation anchors</dt><dd>${count(model.heldOutInlierCount)} / ${count(model.heldOutCount)}</dd></div>` : ""}
-        ${Number.isFinite(model.testedCandidateCount) ? `<div><dt>Qualified candidates</dt><dd>${count(model.qualifiedCandidateCount)} / ${count(model.testedCandidateCount)}</dd></div>` : ""}
-      </dl><p>Automatic alignment uses sample signals. These checks do not replace an independent chirp calibration.</p></details>` : ""}
+        <div><dt>Method</dt><dd>${escapeHtml(model.method ?? model.algorithm ?? "—")}</dd></div>
+        <div><dt>Initial t0 (ps)</dt><dd>${metric(model.seedTimePs)}</dd></div>
+        <div><dt>Reference wavelength (nm)</dt><dd>${metric(model.referenceWavelength)}</dd></div>
+        <div><dt>Signal anchors</dt><dd>${metric(model.support)}</dd></div>
+        <div><dt>Polynomial degree</dt><dd>${metric(model.selectedDegree)}</dd></div>
+        <div><dt>Residual p95 (ps)</dt><dd>${metric(model.residualP95)}</dd></div>
+      </dl>${(model.warnings ?? []).map(w => `<p>${escapeHtml(w)}</p>`).join("")}</details>` : ""}
       <footer class="modal-footer"><button data-action="close-modal">Cancel</button>${treatmentEnabled(dataset, folder, "chirp") ? '<button data-action="disable-chirp">Remove Chirp</button>' : ''}<button data-action="confirm-chirp">Apply Chirp</button></footer>
     </div></section>`;
 }
@@ -1615,8 +1600,7 @@ function renderExpandedPlot() {
 function bindDom() {
   document.getElementById("chirp-scope")?.addEventListener("change", event => { if (state.chirpDraft) state.chirpDraft.scope = event.target.value; });
   document.getElementById("chirp-zero-time")?.addEventListener("input", event => { if (state.chirpDraft) state.chirpDraft.value = event.target.value; });
-  document.getElementById("chirp-fit-min")?.addEventListener("input", event => { if (state.chirpDraft) state.chirpDraft.rangeMin = event.target.value; });
-  document.getElementById("chirp-fit-max")?.addEventListener("input", event => { if (state.chirpDraft) state.chirpDraft.rangeMax = event.target.value; });
+  document.getElementById("chirp-reference")?.addEventListener("input", event => { if (state.chirpDraft) state.chirpDraft.reference = event.target.value; });
   document.getElementById("language-select")?.addEventListener("change", (event) => {
     state.locale = normalizeLocale(event.target.value);
     saveLocale(state.locale);
@@ -2353,14 +2337,10 @@ async function handleAction(event) {
       if (!input || input.value.trim() === "" || !Number.isFinite(input.valueAsNumber)) { input?.reportValidity(); return; }
       const hint = input.valueAsNumber;
       const scope = document.getElementById("chirp-scope")?.value ?? "dataset";
-      const min = document.getElementById("chirp-fit-min"), max = document.getElementById("chirp-fit-max");
-      let fitRange = null;
-      if (min?.value || max?.value) {
-        if (!Number.isFinite(min?.valueAsNumber) || !Number.isFinite(max?.valueAsNumber) || min.valueAsNumber >= max.valueAsNumber) throw new Error("Enter both fitting wavelength bounds, with From smaller than To.");
-        fitRange = { min: min.valueAsNumber, max: max.valueAsNumber };
-      }
+      const reference = document.getElementById("chirp-reference");
+      if (!reference || reference.value.trim() === "" || !Number.isFinite(reference.valueAsNumber)) { reference?.reportValidity(); return; }
       state.modal = null;
-      await applyChirpAction(true, hint, scope, fitRange);
+      await applyChirpAction(true, hint, scope, reference.valueAsNumber);
     } else if (action === "reset-dataset") {
       const dataset = activeDataset();
       const folder = activeFolder();
@@ -2748,7 +2728,7 @@ async function importDataFiles(event, targetFolderId = null) {
     const analyses = parsed.map(dataset => Parser.applyAnalysisTreatments(dataset.baseAnalysis, {
       baseline: folder.treatments?.baseline, chirp: folder.treatments?.chirp,
       approximateZeroTimePs: folder.chirpZeroTimePs,
-      fitRange: folder.chirpFitRange,
+      referenceWavelength: folder.chirpReferenceWavelength,
     }));
     const datasets = parsed.map((dataset, index) => ({ ...dataset, analysis: analyses[index] }));
 
@@ -2896,7 +2876,6 @@ async function rebuildTreatments(folderId, affectedDatasetIds = null) {
   const affected = affectedDatasetIds ? new Set(affectedDatasetIds) : null;
   const targets = folderDatasets(folderId).filter((dataset) => !affected || affected.has(dataset.id));
   if (!folder || !targets.length) return;
-  const retained = new Set();
   const analyses = [];
   for (const dataset of targets) {
     if (state.job) {
@@ -2906,25 +2885,13 @@ async function rebuildTreatments(folderId, affectedDatasetIds = null) {
     }
     const baseline = treatmentEnabled(dataset, folder, "baseline");
     const result = Parser.applyAnalysisTreatments(dataset.baseAnalysis, {
-      baseline, chirp: treatmentEnabled(dataset, folder, "chirp"), approximateZeroTimePs: chirpHintForDataset(dataset, folder), fitRange: chirpFitRangeForDataset(dataset, folder),
+      baseline, chirp: treatmentEnabled(dataset, folder, "chirp"), approximateZeroTimePs: chirpHintForDataset(dataset, folder), referenceWavelength: chirpReferenceForDataset(dataset, folder),
     });
-    const previous = dataset.analysis;
-    const sameAxis = (a, b) => a?.length === b?.length && a.every((v, i) => v === b[i]);
-    if (treatmentStatus(result, "Chirp") === "skipped"
-      && previous?.provenance?.some(p => p.label === "Chirp" && p.status === "applied")
-      && (treatmentStatus(previous, "Baseline") === "applied") === baseline
-      && sameAxis(previous.timeAxis, result.timeAxis) && sameAxis(previous.spectralAxis, result.spectralAxis)) {
-      const preserved = Parser.cloneAnalysisDataset(previous);
-      preserved.provenance.push({ label: "Chirp review", status: "review-required", reason: `${result.chirp.model.reason} The previous accepted correction and any existing fit were retained.`, attemptedModel: result.chirp.model });
-      retained.add(dataset.id);
-      analyses.push(preserved);
-    } else {
-      analyses.push(result);
-    }
+    analyses.push(result);
   }
   const analysisById = new Map(targets.map((dataset, index) => [dataset.id, analyses[index]]));
   state.datasets = state.datasets.map((dataset) => analysisById.has(dataset.id)
-    ? { ...dataset, analysis: analysisById.get(dataset.id), fit: retained.has(dataset.id) ? dataset.fit : null }
+    ? { ...dataset, analysis: analysisById.get(dataset.id), fit: null }
     : dataset);
   clearPlotZooms();
   clampSelections();
@@ -2939,10 +2906,10 @@ function treatmentReviewItems(datasets) {
   }));
 }
 
-async function applyChirpAction(enabled, approximateZeroTimePs, scope, fitRange) {
+async function applyChirpAction(enabled, approximateZeroTimePs, scope, referenceWavelength) {
   const folder = activeFolder(), dataset = activeDataset();
   if (!folder || !dataset) return;
-  const plan = configureChirpTreatment(state.datasets, folder, { datasetId: dataset.id, scope, enabled, approximateZeroTimePs, fitRange });
+  const plan = configureChirpTreatment(state.datasets, folder, { datasetId: dataset.id, scope, enabled, approximateZeroTimePs, referenceWavelength });
   state.folders = state.folders.map(item => item.id === folder.id ? plan.folder : item);
   state.datasets = plan.datasets;
   await runJob(enabled ? "Applying chirp" : "Removing chirp", "chirp", () => rebuildTreatments(folder.id, plan.affectedIds), scope === "dataset"
@@ -3023,6 +2990,8 @@ function resetAnalysis(folderId) {
   });
   folder.treatments = { baseline: false, chirp: false };
   folder.chirpFitRange = null;
+  folder.chirpZeroTimePs = null;
+  folder.chirpReferenceWavelength = null;
   folder.range = commonRangeFromAnalyses(folderDatasets(folderId).map((dataset) => dataset.baseAnalysis));
   clearPlotZooms();
   clampSelections();
@@ -4433,7 +4402,7 @@ function paintHeatmap(canvas, analysis, options = {}) {
 
   drawHeatmapAxes(ctx, plot, analysis, timeTransform, xExtent, yExtent);
   if (chirpOverlay) drawLegend(ctx, [
-    { label: uiText("Fitted chirp μ(λ) (raw locus)"), color: "#303b40", dash: [6, 4] },
+    { label: uiText("Chirp curve (input time)"), color: "#303b40", dash: [6, 4] },
     ...(chirpOverlay.predicted.length ? [{ label: uiText("Predicted chirp (outside fitting range)"), color: "#a65b00", dash: [2, 4] }] : []),
     { label: uiText("Target t₀"), color: "#a77700" },
   ], plot, 290);

@@ -8,6 +8,11 @@ const STORAGE_KEY = "specflowlab.locale";
 const ZH_CN = Object.freeze({
   Language: "语言",
   "Fitted chirp μ(λ) (raw locus)": "拟合啁啾 μ(λ)（原始轨迹）",
+  "Chirp curve (input time)": "啁啾曲线（输入时间）",
+  "Initial t0 (original input, ps)": "初始 t0（原始输入，ps）",
+  "Reference wavelength (nm)": "参考波长（nm）",
+  "Method": "方法",
+  "Residual p95 (ps)": "残差第 95 百分位（ps）",
   "Target t₀": "目标 t₀",
   "Project navigation": "项目导航",
   "Close navigation": "关闭导航",

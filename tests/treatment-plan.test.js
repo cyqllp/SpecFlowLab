@@ -7,8 +7,17 @@ import {
   treatmentEnabled,
   chirpHintForDataset,
   configureChirpTreatment,
-  chirpFitRangeForDataset,
+  chirpReferenceForDataset,
+  chirpCursorSeeds,
 } from "../src/lib/treatment-plan.js";
+
+test("cursor seeds map actual applied shifts including legacy retained reviews", () => {
+  const analysis = { timeAxis: [-1, 0, 1], spectralAxis: [400, 600], chirp: { curve: [{ wavelength: 400, shift: 0.2 }, { wavelength: 600, shift: 0.7 }] }, provenance: [{ label: 'Chirp', status: 'applied' }, { label: 'Chirp review', status: 'review-required', attemptedModel: { referenceTime: 99 } }] };
+  assert.deepEqual(chirpCursorSeeds(analysis, 1, 1), { time: 0.7, wavelength: 600 });
+  assert.deepEqual(chirpCursorSeeds({ ...analysis, provenance: [] }, 1, 1), { time: 0.7, wavelength: 600 });
+  assert.deepEqual(chirpCursorSeeds({ ...analysis, provenance: [{ label: 'Chirp', status: 'skipped' }], chirp: { curve: [] } }, 1, 1), { time: 0, wavelength: 600 });
+  assert.deepEqual(chirpCursorSeeds(analysis, 99, -1), { time: 1.2, wavelength: 400 });
+});
 
 test("re-enabling a reset dataset treatment does not invalidate folder siblings", () => {
   const folder = { id: "folder", treatments: { baseline: true, chirp: true } };
@@ -45,7 +54,7 @@ test("local chirp enable and remove work independently of the folder default", (
   assert.equal(treatmentEnabled(enabled.datasets[1], folder, "chirp"), false);
   const removed = configureChirpTreatment(enabled.datasets, folder, { datasetId: "a", enabled: false });
   assert.equal(treatmentEnabled(removed.datasets[0], folder, "chirp"), false);
-  assert.equal(chirpHintForDataset(removed.datasets[0], folder), 1);
+  assert.equal(removed.datasets[0].chirpSettings.approximateZeroTimePs, null);
 });
 
 test("an explicit folder action replaces local chirp choices only in that folder", () => {
@@ -71,13 +80,12 @@ test("changing a folder treatment reports every dataset whose analysis changed",
   assert.deepEqual(changedTreatmentDatasetIds(datasets, folder, before), ["first", "second"]);
 });
 
-test("local fitting-range changes and auto overrides do not affect folder siblings", () => {
-  const folder = { id: 'f', treatments: { chirp: true }, chirpFitRange: { min: 400, max: 700 } };
+test("local reference changes do not affect folder siblings", () => {
+  const folder = { id: 'f', treatments: { chirp: true }, chirpReferenceWavelength: 550, chirpFitRange: { min: 400, max: 700 } };
   const datasets = [{ id: 'a', folderId: 'f' }, { id: 'b', folderId: 'f' }];
-  const local = configureChirpTreatment(datasets, folder, { datasetId: 'a', enabled: true, fitRange: null });
-  assert.equal(chirpFitRangeForDataset(local.datasets[0], folder), null);
-  assert.deepEqual(chirpFitRangeForDataset(local.datasets[1], folder), { min: 400, max: 700 });
-  const manual = configureChirpTreatment(datasets, folder, { datasetId: 'a', enabled: true, fitRange: { min: 420, max: 680 } });
-  assert.deepEqual(chirpFitRangeForDataset(manual.datasets[0], folder), { min: 420, max: 680 });
+  const local = configureChirpTreatment(datasets, folder, { datasetId: 'a', enabled: true, approximateZeroTimePs: 0, referenceWavelength: 620 });
+  assert.equal(chirpReferenceForDataset(local.datasets[0], folder), 620);
+  assert.equal(chirpReferenceForDataset(local.datasets[1], folder), 550);
+  assert.equal('fitRange' in local.datasets[0].chirpSettings, false);
   assert.deepEqual(folder.chirpFitRange, { min: 400, max: 700 });
 });

@@ -497,12 +497,17 @@ function preprocessingCsv(datasets, evidenceId) {
       JSON.stringify(analysis.chirp?.model?.calibrationRange ?? analysis.chirp?.model?.sourceRange ?? null),
       JSON.stringify(analysis.chirp?.model?.extrapolation?.ranges ?? []),
       analysis.chirp?.model?.extrapolation?.warning ?? "",
+      analysis.chirp?.model?.referenceWavelength ?? "",
+      analysis.chirp?.model?.seedTimePs ?? "",
+      analysis.chirp?.model?.method ?? "",
+      JSON.stringify(analysis.chirp?.model?.warnings ?? []),
     ];
   });
   return mixedCsv([
     "evidence_id", "dataset_id", "dataset_label", "wavelength_min_nm", "wavelength_max_nm", "time_min_ps", "time_max_ps",
     "chirp", "provenance", "missing_values", "excluded_regions_json",
     "chirp_fitting_range_nm_json", "chirp_predicted_ranges_nm_json", "chirp_prediction_note",
+    "chirp_reference_wavelength_nm", "chirp_seed_time_ps", "chirp_method", "chirp_warnings_json",
   ], rows);
 }
 

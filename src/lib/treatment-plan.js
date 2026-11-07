@@ -8,17 +8,27 @@ export function chirpHintForDataset(dataset, folder) {
     ? dataset.chirpSettings.approximateZeroTimePs : folder?.chirpZeroTimePs;
 }
 
-export function chirpFitRangeForDataset(dataset, folder) {
-  return dataset?.chirpSettings && Object.hasOwn(dataset.chirpSettings, "fitRange")
-    ? dataset.chirpSettings.fitRange : folder?.chirpFitRange ?? null;
+export function chirpReferenceForDataset(dataset, folder) {
+  return Number.isFinite(dataset?.chirpSettings?.referenceWavelength)
+    ? dataset.chirpSettings.referenceWavelength : folder?.chirpReferenceWavelength;
+}
+
+export function chirpCursorSeeds(analysis, timeIndex, wavelengthIndex) {
+  const at = (axis, index) => axis?.[Math.max(0, Math.min(axis.length - 1, index))] ?? 0;
+  const time = at(analysis?.timeAxis, timeIndex), wavelength = at(analysis?.spectralAxis, wavelengthIndex);
+  const lastChirp = analysis?.provenance?.findLast(p => p.label === "Chirp");
+  const curve = analysis?.chirp?.curve;
+  const applied = lastChirp ? lastChirp.status === "applied" : Array.isArray(curve) && curve.length > 0;
+  const point = applied && curve?.length ? curve.reduce((best, item) => Math.abs(item.wavelength - wavelength) < Math.abs(best.wavelength - wavelength) ? item : best) : null;
+  return { time: time + (Number.isFinite(point?.shift) ? point.shift : 0), wavelength };
 }
 
 // A local retry must not change either a sibling's matrix or its input settings.
-export function configureChirpTreatment(datasets, folder, { datasetId, scope = "dataset", enabled, approximateZeroTimePs, fitRange }) {
+export function configureChirpTreatment(datasets, folder, { datasetId, scope = "dataset", enabled, approximateZeroTimePs, referenceWavelength }) {
   if (!["dataset", "folder"].includes(scope) || typeof enabled !== "boolean") throw new Error("Invalid chirp action scope or state.");
   if (!datasets.some(d => d.id === datasetId && d.folderId === folder.id)) throw new Error("The chirp dataset is not in the selected folder.");
   const nextFolder = scope === "folder"
-    ? { ...folder, treatments: { ...folder.treatments, chirp: enabled }, ...(Number.isFinite(approximateZeroTimePs) ? { chirpZeroTimePs: approximateZeroTimePs } : {}), ...(fitRange !== undefined ? { chirpFitRange: fitRange } : {}) }
+    ? { ...folder, treatments: { ...folder.treatments, chirp: enabled }, chirpZeroTimePs: enabled ? approximateZeroTimePs : null, chirpReferenceWavelength: enabled ? referenceWavelength : null, chirpFitRange: null }
     : folder;
   const affectedIds = [];
   const nextDatasets = datasets.map(dataset => {
@@ -28,8 +38,8 @@ export function configureChirpTreatment(datasets, folder, { datasetId, scope = "
       ...dataset,
       chirpSettings: scope === "folder" ? null : {
         enabled,
-        approximateZeroTimePs: Number.isFinite(approximateZeroTimePs) ? approximateZeroTimePs : chirpHintForDataset(dataset, folder),
-        fitRange: fitRange !== undefined ? fitRange : chirpFitRangeForDataset(dataset, folder),
+        approximateZeroTimePs: enabled ? approximateZeroTimePs : null,
+        referenceWavelength: enabled ? referenceWavelength : null,
       },
       treatmentOverrides: { ...dataset.treatmentOverrides, chirp: false },
     };

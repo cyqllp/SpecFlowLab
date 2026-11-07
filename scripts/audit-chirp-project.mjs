@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import '../src/lib/parser-core.js';
 import { readProjectArchive, hydrateProjectArchive } from '../src/lib/project-archive.js';
-import { chirpHintForDataset, chirpFitRangeForDataset } from '../src/lib/treatment-plan.js';
+import { chirpCursorSeeds } from '../src/lib/treatment-plan.js';
 import { treatmentStatus } from '../src/lib/treatment-status.js';
 
 const path = process.argv[2];
@@ -14,12 +14,12 @@ const sha256 = data => createHash('sha256').update(data).digest('hex');
 const parser = globalThis.SpecFlowLabParser;
 const project = hydrateProjectArchive(readProjectArchive(bytes), parser);
 const datasets = project.datasets.map(dataset => {
-  const folder = project.folders.find(item => item.id === dataset.folderId);
   const input = structuredClone(dataset.baseAnalysis);
+  const seeds = chirpCursorSeeds(dataset.analysis, project.state?.selectedTimeIndex ?? 0, project.state?.selectedWavelengthIndex ?? 0);
   const start = performance.now();
   const corrected = parser.applyAnalysisTreatments(dataset.baseAnalysis, {
-    chirp: true, baseline: true, approximateZeroTimePs: chirpHintForDataset(dataset, folder),
-    fitRange: chirpFitRangeForDataset(dataset, folder),
+    chirp: true, baseline: true, approximateZeroTimePs: seeds.time,
+    referenceWavelength: seeds.wavelength,
   });
   const elapsedMs = performance.now() - start;
   assert.deepEqual(dataset.baseAnalysis, input, 'The input analysis must not be mutated.');
@@ -30,15 +30,11 @@ const datasets = project.datasets.map(dataset => {
     revised: {
       status: treatmentStatus(corrected, 'Chirp'), baseline: treatmentStatus(corrected, 'Baseline'),
       reason: model.reason, algorithm: model.algorithm, polynomialDegree: model.selectedDegree,
-      anchors: model.support, inliers: model.inlierCount, coverage: model.coverage,
+      anchors: model.support, method: model.method, warnings: model.warnings, seedTimePs: model.seedTimePs, referenceWavelength: model.referenceWavelength,
       tolerancePs: model.alignmentTolerancePs, residualP95Ps: model.residualP95,
-      inlierResidualP95Ps: model.inlierResidualP95,
-      heldOutP95Ps: model.heldOutP95, heldOutInlierP95Ps: model.heldOutInlierP95,
       searchWindowsPs: model.searchWindowsPs,
-      selectedSearchWindowPs: model.selectedSearchWindowPs, wavelengthSupport: model.wavelengthSupport,
+      selectedSearchWindowPs: model.selectedSearchWindowPs,
       inputFiniteCount: model.inputFiniteCount, outputFiniteCount: model.outputFiniteCount,
-      fittingRange: model.calibrationRange ?? model.sourceRange, prediction: model.extrapolation ?? null,
-      outsideAnchorCheck: model.outsideAnchorCheck ?? null,
     },
     elapsedMs: Math.round(elapsedMs),
   };
