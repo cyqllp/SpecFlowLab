@@ -15,6 +15,13 @@ export function analysisNeedsReview(analysis) {
   return ["Chirp", "Baseline"].some(label => ["skipped", "review-required"].includes(treatmentStatus(analysis, label)));
 }
 
+export function treatmentIssue(analysis, label) {
+  const status = treatmentStatus(analysis, label);
+  if (!["skipped", "review-required"].includes(status)) return null;
+  return analysis?.provenance?.findLast(item => [label, `${label} review`].includes(item.label) && ["skipped", "review-required"].includes(item.status))
+    ?? { label, status, reason: analysis?.chirp?.model?.reason };
+}
+
 export function isAnalysisTreated(analysis) {
   return !analysisNeedsReview(analysis) && (analysis?.provenance ?? []).some(item => item.status === "applied");
 }

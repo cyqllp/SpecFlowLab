@@ -29,3 +29,13 @@ test('a successful retry restores the overlay despite an older review record', (
   retried.provenance.unshift({ label: 'Chirp review', status: 'review-required' });
   assert.ok(chirpOverlaySegments(retried, [400, 500], [-1, 1]));
 });
+
+test('the overlay separates fitted and predicted portions at their physical boundaries', () => {
+  const a = analysis();
+  a.chirp.model.calibrationRange = { min: 450, max: 475 };
+  a.chirp.model.extrapolation = { ranges: [{ min: 400, max: 450 }, { min: 475, max: 500 }] };
+  const result = chirpOverlaySegments(a, [425, 490], [-1, 1]);
+  assert.deepEqual(result.raw.map(segment => segment.map(p => p.x)), [[450, 475]]);
+  assert.deepEqual(result.predicted.map(segment => segment.map(p => p.x)), [[425, 450], [475, 490]]);
+  assert.deepEqual(chirpOverlaySegments(a, [480, 490], [-1, 1]).raw, []);
+});

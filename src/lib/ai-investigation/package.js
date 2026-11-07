@@ -494,11 +494,15 @@ function preprocessingCsv(datasets, evidenceId) {
       (analysis.provenance ?? []).map((item) => `${item.label}:${item.status ?? "recorded"}`).join("; "),
       finiteCounts((analysis.matrix ?? []).flat()).missing,
       JSON.stringify(analysis.excluded ?? []),
+      JSON.stringify(analysis.chirp?.model?.calibrationRange ?? analysis.chirp?.model?.sourceRange ?? null),
+      JSON.stringify(analysis.chirp?.model?.extrapolation?.ranges ?? []),
+      analysis.chirp?.model?.extrapolation?.warning ?? "",
     ];
   });
   return mixedCsv([
     "evidence_id", "dataset_id", "dataset_label", "wavelength_min_nm", "wavelength_max_nm", "time_min_ps", "time_max_ps",
     "chirp", "provenance", "missing_values", "excluded_regions_json",
+    "chirp_fitting_range_nm_json", "chirp_predicted_ranges_nm_json", "chirp_prediction_note",
   ], rows);
 }
 

@@ -181,6 +181,8 @@ test('chirp hint uses spectrum time and cancel leaves treatment off', async ({ p
   await page.locator('[data-action="confirm-chirp"]').click();
   await expect(chirp).toHaveClass(/active/);
   await chirp.click();
+  await expect(page.locator('#chirp-scope')).toHaveValue('dataset');
+  await page.locator('[data-action="disable-chirp"]').click();
   await expect(chirp).not.toHaveClass(/active/);
   await expect(page.locator('.modal-shell')).toHaveCount(0);
 });

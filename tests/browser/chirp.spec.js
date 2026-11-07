@@ -7,8 +7,9 @@ import { treatmentStatus } from '../../src/lib/treatment-status.js';
 
 const P = globalThis.SpecFlowLabParser;
 const fixture = (name, options = {}) => ({ name, mimeType: 'text/csv', buffer: Buffer.from(chirpCsv(chirpFixture({ count: 17, dt: 0.025, ...options }))) });
-async function applyChirp(page, hint) {
+async function applyChirp(page, hint, scope) {
   await page.locator('[data-action="chirp"]').click();
+  if (scope) await page.locator('#chirp-scope').selectOption(scope);
   await page.locator('#chirp-zero-time').fill(String(hint));
   await page.locator('[data-action="confirm-chirp"]').click();
   await expect(page.locator('[data-action="chirp"]')).toBeEnabled();
@@ -50,16 +51,17 @@ test('rejected chirp is visibly skipped, survives reload, and range changes reta
 test('a rejected hint can be retried without turning the requested correction off', async ({ page }) => {
   await page.goto('/');
   await page.locator('#file-input').setInputFiles(fixture('delayed.csv', { arrival: () => 0.8, shape: t => t >= 0 ? 1 : 0 }));
-  await applyChirp(page, -1);
+  await applyChirp(page, -3);
   await expect(page.locator('[data-action="chirp"]')).toHaveText('Chirp · Review');
   await applyChirp(page, 0);
   await expect(page.locator('[data-action="chirp"]')).toHaveClass(/active/);
   await expect(page.locator('.feedback.success')).toContainText('Completed');
   const { project } = await savedProject(page);
-  expect(project.folders.find(f => f.id === project.datasets[0].folderId).chirpZeroTimePs).toBe(0);
+  expect(project.folders.find(f => f.id === project.datasets[0].folderId).chirpZeroTimePs).toBe(-3);
+  expect(project.datasets[0].chirpSettings.approximateZeroTimePs).toBe(0);
   const analysis = project.datasets[0].analysis;
   expect(treatmentStatus(analysis, 'Chirp')).toBe('applied');
-  expect(analysis.chirp.model.searchWindowsPs).toHaveLength(3);
+  expect(analysis.chirp.model.searchWindowsPs).toHaveLength(5);
   expect(Math.abs(analysis.chirp.curve[0].shift - 0.8)).toBeLessThan(0.03);
 });
 
@@ -104,7 +106,14 @@ test('reset and retry preserve unaffected folder data, and a failed new hint ret
   expect(afterRetry.fit).toEqual(before.fit);
 
   await page.locator('[data-action="reset-dataset"]').click();
-  await applyChirp(page, -2);
+  // A different local hint must not re-fit the already successful sibling.
+  await applyChirp(page, -2, 'dataset');
+  const localRetry = (await savedProject(page)).project;
+  expect(localRetry.datasets[0].analysis).toEqual(before.analysis);
+  expect(localRetry.datasets[0].fit).toEqual(before.fit);
+  expect(localRetry.datasets[1].chirpSettings.approximateZeroTimePs).toBe(-2);
+  // Folder changes remain available as an explicit, separate choice.
+  await applyChirp(page, -2, 'folder');
   await expect(page.locator('.feedback.warning')).toContainText('previous accepted correction');
   const failed = (await savedProject(page)).project.datasets;
   expect(failed[0].analysis.matrix).toEqual(before.analysis.matrix);
@@ -114,4 +123,41 @@ test('reset and retry preserve unaffected folder data, and a failed new hint ret
   await rows.nth(0).click();
   await page.locator('[data-action="chirp"]').click();
   await expect(page.locator('.modal-shell [role="status"]')).toContainText('previous accepted correction');
+});
+
+test('chirp failure reason is not hidden by baseline skip and persists after reload', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#file-input').setInputFiles(fixture('flat.csv', { shape: () => 0 }));
+  await page.locator('[data-action="baseline"]').click();
+  await applyChirp(page, 0, 'dataset');
+  await expect(page.locator('.feedback.warning')).toContainText('Insufficient');
+  await expect(page.locator('.feedback.warning')).not.toContainText('Resolve chirp time zero');
+  const { bytes } = await savedProject(page);
+  await page.locator('#project-input').setInputFiles({ name: 'local-retry.sflproj', mimeType: 'application/zip', buffer: bytes });
+  await expect(page.locator('.project-panel .state-label')).toContainText('Saved');
+  await page.locator('[data-action="chirp"]').click();
+  await expect(page.locator('#chirp-scope')).toHaveValue('dataset');
+  await expect(page.locator('.modal-shell [role="status"]')).toContainText('Insufficient');
+  await expect(page.locator('[data-action="disable-chirp"]')).toBeVisible();
+  await page.locator('.chirp-diagnostics summary').click();
+  await expect(page.locator('.chirp-diagnostics')).toContainText('Signal anchors');
+});
+
+test('resizing preserves the selected chirp scope and edited hint after focus moves', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#file-input').setInputFiles(fixture('scope.csv'));
+  await page.locator('[data-action="chirp"]').click();
+  await page.locator('#chirp-scope').selectOption('dataset');
+  await page.locator('#chirp-zero-time').fill('0.1234');
+  await page.locator('.chirp-fitting-range summary').click();
+  await page.locator('#chirp-fit-min').fill('420');
+  await page.locator('#chirp-fit-max').fill('650');
+  await page.locator('[data-action="confirm-chirp"]').focus();
+  await page.setViewportSize({ width: 960, height: 640 });
+  await expect(page.locator('#chirp-scope')).toHaveValue('dataset');
+  await expect(page.locator('#chirp-zero-time')).toHaveValue('0.1234');
+  await expect(page.locator('#chirp-fit-min')).toHaveValue('420');
+  await expect(page.locator('#chirp-fit-max')).toHaveValue('650');
+  await page.locator('.modal-shell [data-action="close-modal"]').last().click();
+  await expect(page.locator('[data-action="chirp"]')).not.toHaveClass(/active/);
 });

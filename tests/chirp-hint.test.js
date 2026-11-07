@@ -55,7 +55,7 @@ test('guided fit records bounded search and independent validation evidence', ()
   const result = P.applyChirpCorrection(analysis, {approximateZeroTimePs: 1});
   const model = result.chirp.model;
   assert.deepEqual(model.searchWindowsPs[0], [0.5, 1.5]);
-  assert.ok(model.searchWindowsPs.length > 1 && model.searchWindowsPs.length <= 3);
+  assert.equal(model.searchWindowsPs.length, 5);
   assert.equal(model.heldOutCount, model.support);
   assert.equal(model.heldOutAgreement, true);
   assert.equal(model.onsetAgreement, true);

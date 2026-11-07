@@ -371,6 +371,7 @@ import { analysisNeedsReview, treatmentStatus } from "./treatment-status.js";
     const curve = next.spectralAxis.map((wavelength, rowIndex) => ({
       wavelength,
       shift: shifts[rowIndex],
+      support: model.calibrationRange && (wavelength < model.calibrationRange.min || wavelength > model.calibrationRange.max) ? "predicted" : "fitted",
     }));
 
     next.matrix = correctedMatrix;
@@ -380,6 +381,7 @@ import { analysisNeedsReview, treatmentStatus } from "./treatment-status.js";
       status: "applied",
       model: model.algorithm ?? "provided-polynomial",
       range: `${format(next.spectralAxis[0])} to ${format(next.spectralAxis.at(-1))} nm; target t0 ${format(targetReferenceTime)} ps`,
+      ...(model.extrapolation ? { note: model.extrapolation.warning, fittingRange: model.calibrationRange, predictedRanges: model.extrapolation.ranges } : {}),
     });
     return next;
   }
@@ -662,6 +664,8 @@ import { analysisNeedsReview, treatmentStatus } from "./treatment-status.js";
               method: "polynomial dispersion correction",
               polynomial_terms: analysis.chirp.model.coefficients.length,
               fitted_wavelength_range_nm: analysis.chirp.model.sourceRange,
+              predicted_wavelength_ranges_nm: analysis.chirp.model.extrapolation?.ranges ?? [],
+              prediction_note: analysis.chirp.model.extrapolation?.warning ?? null,
               reference_time_ps: cleanNumber(analysis.chirp.model.referenceTime),
               target_reference_time_ps: cleanNumber(analysis.chirp.model.targetReferenceTime),
               coefficients: analysis.chirp.model.coefficients.map(cleanNumber),

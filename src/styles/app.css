@@ -1061,6 +1061,17 @@ input[type="checkbox"] {
 }
 
 /* Treatment history */
+.treatment-review {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.treatment-review summary { cursor: pointer; }
+.treatment-review p { margin: 6px 0 0; }
+.chirp-diagnostics { margin-top: 10px; }
+
 .history-line {
   margin-top: 5px;
   color: var(--muted);

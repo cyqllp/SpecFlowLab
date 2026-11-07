@@ -21,14 +21,26 @@ export function chirpOverlaySegments(analysis, xExtent, yExtent) {
   const curve = analysis.chirp?.curve;
   if (!Array.isArray(curve) || curve.length < 2) return null;
   const target = Number.isFinite(analysis.chirp.model?.targetReferenceTime) ? analysis.chirp.model.targetReferenceTime : 0;
-  const raw = [], guide = [];
+  const raw = [], predicted = [], guide = [];
+  const range = analysis.chirp.model?.extrapolation && analysis.chirp.model.calibrationRange;
   for (let i = 1; i < curve.length; i++) {
     const a = curve[i - 1], b = curve[i];
     if (![a.wavelength, a.shift, b.wavelength, b.shift].every(Number.isFinite)) continue;
     const rawSegment = clipSegment({ x: a.wavelength, y: a.shift + target }, { x: b.wavelength, y: b.shift + target }, xExtent, yExtent);
     const guideSegment = clipSegment({ x: a.wavelength, y: target }, { x: b.wavelength, y: target }, xExtent, yExtent);
-    if (rawSegment) raw.push(rawSegment);
+    if (rawSegment) {
+      if (!range) raw.push(rawSegment);
+      else {
+        const fitted = clipSegment(...rawSegment, [range.min, range.max], yExtent);
+        if (fitted) raw.push(fitted);
+        for (const bounds of [[xExtent[0], range.min], [range.max, xExtent[1]]]) {
+          if (bounds[0] >= bounds[1]) continue;
+          const part = clipSegment(...rawSegment, bounds, yExtent);
+          if (part && part[0].x !== part[1].x) predicted.push(part);
+        }
+      }
+    }
     if (guideSegment) guide.push(guideSegment);
   }
-  return { raw, guide };
+  return { raw, predicted, guide };
 }

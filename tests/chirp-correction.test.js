@@ -66,7 +66,8 @@ test('a truly absent baseline stays unchanged and fails qualification', () => {
 test('search expands when the first window contains no edge', () => {
   const result = P.applyChirpCorrection(chirpFixture({ arrival: () => 0.8, shape: t => t >= 0 ? 1 : 0 }), { approximateZeroTimePs: 0 });
   accepted(result);
-  assert.equal(result.chirp.model.searchWindowsPs.length, 3);
+  assert.equal(result.chirp.model.searchWindowsPs.length, 5);
+  assert.deepEqual(result.chirp.model.selectedSearchWindowPs, [-1, 1]);
   assert.ok(error(result, () => 0.8) < 0.015);
 });
 
@@ -189,8 +190,10 @@ test('accepted chirp and baseline matrices and diagnostics survive archive round
   const analysis = P.applyAnalysisTreatments(baseAnalysis, { chirp: true, baseline: true, approximateZeroTimePs: 0.5 });
   accepted(analysis);
   const project = { schema: 'specflowlab.desktop_preview.v3', folders: [{ id: 'f', chirpZeroTimePs: 0.5 }], datasets: [{ id: 'd', folderId: 'f', source, baseAnalysis, analysis, fit: null }] };
+  project.datasets[0].chirpSettings = { enabled: true, approximateZeroTimePs: 0.5 };
   const restored = hydrateProjectArchive(readProjectArchive(createProjectArchive(project)), P);
   assert.deepEqual(restored.datasets[0].analysis.matrix, analysis.matrix);
   assert.deepEqual(restored.datasets[0].analysis.chirp, analysis.chirp);
   assert.equal(restored.folders[0].chirpZeroTimePs, 0.5);
+  assert.deepEqual(restored.datasets[0].chirpSettings, project.datasets[0].chirpSettings);
 });
