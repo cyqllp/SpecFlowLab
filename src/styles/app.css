@@ -766,7 +766,7 @@ input[type="checkbox"] {
   height: 100dvh;
   padding: var(--ws-pad);
   overflow: hidden;
-  container-type: inline-size;
+  container: workspace / inline-size;
 }
 
 
@@ -1061,6 +1061,17 @@ input[type="checkbox"] {
 }
 
 /* Treatment history */
+.treatment-review {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.treatment-review summary { cursor: pointer; }
+.treatment-review p { margin: 6px 0 0; }
+.chirp-diagnostics { margin-top: 10px; }
+
 .history-line {
   margin-top: 5px;
   color: var(--muted);
@@ -3294,12 +3305,10 @@ canvas.zoom-selecting {
 /* ── Container Queries ─────────────────────────────────────────────────── */
 
 /* When the workspace is too narrow for two columns, stack vertically */
-@container (max-width: 840px) {
+@container workspace (max-width: 840px) {
   .analysis-layout {
     grid-template-columns: 1fr;
   }
-
-  .workspace { overflow: auto; }
 
   .primary-column,
   .secondary-column {
@@ -3559,4 +3568,48 @@ canvas.capture-target {
 html[lang="zh-CN"] .section-heading h2 {
   letter-spacing: 0;
   text-transform: none;
+}
+
+/* Stage 1: the workspace owns vertical scrolling at all window sizes. */
+.workspace { overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.analysis-layout { flex: 0 0 auto; min-height: 720px; }
+.spectrum-panel canvas, .kinetics-panel canvas { min-height: 220px; }
+.navigation-toggle { display: none; }
+.unsaved-dialog { border: 1px solid var(--line); border-radius: 8px; padding: 22px; max-width: min(420px, 90vw); }
+.unsaved-dialog::backdrop { background: #0008; }
+.unsaved-actions { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 1200px) {
+  #app { display: block; }
+  .navigation-toggle { display: block; position: fixed; z-index: 30; top: 8px; left: 8px; }
+  .side { display: none; position: fixed; z-index: 29; top: 0; left: 0; width: min(360px, 90vw); height: 100dvh; padding-top: 48px; overflow-y: auto; border-right: 1px solid var(--line); box-shadow: 0 5px 24px #0004; }
+  .side.navigation-open { display: flex; }
+  .folder-rail-panel { min-height: 280px; }
+  .workspace { height: 100dvh; padding-top: 48px; }
+}
+
+/* Stage 2: the workspace and fit diagnostics each own their scrolling. */
+:root { --fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px; }
+.workspace { overflow-y: auto; overflow-x: hidden; }
+.analysis-layout { min-height: 780px; }
+.treatment-layout { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.treatment-actions { display: flex; flex-wrap: wrap; grid-column: 1 / -1; gap: 5px; }
+.treatment-actions button { flex: 1 1 110px; overflow: visible; white-space: normal; font-size: 12px; }
+.treatment-actions .reset-command:first-of-type { margin-left: 8px; }
+.info-metrics small, .fit-numerical-model > p { font-size: 11px; }
+.lifetime-editor-head button { font-size: 12px; white-space: normal; }
+.fit-lifetime-disclosure { flex: 0 0 auto; margin-bottom: 8px; }
+.fit-lifetime-disclosure > summary { cursor: pointer; font-weight: 700; }
+.fit-lifetime-disclosure .lifetime-editor { margin: 6px 0 0; }
+.fit-job-status { align-self: center; font-size: 12px; }
+.fit-diagnostic-grid { overflow-y: scroll; overscroll-behavior: contain; grid-auto-rows: minmax(250px, auto); }
+.fit-component-preview { grid-row: 1; min-height: 300px; }
+.fit-summary-diagnostic { grid-row: 2; }
+.fit-residual { grid-row: 2; }
+.fit-component-preview canvas { min-height: 220px; }
+.capture-station { bottom: auto; top: 6px; right: 8px; z-index: 19; }
+.capture-station-button { width: 36px; height: 36px; font-size: 16px; }
+.capture-tray-panel { max-height: calc(100dvh - 55px); }
+@media (max-width: 1200px) {
+  .fit-component-preview, .fit-summary-diagnostic, .fit-residual { grid-row: auto; grid-column: 1; }
+  .fit-component-preview { order: -1; }
 }

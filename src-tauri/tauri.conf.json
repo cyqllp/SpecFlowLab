@@ -16,10 +16,8 @@
         "title": "SpecFlowLab",
         "width": 1480,
         "height": 920,
-        "minWidth": 1220,
-        "minHeight": 760,
-        "maxWidth": 1920,
-        "maxHeight": 1200,
+        "minWidth": 960,
+        "minHeight": 640,
         "resizable": true
       }
     ],

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { protectUnsavedWork } from "./lib/unsaved-work.js";
 import "./lib/parser-core.js";
 import {
   createProjectArchive,
@@ -13,12 +15,18 @@ import { isEligibleForMode, SELECTION_MODES, toggleSelection, validateSelection 
 import { moveDataset } from "./lib/dataset-order.js";
 import { moveFolder } from "./lib/folder-order.js";
 import { componentColor } from "./lib/component-colors.js";
+import { chirpOverlaySegments } from "./lib/chirp-overlay.js";
+import { analysisNeedsReview, isAnalysisTreated, treatmentStatus, treatmentIssue } from "./lib/treatment-status.js";
 import { comparisonStyleDefaults } from "./lib/comparison-style.js";
 import { DEFAULT_FITTING_INPUTS, restoreDefaultFittingInputs } from "./lib/fitting-defaults.js";
 import {
   changedTreatmentDatasetIds,
   snapshotTreatmentStates,
   treatmentEnabled,
+  chirpHintForDataset,
+  chirpReferenceForDataset,
+  chirpCursorSeeds,
+  configureChirpTreatment,
 } from "./lib/treatment-plan.js";
 import {
   createMergedAnalysis,
@@ -72,6 +80,7 @@ import appIconUrl from "./assets/specflowlab-icon.svg";
 const Parser = globalThis.SpecFlowLabParser;
 const app = document.getElementById("app");
 const APP_VERSION = "1.0.9";
+let navigationOpen = false;
 const plotGeometry = new WeakMap();
 const signatureHitRegions = new WeakMap();
 
@@ -155,6 +164,7 @@ const state = {
   evidenceGraph: createEmptyEvidenceGraph(),
   evidenceAssets: [],
   modal: null,
+  chirpDraft: null,
   expandedPlot: null,
   plotZooms: {},
   zoomSelectionKey: null,
@@ -177,7 +187,26 @@ const state = {
   notice: null,
 };
 
+let modalReturnFocus = null;
+function elementPath(element) {
+  if (!element || !app.contains(element)) return null;
+  const parts = [];
+  while (element && element !== app) {
+    const index = Array.from(element.parentElement.children).indexOf(element) + 1;
+    parts.unshift(`${element.tagName.toLowerCase()}:nth-child(${index})`);
+    element = element.parentElement;
+  }
+  return `:scope > ${parts.join(" > ")}`;
+}
 function render() {
+  const oldModal = app.querySelector('.modal-shell');
+  const active = document.activeElement;
+  const focusPath = elementPath(active);
+  const focusedValue = active && /^(INPUT|TEXTAREA)$/.test(active.tagName) && !['checkbox', 'radio', 'file'].includes(active.type) ? active.value : null;
+  const selection = focusedValue !== null && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
+  const scrolls = Array.from(app.querySelectorAll('*')).filter((el) => el.scrollTop || el.scrollLeft).map((el) => [elementPath(el), el.scrollTop, el.scrollLeft]);
+  const openDetails = Array.from(app.querySelectorAll('details[open]')).map(elementPath);
+  if (!oldModal && state.modal && focusPath) modalReturnFocus = focusPath;
   pruneMergeSelection();
   refreshChartCaptureStaleness();
   const datasetTreeScrollTop =
@@ -185,7 +214,8 @@ function render() {
   const dataset = activeDataset();
   const busy = Boolean(state.job);
   app.innerHTML = `
-    <aside class="side">
+    <button class="navigation-toggle" type="button" aria-expanded="${navigationOpen}" aria-controls="project-navigation">${navigationOpen ? "Close navigation" : "Project navigation"}</button>
+    <aside id="project-navigation" class="side ${navigationOpen ? "navigation-open" : ""}">
       <section class="brand">
         <div class="mark"><img src="${appIconUrl}" alt="" /></div>
         <div class="brand-copy">
@@ -286,10 +316,22 @@ function render() {
     ${state.signatureEditor ? renderSignatureEditorPopover() : ""}
     ${renderCaptureStation()}
   `;
+  document.querySelector(".navigation-toggle")?.addEventListener("click", () => { navigationOpen = !navigationOpen; render(); });
   localizeDom(app, state.locale);
   bindDom();
   const datasetTree = document.querySelector(".dataset-tree-scroll");
   if (datasetTree) datasetTree.scrollTop = datasetTreeScrollTop;
+  scrolls.forEach(([path, top, left]) => { const el = path && app.querySelector(path); if (el) { el.scrollTop = top; el.scrollLeft = left; } });
+  openDetails.forEach((path) => { const el = path && app.querySelector(path); if (el?.tagName === 'DETAILS') el.open = true; });
+  const newModal = app.querySelector('.modal-shell');
+  let focusTarget = focusPath && app.querySelector(focusPath);
+  if (oldModal && !newModal && modalReturnFocus) { focusTarget = app.querySelector(modalReturnFocus); modalReturnFocus = null; }
+  if (newModal && !oldModal) focusTarget = newModal.querySelector('button:not([disabled]), input:not([disabled]), select:not([disabled])');
+  if (focusTarget && (!newModal || newModal.contains(focusTarget))) {
+    if (focusedValue !== null && focusTarget.tagName === active.tagName && focusTarget.type === active.type) focusTarget.value = focusedValue;
+    focusTarget.focus({ preventScroll: true });
+    if (selection && focusTarget.setSelectionRange) focusTarget.setSelectionRange(...selection);
+  }
   positionContextMenus();
   scheduleFullPaint();
 }
@@ -346,11 +388,14 @@ function renderRangeControls(dataset, folder) {
 
 function renderTreatmentHistory(dataset) {
   const provenance = dataset.analysis.provenance ?? [];
-  if (!provenance.length) return "<p class=\"history-line\">Imported analysis range. No treatment applied.</p>";
+  const issue = treatmentIssue(dataset.analysis, "Chirp") ?? treatmentIssue(dataset.analysis, "Baseline");
+  if (!provenance.length && !issue) return "<p class=\"history-line\">Imported analysis range. No treatment applied.</p>";
   return `
     <ul class="history-list">
-      ${provenance.map((item) => `<li><span></span>${escapeHtml(item.label)}${item.status === "skipped" ? " skipped" : ""}</li>`).join("")}
+      ${provenance.map((item) => `<li title="${escapeHtml(item.reason ?? "")}"><span></span>${escapeHtml(item.label)}${item.status === "skipped" ? " skipped" : ""}</li>`).join("")}
     </ul>
+    ${issue ? `<details class="treatment-review"><summary>Why preprocessing needs review</summary><p>${escapeHtml(issue.reason ?? "Review the correction before applying it.")}</p></details>` : ""}
+    ${!issue && dataset.analysis.chirp?.model?.extrapolation ? `<details class="treatment-review"><summary>Part of the chirp correction is predicted</summary><p>${escapeHtml(dataset.analysis.chirp.model.extrapolation.warning)}</p></details>` : ""}
   `;
 }
 
@@ -401,8 +446,8 @@ function renderOverview() {
           <div class="treatment-layout">
             <div>${renderRangeControls(dataset, folder)}</div>
             <div class="treatment-actions">
-              <button data-action="baseline" class="${treatmentEnabled(dataset, folder, "baseline") ? "active" : ""}" ${state.job ? "disabled" : ""}>Baseline</button>
-              <button data-action="chirp" class="${treatmentEnabled(dataset, folder, "chirp") ? "active" : ""}" ${state.job ? "disabled" : ""}>Chirp</button>
+              <button data-action="baseline" class="${treatmentStatus(analysis, "Baseline") === "applied" ? "active" : ""}" ${state.job ? "disabled" : ""}>Baseline</button>
+              <button data-action="chirp" class="${treatmentStatus(analysis, "Chirp") === "applied" ? "active" : ""}" ${state.job ? "disabled" : ""}>${["skipped", "review-required"].includes(treatmentStatus(analysis, "Chirp")) ? "Chirp · Review" : analysis.chirp?.model?.extrapolation ? "Chirp · Predicted" : "Chirp"}</button>
               <button data-action="reset-dataset" class="reset-command" ${state.job ? "disabled" : ""} title="Reset the active dataset to its selected source range and remove its baseline, chirp, and fit">Reset Dataset</button>
               <button data-action="reset-folder" class="reset-command" ${state.job ? "disabled" : ""} title="Reset every dataset in the folder and clear treatments and cropping">Reset Folder</button>
             </div>
@@ -598,6 +643,7 @@ function enlargeButton(plotKey) {
 }
 
 function renderModal() {
+  if (state.modal === "chirp-hint") return renderChirpHintModal();
   if (state.modal === "ai-investigation") return renderAiInvestigationModal();
   if (state.modal === "merge") return renderMergeWorkspace();
   if (state.modal === "manual") return renderManualModal();
@@ -613,6 +659,37 @@ function renderModal() {
   if (state.modal === "evidence-import") return renderEvidenceImportModal();
   if (state.modal === "move-dataset") return renderMoveDatasetModal();
   return "";
+}
+
+function chirpDialogDefaults(dataset, folder) {
+  const { time: value, wavelength } = chirpCursorSeeds(dataset?.analysis, state.selectedTimeIndex, state.selectedWavelengthIndex);
+  return { datasetId: dataset?.id, value: String(value), reference: String(wavelength), scope: "dataset" };
+}
+
+function renderChirpHintModal() {
+  const dataset = activeDataset(), folder = activeFolder();
+  const draft = state.chirpDraft?.datasetId === dataset?.id ? state.chirpDraft : chirpDialogDefaults(dataset, folder);
+  const model = dataset?.analysis?.chirp?.model;
+  const metric = number => Number.isFinite(number) ? format(number) : "—";
+  return `<section class="modal-shell" role="dialog" aria-modal="true" aria-label="Chirp correction">
+    <div class="modal compact-modal">
+      <header class="modal-head"><div><h2>Chirp correction</h2></div><button data-action="close-modal" class="icon-button" aria-label="Close">x</button></header>
+      <p>Initial values use the current cursor. Time is on the original input axis; each dataset is fitted independently and aligned to 0 ps.</p>
+      <label class="modal-field"><span>Apply to</span><select id="chirp-scope"><option value="dataset" ${draft.scope === "dataset" ? "selected" : ""}>This dataset</option><option value="folder" ${draft.scope === "folder" ? "selected" : ""}>Current folder</option></select></label>
+      <label class="modal-field"><span>Initial t0 (original input, ps)</span><input id="chirp-zero-time" type="number" step="any" required value="${escapeHtml(draft.value)}" /></label>
+      <label class="modal-field"><span>Reference wavelength (nm)</span><input id="chirp-reference" type="number" step="any" required value="${escapeHtml(draft.reference)}" /></label>
+      <p class="muted">If the result is unsuitable, retry with different initial values or crop.</p>
+      ${model?.accepted === false ? `<p role="status">${escapeHtml(model.reason ?? "The chirp correction could not be applied.")}</p>` : ""}
+      ${model ? `<details class="chirp-diagnostics"><summary>Correction diagnostics</summary><dl class="metric-list">
+        <div><dt>Method</dt><dd>${escapeHtml(model.method ?? model.algorithm ?? "—")}</dd></div>
+        <div><dt>Initial t0 (ps)</dt><dd>${metric(model.seedTimePs)}</dd></div>
+        <div><dt>Reference wavelength (nm)</dt><dd>${metric(model.referenceWavelength)}</dd></div>
+        <div><dt>Signal anchors</dt><dd>${metric(model.support)}</dd></div>
+        <div><dt>Polynomial degree</dt><dd>${metric(model.selectedDegree)}</dd></div>
+        <div><dt>Residual p95 (ps)</dt><dd>${metric(model.residualP95)}</dd></div>
+      </dl>${(model.warnings ?? []).map(w => `<p>${escapeHtml(w)}</p>`).join("")}</details>` : ""}
+      <footer class="modal-footer"><button data-action="close-modal">Cancel</button>${treatmentEnabled(dataset, folder, "chirp") ? '<button data-action="disable-chirp">Remove Chirp</button>' : ''}<button data-action="confirm-chirp">Apply Chirp</button></footer>
+    </div></section>`;
 }
 
 function renderAiInvestigationModal() {
@@ -1109,9 +1186,10 @@ function renderFitModal() {
           <label><span>IRF FWHM (ps)</span><input id="fit-irf" type="number" min="0" step="0.01" value="${state.fitting.irfFwhm}" /></label>
           <button data-action="run-fit" ${state.job ? "disabled" : ""}>${state.job?.kind === "fit" ? "Processing..." : "Fit Active Dataset"}</button>
           <button data-action="batch-fit" ${state.job || !unfittedCount ? "disabled" : ""} title="${escapeHtml(folderContext)}">${state.job?.kind === "batch-fit" ? "Processing..." : unfittedCount ? `Batch Global Fitting (${unfittedCount})` : "Current Folder Fitted"}</button>
+          <span class="fit-job-status" role="status" aria-live="polite">${state.job ? escapeHtml(`${state.job.label} ${state.job.detail ?? ""}`) : "Ready"}</span>
           ${limitedCount ? `<span class="irf-exclusion-note">${limitedCount} IRF-limited component${limitedCount === 1 ? "" : "s"} excluded from all interpreted outputs</span>` : ""}
         </section>
-        ${renderLifetimeControls()}
+        ${dataset?.fit ? `<details class="fit-lifetime-disclosure"><summary>Lifetime starts and constraints</summary>${renderLifetimeControls()}</details>` : renderLifetimeControls()}
         ${dataset?.fit ? renderFitDiagnostics(dataset) : "<section class=\"empty compact\"><h3>No fit yet</h3><p>Run a fit to create lifetime, DAS, EAS-preview, overlay, and residual results.</p></section>"}
       </div>
     </section>
@@ -1520,6 +1598,9 @@ function renderExpandedPlot() {
 }
 
 function bindDom() {
+  document.getElementById("chirp-scope")?.addEventListener("change", event => { if (state.chirpDraft) state.chirpDraft.scope = event.target.value; });
+  document.getElementById("chirp-zero-time")?.addEventListener("input", event => { if (state.chirpDraft) state.chirpDraft.value = event.target.value; });
+  document.getElementById("chirp-reference")?.addEventListener("input", event => { if (state.chirpDraft) state.chirpDraft.reference = event.target.value; });
   document.getElementById("language-select")?.addEventListener("change", (event) => {
     state.locale = normalizeLocale(event.target.value);
     saveLocale(state.locale);
@@ -2244,7 +2325,22 @@ async function handleAction(event) {
     } else if (action === "baseline") {
       await toggleActiveTreatment("baseline");
     } else if (action === "chirp") {
-      await toggleActiveTreatment("chirp");
+      if (!activeDataset() || !activeFolder()) return;
+      state.chirpDraft = chirpDialogDefaults(activeDataset(), activeFolder());
+      state.modal = "chirp-hint"; render();
+    } else if (action === "disable-chirp") {
+      const scope = document.getElementById("chirp-scope")?.value ?? "dataset";
+      state.modal = null;
+      await applyChirpAction(false, undefined, scope);
+    } else if (action === "confirm-chirp") {
+      const input = document.getElementById("chirp-zero-time");
+      if (!input || input.value.trim() === "" || !Number.isFinite(input.valueAsNumber)) { input?.reportValidity(); return; }
+      const hint = input.valueAsNumber;
+      const scope = document.getElementById("chirp-scope")?.value ?? "dataset";
+      const reference = document.getElementById("chirp-reference");
+      if (!reference || reference.value.trim() === "" || !Number.isFinite(reference.valueAsNumber)) { reference?.reportValidity(); return; }
+      state.modal = null;
+      await applyChirpAction(true, hint, scope, reference.valueAsNumber);
     } else if (action === "reset-dataset") {
       const dataset = activeDataset();
       const folder = activeFolder();
@@ -2629,9 +2725,11 @@ async function importDataFiles(event, targetFolderId = null) {
       });
     }
 
-    let analyses = parsed.map((dataset) => Parser.cloneAnalysisDataset(dataset.baseAnalysis));
-    if (folder.treatments?.baseline) analyses = analyses.map((analysis) => Parser.applyBaselineCorrection(analysis));
-    if (folder.treatments?.chirp) analyses = Parser.applySharedChirpCorrection(analyses);
+    const analyses = parsed.map(dataset => Parser.applyAnalysisTreatments(dataset.baseAnalysis, {
+      baseline: folder.treatments?.baseline, chirp: folder.treatments?.chirp,
+      approximateZeroTimePs: folder.chirpZeroTimePs,
+      referenceWavelength: folder.chirpReferenceWavelength,
+    }));
     const datasets = parsed.map((dataset, index) => ({ ...dataset, analysis: analyses[index] }));
 
     if (!existingFolder) {
@@ -2649,6 +2747,7 @@ async function importDataFiles(event, targetFolderId = null) {
     state.compare.selectedIds = state.datasets.map((dataset) => dataset.id);
     ensureCompareStyles();
     markDirty();
+    return treatmentReviewItems(datasets);
   }, targetFolderId
     ? `${files.length} dataset${files.length === 1 ? "" : "s"} imported into the selected folder with its stored range and treatments. Original CSV text or UFS bytes are preserved.`
     : `${files.length} dataset${files.length === 1 ? "" : "s"} imported into one new folder. Original CSV text or UFS bytes are preserved.`);
@@ -2656,14 +2755,45 @@ async function importDataFiles(event, targetFolderId = null) {
   state.importTargetFolderId = null;
 }
 
+let replacementInProgress = false;
+async function confirmProjectReplacement() {
+  if (replacementInProgress) return false;
+  replacementInProgress = true;
+  try {
+    return await protectUnsavedWork({
+      dirty: state.project.dirty,
+      decide: chooseUnsavedAction,
+      save: saveProject,
+    });
+  } finally {
+    replacementInProgress = false;
+  }
+}
+
+function chooseUnsavedAction() {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "unsaved-dialog";
+    dialog.innerHTML = `<form method="dialog"><h2>Unsaved changes</h2><p>Save the current project before continuing?</p><div class="unsaved-actions"><button value="cancel">Cancel</button><button value="discard">Discard</button><button value="save">Save</button></div></form>`;
+    localizeDom(dialog, state.locale);
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => { const result = dialog.returnValue; dialog.remove(); resolve(result || "cancel"); }, { once: true });
+    dialog.showModal();
+  });
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!isTauriRuntime() && state.project.dirty) { event.preventDefault(); event.returnValue = ""; }
+});
+
 async function openProjectFile(event) {
   const file = event.target.files?.[0];
-  if (!file) return;
+  event.target.value = "";
+  if (!file || !(await confirmProjectReplacement())) return;
   await runJob("Opening project", "open-project", async () => {
     const bytes = new Uint8Array(await file.arrayBuffer());
     loadProjectBytes(bytes, file.name, file.name);
   }, `${file.name} opened with treated datasets and analysis state.`);
-  event.target.value = "";
 }
 
 function loadProjectBytes(bytes, fileName, projectPath = fileName) {
@@ -2680,15 +2810,7 @@ function loadProjectBytes(bytes, fileName, projectPath = fileName) {
 
 async function openProjectPath(projectPath) {
   if (!projectPath || !isTauriRuntime()) return false;
-  if (state.project.dirty && state.datasets.length) {
-    state.notice = {
-      kind: "warning",
-      title: "Current project has unsaved changes",
-      message: "Save the current project before opening a .sflproj from Finder or File Explorer.",
-    };
-    render();
-    return false;
-  }
+  if (!(await confirmProjectReplacement())) return false;
   const fileName = String(projectPath).split(/[\\/]/).at(-1) || "SpecFlowLab project.sflproj";
   return runJob("Opening project", "open-project", async () => {
     const payload = await invoke("read_project_file", { path: projectPath });
@@ -2722,7 +2844,7 @@ function readRangeControls() {
   return range;
 }
 
-function applyRangeToFolder(folderId, nextRange) {
+async function applyRangeToFolder(folderId, nextRange) {
   const folder = state.folders.find((item) => item.id === folderId);
   const targets = folderDatasets(folderId);
   if (!folder || !targets.length) throw new Error("The active dataset folder is empty.");
@@ -2742,30 +2864,30 @@ function applyRangeToFolder(folderId, nextRange) {
   });
   state.datasets = updated;
   folder.range = { ...nextRange };
-  rebuildTreatments(folderId);
+  const reviews = await rebuildTreatments(folderId);
   clearPlotZooms();
   clampSelections();
   markDirty();
+  return reviews;
 }
 
-function rebuildTreatments(folderId, affectedDatasetIds = null) {
+async function rebuildTreatments(folderId, affectedDatasetIds = null) {
   const folder = state.folders.find((item) => item.id === folderId);
   const affected = affectedDatasetIds ? new Set(affectedDatasetIds) : null;
   const targets = folderDatasets(folderId).filter((dataset) => !affected || affected.has(dataset.id));
   if (!folder || !targets.length) return;
-  let analyses = targets.map((dataset) => {
-    let analysis = Parser.cloneAnalysisDataset(dataset.baseAnalysis);
-    if (treatmentEnabled(dataset, folder, "baseline")) analysis = Parser.applyBaselineCorrection(analysis);
-    return analysis;
-  });
-  const chirpIndexes = targets
-    .map((dataset, index) => treatmentEnabled(dataset, folder, "chirp") ? index : -1)
-    .filter((index) => index >= 0);
-  if (chirpIndexes.length) {
-    const corrected = Parser.applySharedChirpCorrection(chirpIndexes.map((index) => analyses[index]));
-    chirpIndexes.forEach((analysisIndex, correctedIndex) => {
-      analyses[analysisIndex] = corrected[correctedIndex];
+  const analyses = [];
+  for (const dataset of targets) {
+    if (state.job) {
+      state.job.detail = `${analyses.length + 1} / ${targets.length}: ${datasetDisplayName(dataset)}`;
+      render();
+      await nextFrame();
+    }
+    const baseline = treatmentEnabled(dataset, folder, "baseline");
+    const result = Parser.applyAnalysisTreatments(dataset.baseAnalysis, {
+      baseline, chirp: treatmentEnabled(dataset, folder, "chirp"), approximateZeroTimePs: chirpHintForDataset(dataset, folder), referenceWavelength: chirpReferenceForDataset(dataset, folder),
     });
+    analyses.push(result);
   }
   const analysisById = new Map(targets.map((dataset, index) => [dataset.id, analyses[index]]));
   state.datasets = state.datasets.map((dataset) => analysisById.has(dataset.id)
@@ -2774,12 +2896,31 @@ function rebuildTreatments(folderId, affectedDatasetIds = null) {
   clearPlotZooms();
   clampSelections();
   markDirty();
+  return treatmentReviewItems(targets.map((dataset, i) => ({ ...dataset, analysis: analyses[i] })));
+}
+
+function treatmentReviewItems(datasets) {
+  return datasets.filter(dataset => analysisNeedsReview(dataset.analysis)).map(dataset => ({
+    status: "review-required",
+    reason: `${datasetDisplayName(dataset)}: ${(treatmentIssue(dataset.analysis, "Chirp") ?? treatmentIssue(dataset.analysis, "Baseline"))?.reason ?? "Review preprocessing."}`,
+  }));
+}
+
+async function applyChirpAction(enabled, approximateZeroTimePs, scope, referenceWavelength) {
+  const folder = activeFolder(), dataset = activeDataset();
+  if (!folder || !dataset) return;
+  const plan = configureChirpTreatment(state.datasets, folder, { datasetId: dataset.id, scope, enabled, approximateZeroTimePs, referenceWavelength });
+  state.folders = state.folders.map(item => item.id === folder.id ? plan.folder : item);
+  state.datasets = plan.datasets;
+  await runJob(enabled ? "Applying chirp" : "Removing chirp", "chirp", () => rebuildTreatments(folder.id, plan.affectedIds), scope === "dataset"
+    ? "Chirp updated for this dataset. Other datasets and their fits were not changed."
+    : "Chirp updated for the current folder. Each dataset was fitted independently.");
 }
 
 async function toggleActiveTreatment(kind) {
   const folder = activeFolder();
   const dataset = activeDataset();
-  if (!folder || !dataset || !["baseline", "chirp"].includes(kind)) return;
+  if (!folder || !dataset || kind !== "baseline") return;
   const previousStates = snapshotTreatmentStates(folderDatasets(folder.id), folder);
   if (folder.treatments[kind] && dataset.treatmentOverrides?.[kind]) {
     dataset.treatmentOverrides = { ...(dataset.treatmentOverrides ?? {}), [kind]: false };
@@ -2822,6 +2963,7 @@ function resetSingleDataset(datasetId, folderId) {
       analysis: Parser.cloneAnalysisDataset(baseAnalysis),
       fit: null,
       treatmentOverrides: { ...(dataset.treatmentOverrides ?? {}), baseline: true, chirp: true },
+      chirpSettings: null,
     };
   });
   clearPlotZooms();
@@ -2843,9 +2985,13 @@ function resetAnalysis(folderId) {
       analysis: Parser.cloneAnalysisDataset(baseAnalysis),
       fit: null,
       treatmentOverrides: { baseline: false, chirp: false },
+      chirpSettings: null,
     };
   });
   folder.treatments = { baseline: false, chirp: false };
+  folder.chirpFitRange = null;
+  folder.chirpZeroTimePs = null;
+  folder.chirpReferenceWavelength = null;
   folder.range = commonRangeFromAnalyses(folderDatasets(folderId).map((dataset) => dataset.baseAnalysis));
   clearPlotZooms();
   clampSelections();
@@ -3129,7 +3275,7 @@ function projectArchiveDefaultName() {
 }
 
 async function saveProject() {
-  await runJob("Saving project", "save", async () => {
+  return await runJob("Saving project", "save", async () => {
     const archive = createProjectArchive(serializeProject());
     const defaultName = projectArchiveDefaultName();
     const path = await saveBinaryWithDialog(archive, defaultName, "project", "application/zip");
@@ -3801,11 +3947,10 @@ async function runJob(label, kind, work, successMessage) {
     if (result === false || result === null) {
       state.notice = { kind: "info", title: "Cancelled", message: "No file or project state was changed." };
     } else {
-      state.notice = {
-        kind: "success",
-        title: "Completed",
-        message: typeof successMessage === "function" ? successMessage(result) : successMessage,
-      };
+      const reviews = Array.isArray(result) ? result.filter(item => item?.status === "review-required") : [];
+      state.notice = reviews.length
+        ? { kind: "warning", title: "Review required", message: reviews.map(item => item.reason).join(" ") }
+        : { kind: "success", title: "Completed", message: typeof successMessage === "function" ? successMessage(result) : successMessage };
     }
     return result;
   } catch (error) {
@@ -4084,7 +4229,7 @@ function paintCanvases() {
     paintHeatmap(document.getElementById("fit-residual"), {
       ...dataset.analysis,
       matrix: dataset.fit.residualMatrix,
-    }, { crosshair: false });
+    }, { crosshair: false, chirpOverlay: false });
   }
   paintComparisonSlice(document.getElementById("compare-kinetics"), "kinetics");
   paintComparisonSlice(document.getElementById("compare-spectrum"), "spectrum");
@@ -4233,9 +4378,34 @@ function paintHeatmap(canvas, analysis, options = {}) {
       ctx.fillRect(x0, y0, Math.max(1, x1 - x0 + 0.5), Math.max(1, y1 - y0 + 0.5));
     });
   });
+  const chirpOverlay = options.chirpOverlay === false ? null : chirpOverlaySegments(analysis, xExtent, yExtent);
+  if (chirpOverlay) {
+    const drawSegments = (segments, color, dash) => {
+      for (const [stroke, width] of [["#101820", 4.5], [color, 2]]) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = width;
+        ctx.setLineDash(dash);
+        ctx.beginPath();
+        segments.forEach(([a, b]) => {
+          ctx.moveTo(scale(a.x, xExtent, [plot.left, plot.right]), scale(timeTransform.toFraction(a.y), [0, 1], [plot.top, plot.bottom]));
+          ctx.lineTo(scale(b.x, xExtent, [plot.left, plot.right]), scale(timeTransform.toFraction(b.y), [0, 1], [plot.top, plot.bottom]));
+        });
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    };
+    drawSegments(chirpOverlay.raw, "#ffffff", [6, 4]);
+    drawSegments(chirpOverlay.predicted, "#ffad55", [2, 4]);
+    drawSegments(chirpOverlay.guide, "#ffea00", []);
+  }
   ctx.restore();
 
   drawHeatmapAxes(ctx, plot, analysis, timeTransform, xExtent, yExtent);
+  if (chirpOverlay) drawLegend(ctx, [
+    { label: uiText("Chirp curve (input time)"), color: "#303b40", dash: [6, 4] },
+    ...(chirpOverlay.predicted.length ? [{ label: uiText("Predicted chirp (outside fitting range)"), color: "#a65b00", dash: [2, 4] }] : []),
+    { label: uiText("Target t₀"), color: "#a77700" },
+  ], plot, 290);
   plotGeometry.set(canvas, { type: "heatmap", plot, plotKey, xExtent, yExtent, timeTransform });
   if (options.crosshair !== false) {
     const wavelength = analysis.spectralAxis[clamp(state.selectedWavelengthIndex, 0, analysis.spectralAxis.length - 1)];
@@ -4510,7 +4680,7 @@ function paintFeatureTimeMap(canvas, compressed, options = {}) {
     left: Math.max(178, Math.round(width * 0.21)),
     right: Math.max(230, Math.round(width * 0.975)),
     top: 16,
-    bottom: height - 50,
+    bottom: height - 60,
   };
   const timeExtent = [compressed.timeAxis[0], compressed.timeAxis.at(-1)];
   const timeTransform = makeTimeTransform(timeExtent);
@@ -4644,7 +4814,7 @@ function paintExpandedPlot() {
   } else if (state.expandedPlot === "modal-components") {
     paintDisplayedComponentSpectra(canvas, dataset, state.fitting.spectrumMode);
   } else if (state.expandedPlot === "fit-residual" && dataset.fit?.residualMatrix) {
-    paintHeatmap(canvas, { ...dataset.analysis, matrix: dataset.fit.residualMatrix }, { crosshair: false });
+    paintHeatmap(canvas, { ...dataset.analysis, matrix: dataset.fit.residualMatrix }, { crosshair: false, chirpOverlay: false });
   } else if (state.expandedPlot === "compare-kinetics") {
     paintComparisonSlice(canvas, "kinetics");
   } else if (state.expandedPlot === "compare-spectrum") {
@@ -4672,7 +4842,7 @@ function drawLinePlot(canvas, series, xMode, options = {}) {
     left,
     right,
     top,
-    bottom: height - Math.max(50, Math.round(height * 0.088)),
+    bottom: height - Math.max(60, options.bottomPadding ?? 0, Math.round(height * 0.088)),
   };
   const plotKey = options.plotKey ?? canvas.dataset.plotKey;
   const zoom = state.plotZooms[plotKey];
@@ -4879,9 +5049,9 @@ function drawHeatmapAxes(ctx, plot, analysis, timeTransform, xExtent, yExtent) {
   ctx.restore();
 }
 
-function drawLegend(ctx, series, plot) {
+function drawLegend(ctx, series, plot, maxWidth = 210) {
   const rows = series.slice(0, 12);
-  const boxWidth = Math.min(210, Math.max(120, ...rows.map((item) => item.label.length * 6.4 + 48)));
+  const boxWidth = Math.min(maxWidth, plot.right - plot.left - 16, Math.max(120, ...rows.map((item) => item.label.length * 6.4 + 48)));
   const boxHeight = rows.length * 18 + 12;
   const x = plot.right - boxWidth - 8;
   const y = plot.top + 8;
@@ -4940,7 +5110,8 @@ function heatmapPlotArea(width, height) {
   const left = Math.max(64, Math.round(width * 0.072));
   const right = Math.max(left + 80, Math.round(width * 0.976));
   const top = Math.max(12, Math.round(height * 0.028));
-  const bottom = Math.max(top + 80, Math.round(height * 0.906));
+  // Keep room for tick labels and the axis title even on compact canvases.
+  const bottom = Math.min(Math.round(height * 0.906), height - 56);
   return { left, right, top, bottom };
 }
 
@@ -5610,6 +5781,7 @@ function projectStateLabel() {
 }
 
 function datasetStateLabel(dataset) {
+  if (analysisNeedsReview(dataset.analysis)) return "Review required";
   if (dataset.fit) return dataset.fit.irfLimited?.some(Boolean) ? "Fit available, unresolved" : "Fit available";
   if (isTreated(dataset)) return "Treated";
   return "Imported";
@@ -5624,13 +5796,14 @@ function irfLimitedCount(dataset) {
 }
 
 function isTreated(dataset) {
-  return Boolean(dataset?.analysis?.provenance?.length);
+  return isAnalysisTreated(dataset?.analysis);
 }
 
 function treatmentLabel(folder = activeFolder(), dataset = activeDataset()) {
   const labels = [];
-  if (treatmentEnabled(dataset, folder, "baseline")) labels.push("Baseline");
-  if (treatmentEnabled(dataset, folder, "chirp")) labels.push("Chirp");
+  if (treatmentStatus(dataset?.analysis, "Baseline") === "applied") labels.push("Baseline");
+  if (treatmentStatus(dataset?.analysis, "Chirp") === "applied") labels.push("Chirp");
+  if (analysisNeedsReview(dataset?.analysis)) labels.push("Review required");
   return labels.length ? labels.join(" + ") : "Analysis range";
 }
 
@@ -5763,6 +5936,25 @@ document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
 document.addEventListener("keydown", (event) => {
+  const modal = app.querySelector('.expanded-shell') || app.querySelector('.modal-shell');
+  if (modal && event.key === 'Tab') {
+    const selector = 'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex]:not([tabindex="-1"])';
+    const popover = app.querySelector('.signature-editor-popover');
+    const controls = [...modal.querySelectorAll(selector), ...(popover?.querySelectorAll(selector) ?? [])].filter((el) => el.getClientRects().length);
+    if (!controls.length) { event.preventDefault(); return; }
+    const index = controls.indexOf(document.activeElement);
+    if (event.shiftKey && index <= 0) { event.preventDefault(); controls.at(-1).focus(); }
+    else if (!event.shiftKey && (index === -1 || index === controls.length - 1)) { event.preventDefault(); controls[0].focus(); }
+  }
+  if (modal && event.key === 'Escape' && state.signatureEditor) {
+    event.preventDefault();
+    app.querySelector('.signature-editor-popover [data-action="close-signature-editor"]')?.click();
+    return;
+  }
+  if (modal && event.key === 'Escape' && !state.captureMode) {
+    const close = modal.querySelector('[data-action="close-expanded-plot"], [data-action="close-modal"]');
+    if (close) { event.preventDefault(); close.click(); return; }
+  }
   if (event.key !== "Escape" || !state.captureMode) return;
   state.captureMode = false;
   render();
@@ -5786,6 +5978,10 @@ render();
 (async () => {
   if (!isTauriRuntime()) return;
   try {
+    await getCurrentWindow().onCloseRequested(async (event) => {
+      event.preventDefault();
+      if (await confirmProjectReplacement()) await getCurrentWindow().destroy();
+    });
     await listen("project-open-requested", () => openPendingDesktopProject().catch(showError));
     await openPendingDesktopProject();
   } catch (error) {

@@ -46,6 +46,7 @@ export function createProjectArchive(project) {
       projectLabel: dataset.projectLabel,
       sampleNote: dataset.sampleNote ?? "",
       treatmentOverrides: dataset.treatmentOverrides ?? null,
+      chirpSettings: dataset.chirpSettings ?? null,
       evidenceMetadata: dataset.evidenceMetadata ?? null,
       merge: dataset.merge ?? null,
       source,
@@ -117,6 +118,7 @@ export function readProjectArchive(bytes) {
     projectLabel: dataset.projectLabel,
     sampleNote: dataset.sampleNote ?? "",
     treatmentOverrides: dataset.treatmentOverrides ?? null,
+    chirpSettings: dataset.chirpSettings ?? null,
     evidenceMetadata: dataset.evidenceMetadata ?? null,
     merge: dataset.merge ?? null,
     archivedSource: {
@@ -205,6 +207,7 @@ export function hydrateProjectArchive(project, parser) {
         projectLabel: dataset.projectLabel,
         sampleNote: dataset.sampleNote ?? "",
         treatmentOverrides: dataset.treatmentOverrides ?? null,
+        chirpSettings: dataset.chirpSettings ?? null,
         evidenceMetadata: dataset.evidenceMetadata ?? null,
         merge: dataset.merge ?? null,
         source,
